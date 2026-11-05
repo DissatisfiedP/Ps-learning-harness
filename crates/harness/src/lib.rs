@@ -179,10 +179,7 @@ impl Harness {
             .messages
             .iter()
             .filter(|m| !m.content.trim().is_empty())
-            .map(|m| Message {
-                role: m.role,
-                content: m.content.clone(),
-            })
+            .map(|m| Message::text(m.role, m.content.clone()))
             .collect();
         let req = ChatRequest {
             model: &choice.model,
@@ -190,6 +187,8 @@ impl Harness {
             messages: &history,
             max_tokens: MAX_TOKENS,
             effort: choice.effort.as_deref(),
+            tools: &[],
+            cache_key: Some(session_id),
         };
 
         let (stop_tx, mut stop_rx) = oneshot::channel();
@@ -221,7 +220,7 @@ impl Harness {
 
         let ending = match outcome {
             Some(Ok(done)) => match done.stop {
-                StopReason::End => None,
+                StopReason::End | StopReason::ToolUse => None,
                 StopReason::MaxTokens => Some(Ending::MaxTokens),
                 StopReason::Refusal => Some(Ending::Refusal),
             },

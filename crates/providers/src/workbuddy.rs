@@ -19,7 +19,8 @@ use serde_json::Value;
 
 use crate::catalog::insert;
 use crate::{
-    error_from_body, jwt_claims, Client, Credential, Endpoint, ModelInfo, ProviderError, Wire,
+    error_from_body, jwt_claims, Capabilities, Client, Credential, Endpoint, ModelInfo,
+    ProviderError, Wire,
 };
 
 pub const HOST: &str = "https://www.workbuddy.ai";
@@ -372,6 +373,7 @@ fn parse_models(data: &Value) -> Vec<ModelInfo> {
                 efforts,
                 default_effort,
                 cost_label: m.get("credits").and_then(Value::as_str).map(str::to_owned),
+                capabilities: Capabilities::default(),
             };
             Some((
                 m.get("isDefault").and_then(Value::as_bool) == Some(true),

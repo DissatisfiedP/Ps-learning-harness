@@ -53,10 +53,7 @@ async fn serve(
 }
 
 fn messages() -> Vec<Message> {
-    vec![Message {
-        role: Role::User,
-        content: "teach me limits".into(),
-    }]
+    vec![Message::text(Role::User, "teach me limits")]
 }
 
 async fn run(
@@ -70,6 +67,8 @@ async fn run(
         messages: &msgs,
         max_tokens: 512,
         effort: Some("high"),
+        tools: &[],
+        cache_key: None,
     };
     let cred = Credential::ApiKey { key: "k".into() };
     let ep = id.endpoint(&cred, Some(base), "conv").unwrap();

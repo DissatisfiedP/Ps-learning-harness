@@ -19,6 +19,8 @@ use sse::{SseDecoder, SseEvent};
 pub use catalog::{Credential, CredentialKind, ProviderId, ProviderSpec};
 pub use reqwest::Client;
 
+// ---- Core types ---------------------------------------------------------
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Wire {
@@ -37,10 +39,72 @@ pub enum Role {
     Assistant,
 }
 
+/// A function tool the model may call. `input_schema` is a JSON Schema object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+/// A call the assistant made. `arguments` is parsed JSON, or `Value::String(raw)`
+/// when the streamed arguments did not parse (answered as an error tool result).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// Message content is a sequence of typed blocks so provider-native blocks
+/// (Anthropic `thinking` with a signature, Responses `reasoning` items) can be
+/// replayed unchanged across tool loops.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    /// Assistant message: a call the model made.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    /// User/assistant message: the result of executing a call.
+    ToolResult {
+        call_id: String,
+        content: String,
+        is_error: bool,
+    },
+    /// Opaque provider block that must be replayed verbatim to the same wire.
+    /// Dropped when the next request targets a different wire.
+    Native {
+        wire: Wire,
+        raw: serde_json::Value,
+    },
+}
+
+impl ContentBlock {
+    /// Convenience for the common single-text message.
+    pub fn text(s: impl Into<String>) -> Self {
+        ContentBlock::Text { text: s.into() }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
-    pub content: String,
+    pub content: Vec<ContentBlock>,
+}
+
+impl Message {
+    pub fn text(role: Role, s: impl Into<String>) -> Self {
+        Message {
+            role,
+            content: vec![ContentBlock::text(s)],
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +115,10 @@ pub struct ChatRequest<'a> {
     pub max_tokens: u32,
     /// Reasoning effort (`low`/`medium`/`high`/…); sent only when set.
     pub effort: Option<&'a str>,
+    /// Tools offered to the model. Empty means none are sent.
+    pub tools: &'a [ToolSpec],
+    /// Session id used for prefix caching where the wire accepts it.
+    pub cache_key: Option<&'a str>,
 }
 
 /// A fully resolved request target.
@@ -79,14 +147,31 @@ pub enum StopReason {
     End,
     MaxTokens,
     Refusal,
+    /// The model wants to call tools; `Completion::tool_calls` holds them.
+    ToolUse,
 }
 
 /// How a turn ended. The text itself arrives only through [`StreamEvent`]s,
 /// so callers own the single copy of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Completion {
     pub stop: StopReason,
     pub usage: Usage,
+    pub tool_calls: Vec<ToolCall>,
+    /// Opaque native blocks (e.g. Anthropic thinking signatures, Responses
+    /// reasoning items) that must be replayed with the assistant message.
+    pub native: Vec<ContentBlock>,
+}
+
+/// Capabilities a catalog may assert. `None` means "unverified" (unknown),
+/// never "missing"; the UI words it that way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Capabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
 }
 
 /// Model entry shown in the picker.
@@ -108,8 +193,16 @@ pub struct ModelInfo {
     /// Billing multiplier label as the provider reports it (WorkBuddy credits).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_label: Option<String>,
+    /// Catalog-asserted capabilities. Unset fields are "unverified".
+    #[serde(default, skip_serializing_if = "Capabilities::is_empty")]
+    pub capabilities: Capabilities,
 }
 
+impl Capabilities {
+    fn is_empty(&self) -> bool {
+        self.tool_calls.is_none() && self.vision.is_none()
+    }
+}
 impl ModelInfo {
     pub fn named(id: &str) -> Self {
         Self {
@@ -121,6 +214,7 @@ impl ModelInfo {
             efforts: Vec::new(),
             default_effort: None,
             cost_label: None,
+            capabilities: Capabilities::default(),
         }
     }
 }
@@ -162,7 +256,14 @@ pub async fn stream_chat(
     match endpoint.wire {
         Wire::OpenaiChat => {
             let body = openai_chat::body(req);
-            drive(client, endpoint, &body, openai_chat::Decoder, on_event).await
+            drive(
+                client,
+                endpoint,
+                &body,
+                openai_chat::Decoder::default(),
+                on_event,
+            )
+            .await
         }
         Wire::OpenaiResponses => {
             let body = openai_responses::body(req);
@@ -177,16 +278,25 @@ pub async fn stream_chat(
         }
         Wire::AnthropicMessages => {
             let body = anthropic::body(req);
-            drive(client, endpoint, &body, anthropic::Decoder, on_event).await
+            drive(
+                client,
+                endpoint,
+                &body,
+                anthropic::Decoder::default(),
+                on_event,
+            )
+            .await
         }
     }
 }
-
-/// Forwards deltas and records how the turn ends.
+/// Forwards deltas and records how the turn ends. Wire decoders accumulate
+/// tool calls (and opaque native blocks) here; `finish` drains them.
 pub(crate) struct Collector<'f> {
     on_event: &'f mut (dyn FnMut(StreamEvent<'_>) + Send),
     usage: Usage,
     stop: Option<StopReason>,
+    pub tool_calls: Vec<ToolCall>,
+    pub native: Vec<ContentBlock>,
 }
 
 impl Collector<'_> {
@@ -209,12 +319,20 @@ impl Collector<'_> {
     pub fn stop(&mut self, reason: StopReason) {
         self.stop = Some(reason);
     }
+    pub fn has_stop(&self) -> bool {
+        self.stop.is_some()
+    }
+    /// Force the stop reason to ToolUse when the wire reported tool calls.
+    pub fn tool_use(&mut self) {
+        self.stop = Some(StopReason::ToolUse);
+    }
+    pub fn push_native(&mut self, block: ContentBlock) {
+        self.native.push(block);
+    }
 }
-
 fn saturate(n: u64) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
-
 pub(crate) enum Flow {
     Continue,
     Done,
@@ -254,6 +372,8 @@ async fn drive(
         on_event,
         usage: Usage::default(),
         stop: None,
+        tool_calls: Vec::new(),
+        native: Vec::new(),
     };
     let mut sse = SseDecoder::default();
     let mut events = Vec::new();
@@ -283,6 +403,8 @@ fn finish(out: Collector) -> Result<Completion, ProviderError> {
     Ok(Completion {
         stop,
         usage: out.usage,
+        tool_calls: out.tool_calls,
+        native: out.native,
     })
 }
 

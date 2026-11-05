@@ -11,6 +11,24 @@
 | Dev server | None. The old `crates/container` HTTP server was removed. | R1 forbids a separate server process. Its logic duplicated the Tauri commands. |
 | Keyless web search | Wikipedia search API. | DuckDuckGo's HTML endpoint serves its bot page to Rust HTTP clients. Mojeek serves a captcha. |
 
+## Decisions for the agent-runtime build (docs/build-prompt.md)
+
+These settle what the work order left open. Recorded before code so the choices are auditable.
+
+| Decision | Chosen | Why |
+|---|---|---|
+| Prompt bundling | `build.rs` walks `prompts/**` and generates a `path -> &'static str` map (via `include_str!`). | `include_dir` is not in the offline crate cache; a build script is dependency-free and gives a compile-time map. |
+| Plugin/job frontmatter parse | Tiny hand-rolled YAML frontmatter parser for the flat `key: value` and `key: [a, b]` shapes used in `plugins/*.md`. | The manifests are flat; keeps the composer dependency-light. |
+| HTML→text for `page_fetch` | Small in-tree stripper (drop script/style, tags → text, collapse whitespace). | `html2text` is not in the offline crate cache. |
+| Streaming text display | `Message` content is `Vec<ContentBlock>`; the harness builds replay blocks, and the UI streams only `Text` deltas. | Content blocks are required by M1; the runtime owns the single copy of text. |
+| Cross-wire `Native` blocks | Dropped in `body()` when `block.wire != endpoint.wire`. | Spec: replay unchanged only to the same wire. |
+| `session_state` `learner_state` | Renders `no graph yet` (no graph built, out of scope). | Out-of-scope seam, §4. |
+| Per-session locking | `tokio::sync::Mutex` per session in a `HashMap` guarded by a `std::sync::Mutex`, held only around non-await state mutation; never across an `.await`. | M7.8: no global lock, no lock across await. |
+| Job delivery | Queued `job` result ops; a `wake` tutor turn starts only when idle and no answer is pending. | M4 delivery rule; keeps ordering deterministic. |
+| Legacy sessions | Any session whose op log has no `phase` op is read-only. `learn.md` deleted; `practice.md` kept (Practice mode untouched). | M4 clean cutover. |
+| `tracing` | Added as a dependency (cached); spans at `debug` for turn/tool/job. No subscriber is installed by the library. | M7.9. |
+| Capability values | `capabilities` fields are `Option<bool>`; catalogs leave `None` = unverified. | M1/M2 warnings show "unverified". |
+
 ## Layout
 
 ```
