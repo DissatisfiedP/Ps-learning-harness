@@ -6,7 +6,7 @@ Every agent prompt in the harness, how each prompt is assembled, which model rol
 - §4.21: research;
 - §4.22: model roles.
 
-**Status.** Only `learn.md` and `practice.md` are live today. `crates/harness/src/lib.rs::prompt()` bundles them, and a file at `<repo>/prompts/<name>.md` overrides the bundled copy. Everything else in this directory is the target set for the phase state machine (`docs/agent-system-plan.md`, "Not built yet"). When that lands, `learn.md` is deleted and the loader composes the files below. `practice.md` is deleted when the coach lands.
+**Status.** The tutor (measure, teach, close), the planner, the researcher job and compaction are live: `crates/harness/build.rs` bundles every file here, `src/prompts.rs` composes them as described below, and a file at `<repo>/prompts/<same relative path>` overrides the bundled copy. `practice.md` still drives Practice mode on its own and is deleted when the coach lands. The coach, the other jobs and the plugin bodies are the target set (`docs/agent-system-plan.md`, "Not built yet").
 
 ## Principles
 
@@ -117,11 +117,11 @@ Tools are scoped by agent and phase. A tool that is absent is never described to
 | Tool | Who / phase | Arguments → result |
 |---|---|---|
 | `choice_ask` | tutor (all phases) | `{ question, options[], recommended? }` → a choice or free text |
-| `question_ask` | tutor: measure (`probe`), teach (`predict`, `check`) | `{ role, nodeId?, strand?, format: free \| choice, prompt, options?, answer, explanation? }` → `{ answer, thinking, thinkingWhileReading?, confidence?, dontKnow, verdict? }`. In teach, `nodeId` must be in the current section |
+| `question_ask` | tutor: measure (`probe`), teach (`predict`, `check`) | `{ role, nodeId?, strand?, format: free \| choice, prompt, options?, answer, explanation? }` → `{ questionId, answer, thinking, thinkingWhileReading?, confidence?, dontKnow, verdict? }`. `questionId` is the id `verdict_record` and `probe_done.evidence` use. In teach, `nodeId` must be in the current section |
 | `verdict_record` | tutor: measure, teach | `{ questionId, verdict: correct \| partial \| wrong, note }` |
 | `research_request` | tutor, coach (all phases) | `{ kind: verify \| scope, question, context }` or `{ kind: source, path, question }` → ack; the brief arrives as a message. Several can run at once |
 | `research` | planner | Same arguments; **blocks** and returns the brief as the tool result |
-| `file_find`, `file_read` | tutor, planner, coach | Read-only access to the learner's files |
+| `file_find`, `file_read` | tutor, planner, coach | Read-only access to the learner's files: `file_find { pattern }` (name fragment or glob) → paths; `file_read { path, lines? }` → text (≤ 256 KiB) |
 | `graph_search` | tutor, planner, graph builder | `{ query, scope: nodes \| topics }` (absent until the graph exists) |
 | `goal_set` | tutor: measure | See `tutor/phases/measure.md`; starts the `scope` job |
 | `probe_done` | tutor: measure | See `measure.md`; refused while a question is open or before the scope brief has arrived. On success the planner runs |
@@ -130,7 +130,7 @@ Tools are scoped by agent and phase. A tool that is absent is never described to
 | `plan_change_request` | tutor: teach | `{ reason: learner \| missing-foundation \| ahead \| detour \| probe-wrong, evidence, learnerWords? }` → ack; the planner's answer arrives as a message |
 | `plugin_request` | tutor: teach | `{ plugin, reason }` → granted or refused (platform, unknown id, limit) |
 | `section_done` | tutor: teach | `{ sectionId, evidence, carryOver }`; refused while a section node lacks a passing check |
-| `session_end` | tutor: teach | `{}` |
+| `session_end` | tutor: teach, close | `{}`. After the last `section_done` the phase is Close and the tutor writes the close, then calls it |
 | `problem_commit`, `problem_conclude` | coach | See `coach/base.md` |
 | `audit_submit`, `necessity_submit` | problem checker | See `jobs/problem-checker.md` |
 | `web_search`, `page_fetch`, `source_outline`, `source_search`, `source_read`, `source_page_image`, `brief_submit` | researcher | See `jobs/researcher.md`; search via `crates/research-search` (Brave → Wikipedia) |
