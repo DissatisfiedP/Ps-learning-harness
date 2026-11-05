@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Main window: app commands only; links open through the open_external command.","local":true,"windows":["main"],"permissions":["core:default"]}}

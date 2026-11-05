@@ -1,0 +1,16 @@
+[package]
+name = "harness"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+providers = { path = "../providers" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ulid = "1"
+
+[lints]
+workspace = true

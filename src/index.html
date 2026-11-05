@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Learning Harness</title>
+  <link rel="stylesheet" href="./vendor/katex/katex.min.css" />
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="./vendor/katex/katex.min.js" defer></script>
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <div id="app" class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 3 2 8l10 5 8-4v6h2V8L12 3Z"/><path d="M6 11.2V16c0 1.7 2.7 3 6 3s6-1.3 6-3v-4.8l-6 3-6-3Z" opacity=".55"/></svg>
+        </span>
+        <span class="brand-name">Learning Harness</span>
+        <button class="icon-btn only-mobile" id="close-sidebar" type="button" aria-label="Close menu">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+
+      <button class="new-session" id="new-session" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        New session
+      </button>
+
+      <nav class="session-list" id="session-list" aria-label="Sessions"></nav>
+
+      <button class="sidebar-footer" id="open-settings" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+        <span class="footer-text">
+          <span>Settings</span>
+          <small id="model-label">No model selected</small>
+        </span>
+      </button>
+    </aside>
+    <div class="scrim only-mobile" id="scrim" hidden></div>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn only-mobile" id="open-sidebar" type="button" aria-label="Open menu">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div class="topbar-title">
+          <span class="mode-chip" id="session-mode" hidden></span>
+          <h1 id="session-title">New session</h1>
+        </div>
+        <button class="model-pill" id="model-pill" type="button" title="Change model">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="model-pill-text">Choose a model</span>
+        </button>
+      </header>
+
+      <section class="home" id="home">
+        <div class="home-inner">
+          <div class="segmented" role="tablist" aria-label="Mode" id="mode-toggle">
+            <button type="button" role="tab" data-mode="learn" aria-selected="true">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 5.5C4.5 4 8 4 12 6c4-2 7.5-2 10-.5V19c-2.5-1.5-6-1.5-10 .5-4-2-7.5-2-10-.5V5.5Z"/><path d="M12 6v13.5"/></svg>
+              Learn
+            </button>
+            <button type="button" role="tab" data-mode="practice" aria-selected="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg>
+              Practice
+            </button>
+          </div>
+          <h2 class="hero" id="hero">What do you want to learn?</h2>
+          <p class="hero-sub" id="hero-sub">The tutor finds what you already know first, then teaches one step at a time.</p>
+          <div class="notice" id="setup-notice" hidden>
+            <div>
+              <strong>Connect a model to start.</strong>
+              <span>Sign in with WorkBuddy or add an API key.</span>
+            </div>
+            <button class="btn primary" type="button" id="setup-button">Open settings</button>
+          </div>
+          <div class="composer-slot" id="home-composer-slot"></div>
+          <div class="suggestions" id="suggestions"></div>
+        </div>
+      </section>
+
+      <section class="conversation" id="conversation" hidden>
+        <div class="messages" id="messages" aria-live="polite"></div>
+        <div class="composer-dock" id="dock-composer-slot"></div>
+      </section>
+
+      <form class="composer" id="composer">
+        <textarea id="prompt" rows="1" placeholder="Describe a topic, a goal, or paste a problem…" aria-label="Message"></textarea>
+        <div class="composer-row">
+          <span class="composer-hint">Enter to send · Shift+Enter for a new line</span>
+          <button class="send" id="send" type="submit" aria-label="Send">
+            <svg class="icon-send" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            <svg class="icon-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <dialog class="settings" id="settings">
+    <form method="dialog" class="settings-head">
+      <h2>Settings</h2>
+      <button class="icon-btn" value="close" aria-label="Close">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </form>
+    <div class="settings-body">
+      <section class="settings-section">
+        <h3>Model</h3>
+        <p class="muted">Used for every tutor reply.</p>
+        <div class="model-form" id="model-form"></div>
+      </section>
+      <section class="settings-section">
+        <h3>Providers</h3>
+        <p class="muted">Keys and sign-ins stay on this device, outside your synced data.</p>
+        <div class="provider-list" id="provider-list"></div>
+      </section>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

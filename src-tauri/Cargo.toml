@@ -1,0 +1,20 @@
+[package]
+name = "harness-ui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "learning-harness"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+harness = { path = "../crates/harness" }
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde_json.workspace = true
+
+[lints]
+workspace = true
