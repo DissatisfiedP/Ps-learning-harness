@@ -391,6 +391,29 @@ select.input {
 .model-form .full { grid-column: 1 / -1; }
 .model-detail { font-size: 12.5px; color: var(--muted); }
 
+/* Model roles (§4.22). Each role card spans the full settings width. */
+.role-card {
+  padding: 14px 16px; border-radius: 13px;
+  border: 1px solid var(--border); background: var(--bg);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.role-card.required { border-color: rgba(110, 160, 255, 0.45); }
+.model-form > .roles-optional { grid-column: 1 / -1; }
+.roles-optional > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-2); padding: 8px 2px; }
+.roles-optional > .role-card { margin-bottom: 10px; }
+.role-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.role-title { font-size: 13.5px; flex: 1; }
+.role-title em { color: var(--muted); font-style: italic; }
+.chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-2); }
+.chip.req { border-color: var(--accent); color: var(--accent); }
+.chip.fallback { color: var(--muted); }
+.role-guidance { font-size: 12.5px; color: var(--muted); margin: 0; line-height: 1.5; }
+.role-usage { font-size: 12px; color: var(--muted); }
+.role-warnings { display: flex; flex-direction: column; gap: 3px; }
+.warn-line { font-size: 12px; color: #e0a44a; }
+.role-test { font-size: 12px; color: var(--ok); }
+.role-test.error { color: var(--danger, #e05a5a); }
+
 .provider-list { display: flex; flex-direction: column; gap: 10px; }
 .provider {
   padding: 12px 14px; border-radius: 13px;

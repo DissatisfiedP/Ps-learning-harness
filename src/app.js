@@ -100,13 +100,13 @@ function updateSendState() {
 
 function modelReady() {
   const { providers, settings } = state.config;
-  const m = settings.model;
+  const m = settings.roles?.tutor;
   return Boolean(m && providers.find((p) => p.id === m.provider)?.source);
 }
 
 function applyConfig(config) {
   state.config = config;
-  const m = config.settings.model;
+  const m = config.settings.roles?.tutor;
   const provider = config.providers.find((p) => p.id === m?.provider);
   const label = m ? `${m.model}${provider ? ` · ${provider.name}` : ''}` : 'Choose a model';
   els.modelPillText.textContent = label;

@@ -12,13 +12,13 @@ use std::time::Duration;
 
 use providers::workbuddy::{self, LoginStart};
 use providers::{
-    stream_chat, ChatRequest, Client, Credential, CredentialKind, Message, ModelInfo,
-    ProviderError, ProviderId, Role, StopReason, StreamEvent,
+    stream_chat, ChatRequest, Client, ContentBlock, Credential, CredentialKind, Message, ModelInfo,
+    ProviderError, ProviderId, Role, StopReason, StreamEvent, ToolSpec, Usage,
 };
 use serde::Serialize;
 use tokio::sync::oneshot;
 
-pub use config::{ModelChoice, Settings};
+pub use config::{ModelChoice, ModelRole, Roles, Settings};
 pub use providers;
 pub use sessions::{Ending, Mode, Session, SessionSummary, StoredMessage};
 
@@ -73,6 +73,43 @@ pub struct ProviderStatus {
     pub default_base_url: &'static str,
     pub models: Vec<ModelInfo>,
 }
+/// In-memory token usage per role (architecture §4.22). Accumulated as model
+/// calls complete; never persisted (derived, device-local).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// One role's usage for the Settings UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleUsageEntry {
+    pub role: ModelRole,
+    pub usage: RoleUsage,
+}
+
+/// Result of the per-role tool-call test button.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleTestResult {
+    pub called: bool,
+    pub model: String,
+}
+
+/// Static role metadata for the Settings UI (architecture §4.22).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleInfo {
+    pub role: ModelRole,
+    pub label: &'static str,
+    pub weight: &'static str,
+    pub phrase: &'static str,
+    pub guidance: &'static str,
+    pub min_context: Option<u32>,
+    pub vision_relevant: bool,
+}
 
 pub struct Harness {
     repo: PathBuf,
@@ -81,6 +118,8 @@ pub struct Harness {
     config: Mutex<config::Config>,
     running: Mutex<HashMap<String, oneshot::Sender<()>>>,
     login_cancelled: AtomicBool,
+    /// Input/output tokens per role, accumulated in memory.
+    role_usage: Mutex<HashMap<ModelRole, RoleUsage>>,
 }
 
 impl Harness {
@@ -98,6 +137,7 @@ impl Harness {
             config: Mutex::new(config::Config::load(config_dir)?),
             running: Mutex::new(HashMap::new()),
             login_cancelled: AtomicBool::new(false),
+            role_usage: Mutex::new(HashMap::new()),
         })
     }
 
@@ -219,11 +259,14 @@ impl Harness {
         lock(&self.running).remove(session_id);
 
         let ending = match outcome {
-            Some(Ok(done)) => match done.stop {
-                StopReason::End | StopReason::ToolUse => None,
-                StopReason::MaxTokens => Some(Ending::MaxTokens),
-                StopReason::Refusal => Some(Ending::Refusal),
-            },
+            Some(Ok(done)) => {
+                self.add_usage(ModelRole::Tutor, &done.usage);
+                match done.stop {
+                    StopReason::End | StopReason::ToolUse => None,
+                    StopReason::MaxTokens => Some(Ending::MaxTokens),
+                    StopReason::Refusal => Some(Ending::Refusal),
+                }
+            }
             Some(Err(e)) => return Err(e),
             None => Some(Ending::Interrupted),
         };
@@ -264,6 +307,22 @@ impl Harness {
 
     pub fn settings(&self) -> Settings {
         lock(&self.config).settings.clone()
+    }
+
+    /// Static metadata for the five role cards in Settings.
+    pub fn roles(&self) -> Vec<RoleInfo> {
+        ModelRole::ALL
+            .iter()
+            .map(|&role| RoleInfo {
+                role,
+                label: role.label(),
+                weight: role.weight(),
+                phrase: role.role_phrase(),
+                guidance: role.guidance(),
+                min_context: role.min_context(),
+                vision_relevant: role.vision_relevant(),
+            })
+            .collect()
     }
 
     pub fn providers(&self) -> Vec<ProviderStatus> {
@@ -354,31 +413,94 @@ impl Harness {
         config.save_settings()
     }
 
-    /// WorkBuddy gets `reasoning_effort` only for efforts the model's live
-    /// catalog entry lists in `reasoning.supportedEfforts`; any other effort
-    /// is dropped here so it is never sent.
-    pub async fn set_model(&self, choice: ModelChoice) -> Result<(), Error> {
-        let model = choice.model.trim().to_owned();
-        if model.is_empty() {
-            return Err(Error::Invalid("model id is empty".into()));
-        }
-        let effort = match (choice.provider, choice.effort) {
-            (ProviderId::Workbuddy, Some(effort)) => self
-                .models(ProviderId::Workbuddy)
-                .await?
-                .iter()
-                .find(|m| m.id == model)
-                .filter(|m| m.efforts.contains(&effort))
-                .map(|_| effort),
-            (_, effort) => effort,
+    /// Set (or clear, with `None`) the model for one role. WorkBuddy efforts
+    /// are validated against the live catalog so unsupported efforts are
+    /// never sent.
+    pub async fn set_role_model(
+        &self,
+        role: ModelRole,
+        choice: Option<ModelChoice>,
+    ) -> Result<(), Error> {
+        let choice = match choice {
+            None => None,
+            Some(mut c) => {
+                let model = c.model.trim().to_owned();
+                if model.is_empty() {
+                    return Err(Error::Invalid("model id is empty".into()));
+                }
+                c.model = model.clone();
+                c.effort = match (c.provider, c.effort) {
+                    (ProviderId::Workbuddy, Some(effort)) => self
+                        .models(ProviderId::Workbuddy)
+                        .await?
+                        .iter()
+                        .find(|m| m.id == model)
+                        .filter(|m| m.efforts.contains(&effort))
+                        .map(|_| effort),
+                    (_, effort) => effort,
+                };
+                Some(c)
+            }
         };
         let mut config = lock(&self.config);
-        config.settings.model = Some(ModelChoice {
-            provider: choice.provider,
-            model,
-            effort,
-        });
+        config.settings.roles.set(role, choice);
         config.save_settings()
+    }
+
+    /// One tiny request that must call the `ping` tool. Passes only if the
+    /// model actually makes a tool call through its provider (architecture
+    /// §4.22 "test button per role").
+    pub async fn test_role(&self, role: ModelRole) -> Result<RoleTestResult, Error> {
+        let choice = lock(&self.config).resolve(role)?;
+        self.credential(choice.provider)?;
+        let tools = vec![ToolSpec {
+            name: "ping".into(),
+            description: "Confirm tool calling works.".into(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        }];
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::text("call ping")],
+        }];
+        let req = ChatRequest {
+            model: &choice.model,
+            system: "You must call the ping tool. Call it now.",
+            messages: &messages,
+            max_tokens: 64,
+            effort: choice.effort.as_deref(),
+            tools: &tools,
+            cache_key: None,
+        };
+        let completion = self
+            .stream_with_refresh(choice.provider, "role-test", &req, &mut |_| {})
+            .await?;
+        self.add_usage(role, &completion.usage);
+        let called = completion.tool_calls.iter().any(|c| c.name == "ping");
+        Ok(RoleTestResult {
+            called,
+            model: choice.model,
+        })
+    }
+
+    /// Accumulate usage for a role (used by the single-prompt path today and
+    /// by each agent turn later).
+    fn add_usage(&self, role: ModelRole, usage: &Usage) {
+        let mut map = lock(&self.role_usage);
+        let entry = map.entry(role).or_default();
+        entry.input_tokens += u64::from(usage.input_tokens);
+        entry.output_tokens += u64::from(usage.output_tokens);
+    }
+
+    /// Snapshot of per-role usage for the Settings UI.
+    pub fn role_usage(&self) -> Vec<RoleUsageEntry> {
+        let map = lock(&self.role_usage);
+        ModelRole::ALL
+            .iter()
+            .map(|&role| RoleUsageEntry {
+                role,
+                usage: map.get(&role).cloned().unwrap_or_default(),
+            })
+            .collect()
     }
 
     /// Browser sign-in, step 1: returns the URL the learner must open.
@@ -419,11 +541,7 @@ impl Harness {
     // ---- internals ------------------------------------------------------
 
     fn model_choice(&self) -> Result<ModelChoice, Error> {
-        let choice = lock(&self.config)
-            .settings
-            .model
-            .clone()
-            .ok_or_else(|| Error::Invalid("choose a model in Settings first".into()))?;
+        let choice = lock(&self.config).resolve(ModelRole::Tutor)?;
         self.credential(choice.provider)?;
         Ok(choice)
     }

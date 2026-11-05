@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use harness::providers::workbuddy::LoginStart;
 use harness::providers::{ModelInfo, ProviderId};
 use harness::{
-    ChatEvent, Harness, Mode, ModelChoice, ProviderStatus, Session, SessionSummary, Settings,
-    StoredMessage,
+    ChatEvent, Harness, Mode, ModelChoice, ModelRole, ProviderStatus, RoleInfo, RoleTestResult,
+    RoleUsageEntry, Session, SessionSummary, Settings, StoredMessage,
 };
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Manager, State};
@@ -105,8 +105,27 @@ fn set_base_url(h: State<'_, Harness>, provider: ProviderId, url: Option<String>
 }
 
 #[tauri::command]
-async fn set_model(h: State<'_, Harness>, choice: ModelChoice) -> Result<()> {
-    h.set_model(choice).await.map_err(err)
+async fn set_role_model(
+    h: State<'_, Harness>,
+    role: ModelRole,
+    choice: Option<ModelChoice>,
+) -> Result<()> {
+    h.set_role_model(role, choice).await.map_err(err)
+}
+
+#[tauri::command]
+async fn test_role(h: State<'_, Harness>, role: ModelRole) -> Result<RoleTestResult> {
+    h.test_role(role).await.map_err(err)
+}
+
+#[tauri::command]
+fn list_roles(h: State<'_, Harness>) -> Vec<RoleInfo> {
+    h.roles()
+}
+
+#[tauri::command]
+fn role_usage(h: State<'_, Harness>) -> Vec<RoleUsageEntry> {
+    h.role_usage()
 }
 
 /// Starts WorkBuddy browser sign-in and opens the approval page.
@@ -169,7 +188,10 @@ fn main() {
             save_api_key,
             remove_credential,
             set_base_url,
-            set_model,
+            set_role_model,
+            test_role,
+            list_roles,
+            role_usage,
             workbuddy_login_start,
             workbuddy_login_wait,
             workbuddy_login_cancel,
