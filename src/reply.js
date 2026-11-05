@@ -1,93 +1,101 @@
-// Message views: learner bubbles, finished tutor replies, and the live
-// (streaming) tutor reply that renders only its open tail block per frame.
+// Flow entries for the conversation: learner notes, finished tutor replies,
+// and the live (streaming) tutor reply that renders only its open tail block
+// per frame. Nothing here scrolls: the text grows in place.
 
 import { renderBlock, renderMarkdown } from './markdown.js';
 import { createSplitter } from './stream.js';
 
-const BRAND_SVG = '<svg viewBox="0 0 24 24"><path d="M12 3 2 8l10 5 8-4v6h2V8L12 3Z"/><path d="M6 11.2V16c0 1.7 2.7 3 6 3s6-1.3 6-3v-4.8l-6 3-6-3Z" opacity=".55"/></svg>';
-
 const ENDINGS = {
-  'max-tokens': 'Hit the length limit',
-  refusal: 'Declined',
-  interrupted: 'Stopped',
+  interrupted: 'Stopped here.',
+  'max-tokens': 'The reply was cut off at the length limit.',
+  refusal: 'The tutor declined to continue.',
 };
 
-const TYPING = '<span class="typing" aria-label="Tutor is typing"><i></i><i></i><i></i></span>';
+const WRITING = 'Writing…';
+const MIDWAY = 'The tutor is writing. The reply will appear when it’s finished.';
+const SLOW = 'Still working. You can stop it below.';
+const SLOW_MS = 30000;
 
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+/** A learner entry: small-caps "You", then the text as written. */
 export function userEl(text) {
-  const el = document.createElement('div');
-  el.className = 'msg user';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.textContent = text;
-  el.append(bubble);
-  return el;
+  const entry = el('div', 'entry user');
+  entry.append(el('p', 'you-label', 'You'), el('p', 'you-text', text));
+  return entry;
 }
 
-function shell() {
-  const el = document.createElement('div');
-  el.className = 'msg assistant';
-  el.innerHTML = `
-    <div class="meta"><span class="avatar" aria-hidden="true">${BRAND_SVG}</span><span class="who">Tutor</span><span class="model"></span></div>
-    <details class="thinking" hidden><summary>Reasoning</summary><div class="thinking-body"></div></details>
-    <div class="prose"></div>`;
-  return {
-    el,
-    meta: el.querySelector('.meta'),
-    model: el.querySelector('.model'),
-    thinking: el.querySelector('.thinking'),
-    thinkingBody: el.querySelector('.thinking-body'),
-    prose: el.querySelector('.prose'),
-  };
+function endingEl(ending) {
+  return ending ? el('p', 'ending', ENDINGS[ending] ?? `The reply ended early (${ending}).`) : null;
 }
 
-function setMeta(parts, msg) {
-  parts.model.textContent = msg.model ? `· ${msg.model}` : '';
-  parts.meta.querySelector('.badge')?.remove();
-  if (msg.ending) {
-    const badge = document.createElement('span');
-    badge.className = `badge${msg.ending === 'interrupted' ? '' : ' warn'}`;
-    badge.textContent = ENDINGS[msg.ending] ?? msg.ending;
-    parts.meta.append(badge);
+/** Practice only: the tutor's reasoning, closed, after the reply text. */
+function workingEl() {
+  const d = el('details', 'working');
+  d.append(el('summary', '', 'Tutor’s working'), el('div', 'working-body'));
+  return d;
+}
+
+/** A finished tutor reply. `showThinking` is false in Learn (spoiler risk). */
+export function assistantEl(msg, { showThinking = false } = {}) {
+  const entry = el('div', 'entry tutor');
+  const prose = el('div', 'prose');
+  prose.innerHTML = renderMarkdown(msg.content ?? '');
+  entry.append(prose);
+  const end = endingEl(msg.ending);
+  if (end) entry.append(end);
+  if (showThinking && msg.thinking) {
+    const w = workingEl();
+    w.lastChild.textContent = msg.thinking;
+    entry.append(w);
   }
-}
-
-/** A finished tutor reply. */
-export function assistantEl(msg) {
-  const parts = shell();
-  setMeta(parts, msg);
-  if (msg.thinking) {
-    parts.thinking.hidden = false;
-    parts.thinkingBody.textContent = msg.thinking;
-  }
-  parts.prose.innerHTML = renderMarkdown(msg.content ?? '');
-  return parts.el;
+  return entry;
 }
 
 /**
  * A streaming tutor reply. Feed it deltas with `addText` / `addThinking`; it
  * paints at most once per animation frame. Completed Markdown blocks are
  * rendered once and inserted before the open tail; only the tail re-renders.
- * Thinking is plain text, so its deltas are appended to one text node.
+ * Thinking is always accumulated (so `finalize` can compare it) but painted
+ * only when `showThinking` is set (Practice).
  */
 export class LiveReply {
-  constructor({ onPaint } = {}) {
-    this.parts = shell();
-    this.el = this.parts.el;
-    this.el.classList.add('live');
+  constructor({ showThinking = false } = {}) {
+    this.el = el('div', 'entry tutor live');
+    this.prose = el('div', 'prose');
+    this.status = el('p', 'writing', WRITING);
+    this.el.append(this.status, this.prose);
+    this.showThinking = showThinking;
     this.text = '';
     this.thinking = '';
-    this.onPaint = onPaint;
     this.splitter = createSplitter();
     this.tailEl = null;
     this.tailText = '';
+    this.working = null;
     this.thinkingNode = null;
     this.thinkingShown = 0;
     this.frame = 0;
     // Set when the view joins a turn already in progress: its earlier deltas
-    // were missed, so it shows only the typing indicator until the message op.
-    this.midway = false;
-    this.parts.prose.innerHTML = TYPING;
+    // were missed, so it shows only a status line until the message op.
+    this._midway = false;
+    this.slowTimer = setTimeout(() => {
+      this.slowTimer = 0;
+      if (!this.text && this.status.isConnected) this.status.after(el('p', 'writing', SLOW));
+    }, SLOW_MS);
+  }
+
+  get midway() {
+    return this._midway;
+  }
+
+  set midway(on) {
+    this._midway = on;
+    this.status.textContent = on ? MIDWAY : WRITING;
   }
 
   get hasContent() {
@@ -101,7 +109,7 @@ export class LiveReply {
 
   addThinking(delta) {
     this.thinking += delta;
-    this.schedule();
+    if (this.showThinking) this.schedule();
   }
 
   schedule() {
@@ -110,17 +118,25 @@ export class LiveReply {
 
   paint() {
     this.frame = 0;
-    this.paintThinking();
+    if (this.showThinking) this.paintThinking();
     this.paintText();
-    this.onPaint?.();
+  }
+
+  clearStatus() {
+    clearTimeout(this.slowTimer);
+    this.slowTimer = 0;
+    if (!this.status.isConnected) return;
+    while (this.status.nextSibling !== this.prose) this.status.nextSibling.remove();
+    this.status.remove();
   }
 
   paintThinking() {
     if (this.thinking.length === this.thinkingShown) return;
-    if (!this.thinkingNode) {
-      this.parts.thinking.hidden = false;
+    if (!this.working) {
+      this.working = workingEl();
       this.thinkingNode = document.createTextNode('');
-      this.parts.thinkingBody.append(this.thinkingNode);
+      this.working.lastChild.append(this.thinkingNode);
+      this.el.append(this.working);
     }
     this.thinkingNode.appendData(this.thinking.slice(this.thinkingShown));
     this.thinkingShown = this.thinking.length;
@@ -128,9 +144,10 @@ export class LiveReply {
 
   paintText() {
     if (!this.text) return;
-    const prose = this.parts.prose;
+    const prose = this.prose;
     const { completed, tail, reset } = this.splitter.push(this.text);
     if (!this.tailEl || reset) {
+      this.clearStatus();
       prose.textContent = '';
       this.tailEl = document.createElement('div');
       this.tailEl.className = 'tail';
@@ -149,16 +166,15 @@ export class LiveReply {
   }
 
   /**
-   * Turns the live bubble into the finished message `msg` and returns its
+   * Turns the live reply into the finished message `msg` and returns its
    * element. When the persisted text equals what was streamed, the rendered
    * blocks are kept and only the tail is closed.
    */
   finalize(msg) {
     cancelAnimationFrame(this.frame);
     this.frame = 0;
-    const parts = this.parts;
+    this.clearStatus();
     this.el.classList.remove('live');
-    setMeta(parts, msg);
     const content = msg.content ?? '';
     if (content === this.text && this.tailEl) {
       this.paintText();
@@ -166,12 +182,21 @@ export class LiveReply {
       if (tail) this.tailEl.insertAdjacentHTML('beforebegin', renderBlock(tail));
       this.tailEl.remove();
     } else {
-      parts.prose.innerHTML = renderMarkdown(content);
+      this.prose.innerHTML = renderMarkdown(content);
     }
-    const thinking = msg.thinking ?? '';
-    parts.thinking.hidden = !thinking;
-    if (thinking !== this.thinking) parts.thinkingBody.textContent = thinking;
-    else this.paintThinking();
+    const end = endingEl(msg.ending);
+    if (end) this.prose.after(end);
+    if (this.showThinking) {
+      const thinking = msg.thinking ?? '';
+      if (thinking !== this.thinking) {
+        if (!this.working && thinking) {
+          this.working = workingEl();
+          this.el.append(this.working);
+        }
+        if (this.working) this.working.lastChild.textContent = thinking;
+      } else this.paintThinking();
+      if (this.working && !thinking) this.working.remove();
+    }
     return this.el;
   }
 
@@ -179,5 +204,7 @@ export class LiveReply {
   dispose() {
     cancelAnimationFrame(this.frame);
     this.frame = 0;
+    clearTimeout(this.slowTimer);
+    this.slowTimer = 0;
   }
 }

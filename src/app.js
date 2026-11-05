@@ -1,81 +1,107 @@
-// Learning Harness UI: sessions sidebar, home screen, conversation view.
+// Learning Harness UI ("Carrel"): Home (start + session list) and the
+// session view (running head, page, desk).
 //
 // Learn sessions run on the agent runtime: one global event subscription
-// delivers turn/stream/op events, and the conversation is rendered from the
+// delivers turn/stream/op events, and the page is rendered from the
 // session's op log (see timeline.js). Practice keeps its per-call channel.
+//
+// Nothing scrolls or takes focus on its own except where docs/ui-design.md
+// §9.1 says so: turn start (once, when the learner is at the end), session
+// open (resumption cue), and the learner's own actions.
 
 import { available, call, channel, message } from './api.js';
-import { ensureKatex, escapeHtml } from './markdown.js';
+import { ensureKatex, plainText } from './markdown.js';
 import { initSettings, loadConfig, openSettings } from './settings.js';
 import { LiveReply, assistantEl, userEl } from './reply.js';
 import { affectsState, applyOp, createTimeline, isPending } from './timeline.js';
-import { choiceCard, dividerEl, jobChip, noticeEl, planCard, planPanel, questionCard, removedPluginList, renderPhaseStrip } from './cards.js';
+import { createSessionList } from './sessions.js';
+import {
+  choiceCard,
+  dividerEl,
+  jobChip,
+  noticeEl,
+  planCard,
+  planSheet,
+  questionCard,
+  removedPluginList,
+  renderPhase as renderPhaseNav,
+  sectionOpener,
+  sectionPosition,
+  sectionTitle,
+  verdictText,
+} from './cards.js';
 
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
-  app: $('#app'),
-  sessionList: $('#session-list'),
   home: $('#home'),
+  start: $('#start'),
+  unavailable: $('#unavailable'),
+  liveError: $('#live-error'),
+  hero: $('#hero'),
+  modes: $('#mode-toggle'),
+  suggestions: $('#suggestions'),
+  notice: $('#setup-notice'),
+  homeHint: $('#home-hint'),
+  sessionList: $('#session-list'),
+  sessionsError: $('#sessions-error'),
+  sessionsErrorText: $('#sessions-error-text'),
   conversation: $('#conversation'),
+  back: $('#back'),
+  title: $('#session-title'),
+  phase: $('#phase'),
+  headWord: $('#head-word'),
+  headStatus: $('#head-status'),
+  planToggle: $('#plan-toggle'),
   messages: $('#messages'),
   timeline: $('#timeline'),
   planSlot: $('#plan-slot'),
   live: $('#live'),
-  phaseStrip: $('#phase-strip'),
+  continueBtn: $('#continue-reading'),
+  deskNote: $('#desk-note'),
+  deskNoteText: $('#desk-note-text'),
+  deskNoteButton: $('#desk-note-button'),
   planPanel: $('#plan-panel'),
-  planToggle: $('#plan-toggle'),
-  planScrim: $('#plan-scrim'),
-  readonlyBar: $('#readonly-bar'),
   composer: $('#composer'),
   prompt: $('#prompt'),
   send: $('#send'),
+  promptError: $('#prompt-error'),
   homeSlot: $('#home-composer-slot'),
   dockSlot: $('#dock-composer-slot'),
-  title: $('#session-title'),
-  modeChip: $('#session-mode'),
-  hero: $('#hero'),
-  heroSub: $('#hero-sub'),
-  suggestions: $('#suggestions'),
-  notice: $('#setup-notice'),
-  modelPill: $('#model-pill'),
-  modelPillText: $('#model-pill-text'),
-  modelLabel: $('#model-label'),
-  toast: $('#toast'),
+  announcer: $('#announcer'),
 };
 
 const COPY = {
   learn: {
     hero: 'What do you want to learn?',
-    sub: 'The tutor finds what you already know first, then teaches one step at a time.',
     placeholder: 'Describe a topic or a goal…',
     suggestions: ['Derivatives from first principles', 'How TCP handshakes work', 'Bayes’ theorem, intuitively'],
   },
   practice: {
     hero: 'What do you want to practise?',
-    sub: 'Problems that hide the idea mid-solution, hints one rung at a time, honest grading.',
     placeholder: 'Name a topic, or paste a problem set…',
     suggestions: ['Chain rule problems', 'Big-O of recursive functions', 'Conditional probability'],
   },
 };
 
-const TRASH_SVG = '<svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>';
+const READ_ONLY_NOTE = 'This session was made with an earlier version of the tutor and can’t continue.';
+const GUARD = 'Wait for the reply to finish, or stop it.';
 
 /** Items mounted when a session opens; older ones are prepended on scroll. */
 const PAGE = 40;
-const NARROW = window.matchMedia('(max-width: 1100px)');
+/** Gap between the running head and a block aligned under it (--s6). */
+const ALIGN_GAP = 32;
 
 const state = {
   mode: 'learn',
-  sessions: [], // SessionSummary, newest first
   current: null, // open session view, see newView()
   practiceBusy: false,
   starting: false, // start_teaching is waiting for its `session` event
   loading: null, // { id, events, wasRunning } while load_session runs
   turns: new Map(), // sessionId -> Set of running agents ("tutor" | "planner")
-  stick: true, // follow the stream while the view is at the bottom
-  panelOpen: { wide: true, narrow: false },
   config: { providers: [], settings: {} },
+  homeScroll: 0,
+  lastAnnounce: 0,
 };
 
 function newView(summary) {
@@ -92,29 +118,31 @@ function newView(summary) {
     orphan: null, // finished stream whose message op has not arrived yet
     errorEl: null,
     st: null, // SessionState
+    stError: null, // session_state failure message
     stTimer: 0,
     planKey: '',
     planVersion: null,
-    removed: new Set(), // plugins removed on the plan card (see removedPluginList)
+    removed: new Set(), // tools unchecked on the plan document
     planDraft: '',
+    planFormOpen: false,
     panelKey: '',
     panelDraft: '',
     panelFormOpen: false,
+    planFailed: false,
+    composerShown: true,
+    turnStartedAt: 0,
+    atEnd: false, // learner was at the end when their last message was added
     userCount: 0,
     checkedUnanswered: false,
   };
 }
 
-// ---------- utilities ----------
+const sessions = createSessionList(els.sessionList, {
+  onOpen: (id) => openSession(id),
+  onDelete: (id) => deleteSession(id),
+});
 
-let toastTimer;
-function toast(text, isError = false) {
-  els.toast.textContent = text;
-  els.toast.classList.toggle('error', isError);
-  els.toast.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (els.toast.hidden = true), isError ? 6000 : 2600);
-}
+// ---------- utilities ----------
 
 /** Backend call whose rejection is normalised to a display string. */
 async function cmd(name, args) {
@@ -125,46 +153,89 @@ async function cmd(name, args) {
   }
 }
 
-function setNav(open) {
-  els.app.classList.toggle('nav-open', open);
-  $('#scrim').hidden = !open;
+/** Polite screen-reader message: cleared first, set on the next frame. */
+function announce(text) {
+  state.lastAnnounce = performance.now();
+  els.announcer.textContent = '';
+  requestAnimationFrame(() => (els.announcer.textContent = text));
 }
 
-function nearBottom() {
-  const m = els.messages;
-  return m.scrollHeight - m.scrollTop - m.clientHeight < 120;
+const focusQuiet = (el) => el?.focus({ preventScroll: true });
+
+/**
+ * Whether the learner is "not engaged elsewhere": focus is on the body, the
+ * desk textarea, or a control that has just been disabled, hidden or removed.
+ */
+function notEngaged() {
+  const a = document.activeElement;
+  return !a || a === document.body || a === els.prompt || !a.isConnected || a.disabled || Boolean(a.closest('[hidden]'));
 }
 
-function scrollToBottom(force = false) {
-  if (force || state.stick) {
-    els.messages.scrollTo({ top: els.messages.scrollHeight, behavior: 'instant' });
-    state.stick = true;
+/** Bottom edge (viewport px) of the flow's last visible block. */
+function contentBottom() {
+  for (const box of [els.live, els.planSlot, els.timeline]) {
+    let last = box.lastElementChild;
+    while (last?.hidden) last = last.previousElementSibling;
+    if (last) return last.getBoundingClientRect().bottom;
   }
+  return els.messages.getBoundingClientRect().top;
+}
+
+/** The learner is "at the end": the flow's bottom is within 120 px of the viewport's. */
+function nearBottom() {
+  return contentBottom() - els.messages.getBoundingClientRect().bottom < 120;
+}
+
+/** Instantly scrolls so `el`'s top sits `gap` px below the running head. */
+function alignUnderHead(el, gap = ALIGN_GAP) {
+  const m = els.messages;
+  const top = m.scrollTop + el.getBoundingClientRect().top - m.getBoundingClientRect().top - gap;
+  m.scrollTo({ top: Math.max(0, top), behavior: 'instant' });
 }
 
 function autoGrow() {
-  els.prompt.style.height = 'auto';
-  els.prompt.style.height = `${Math.min(els.prompt.scrollHeight, 240)}px`;
+  const p = els.prompt;
+  p.style.height = 'auto';
+  p.style.height = `${p.scrollHeight + 2}px`; // max-height (CSS) caps it; then it scrolls
+}
+
+function setPromptError(text) {
+  els.promptError.textContent = text;
 }
 
 const running = (id, agent) => Boolean(id && state.turns.get(id)?.has(agent));
 
-function isBusy() {
+/** A tutor reply is being written into the open view. */
+function isStreaming() {
   const s = state.current;
   if (!s) return false;
   if (!s.learn) return state.practiceBusy;
   return running(s.id, 'tutor') || (state.starting && !s.id);
 }
 
+const isBusy = isStreaming;
+
 function syncBusy() {
+  const s = state.current;
   const busy = isBusy();
-  els.composer.classList.toggle('busy', busy);
-  els.send.setAttribute('aria-label', busy ? 'Stop' : 'Send');
+  // While a reply grows, nothing may move the page: no scroll anchoring either
+  // (it would otherwise "follow" the tail when the reply is the only anchor).
+  els.messages.classList.toggle('streaming', busy);
+  els.send.textContent = !s ? 'Start' : busy ? 'Stop' : 'Send';
+  els.send.classList.toggle('primary', !busy);
+  els.send.classList.toggle('secondary', busy);
+  if (busy) els.send.setAttribute('aria-label', 'Stop the reply');
+  else els.send.removeAttribute('aria-label');
   updateSendState();
+  updateContinue();
 }
 
 function updateSendState() {
   els.send.disabled = isBusy() ? !state.current?.id : !els.prompt.value.trim();
+}
+
+function headStatus(text) {
+  if (els.headStatus.textContent !== text) els.headStatus.textContent = text;
 }
 
 // ---------- config / model ----------
@@ -177,212 +248,58 @@ function modelReady() {
 
 function applyConfig(config) {
   state.config = config;
-  const m = config.settings.roles?.tutor;
-  const provider = config.providers.find((p) => p.id === m?.provider);
-  const label = m ? `${m.model}${provider ? ` · ${provider.name}` : ''}` : 'Choose a model';
-  els.modelPillText.textContent = label;
-  els.modelLabel.textContent = m ? label : 'No model selected';
-  els.modelPill.classList.toggle('ready', modelReady());
   els.notice.hidden = modelReady();
 }
 
-// ---------- sidebar ----------
-//
-// Rendered in full once at startup. After that each change (new session,
-// retitle, a finished turn, a delete) moves or updates only its own entry.
-
-const GROUPS = ['Today', 'Yesterday', 'Previous 7 days', 'Older'];
-const sidebarEls = new Map(); // session id -> .session-item
-
-function groupLabel(iso) {
-  const day = 24 * 60 * 60 * 1000;
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const t = new Date(iso).getTime();
-  if (t >= startOfToday.getTime()) return 'Today';
-  if (t >= startOfToday.getTime() - day) return 'Yesterday';
-  if (t >= startOfToday.getTime() - 7 * day) return 'Previous 7 days';
-  return 'Older';
-}
-
-function sessionItemEl(s) {
-  const item = document.createElement('div');
-  item.className = `session-item${state.current?.id === s.id ? ' active' : ''}`;
-  item.dataset.id = s.id;
-  item.setAttribute('role', 'button');
-  item.tabIndex = 0;
-  item.innerHTML = `
-    <span class="mode-dot"></span>
-    <span class="title"></span>
-    <button class="delete" type="button" aria-label="Delete session">${TRASH_SVG}</button>`;
-  fillSessionItem(item, s);
-  return item;
-}
-
-function fillSessionItem(item, s) {
-  item.title = s.title;
-  const dot = item.querySelector('.mode-dot');
-  dot.className = `mode-dot ${s.mode}`;
-  dot.title = s.mode === 'learn' ? 'Learn' : 'Practice';
-  item.querySelector('.title').textContent = s.title;
-}
-
-function groupEl(label, create) {
-  let g = els.sessionList.querySelector(`.session-group[data-group="${label}"]`);
-  if (g || !create) return g;
-  g = document.createElement('div');
-  g.className = 'session-group';
-  g.dataset.group = label;
-  g.innerHTML = `<h4>${label}</h4>`;
-  const order = GROUPS.indexOf(label);
-  const after = [...els.sessionList.querySelectorAll('.session-group')].find((x) => GROUPS.indexOf(x.dataset.group) > order);
-  els.sessionList.querySelector('.session-empty')?.remove();
-  els.sessionList.insertBefore(g, after ?? null);
-  return g;
-}
-
-function pruneGroups() {
-  for (const g of els.sessionList.querySelectorAll('.session-group')) {
-    if (!g.querySelector('.session-item')) g.remove();
-  }
-  if (!state.sessions.length && !els.sessionList.querySelector('.session-empty')) {
-    els.sessionList.innerHTML = '<p class="session-empty">Your sessions will appear here.</p>';
-  }
-}
-
-function renderSidebar() {
-  const list = els.sessionList;
-  sidebarEls.clear();
-  list.textContent = '';
-  if (!state.sessions.length) {
-    list.innerHTML = '<p class="session-empty">Your sessions will appear here.</p>';
-    return;
-  }
-  const frag = document.createDocumentFragment();
-  let group = null;
-  let container = null;
-  for (const s of state.sessions) {
-    const label = groupLabel(s.updatedAt);
-    if (label !== group) {
-      group = label;
-      container = document.createElement('div');
-      container.className = 'session-group';
-      container.dataset.group = label;
-      container.innerHTML = `<h4>${label}</h4>`;
-      frag.append(container);
-    }
-    const item = sessionItemEl(s);
-    sidebarEls.set(s.id, item);
-    container.append(item);
-  }
-  list.append(frag);
-}
-
-const time = (iso) => Date.parse(iso) || 0;
-
-/** Inserts or updates one session, keeping newest-first order. */
-function upsertSession(summary) {
-  const i = state.sessions.findIndex((x) => x.id === summary.id);
-  const next = i >= 0 ? { ...state.sessions[i], ...summary } : { ...summary };
-  next.updatedAt ??= next.createdAt ?? new Date().toISOString();
-  if (i >= 0) state.sessions.splice(i, 1);
-  const t = time(next.updatedAt);
-  let j = state.sessions.findIndex((x) => time(x.updatedAt) <= t);
-  if (j < 0) j = state.sessions.length;
-  state.sessions.splice(j, 0, next);
-
-  let item = sidebarEls.get(next.id);
-  if (item) fillSessionItem(item, next);
-  else {
-    item = sessionItemEl(next);
-    sidebarEls.set(next.id, item);
-  }
-  const label = groupLabel(next.updatedAt);
-  const group = groupEl(label, true);
-  const after = state.sessions[j + 1];
-  const anchor = after && groupLabel(after.updatedAt) === label ? sidebarEls.get(after.id) : null;
-  group.insertBefore(item, anchor ?? null);
-  pruneGroups();
-}
-
-/** Marks a session as just updated (after a turn) without re-listing. */
-function bumpSession(id) {
-  const s = state.sessions.find((x) => x.id === id);
-  if (s) upsertSession({ id, updatedAt: new Date().toISOString() });
-}
-
-function removeSession(id) {
-  state.sessions = state.sessions.filter((x) => x.id !== id);
-  sidebarEls.get(id)?.remove();
-  sidebarEls.delete(id);
-  pruneGroups();
-}
-
-function setActiveSession(id) {
-  for (const el of els.sessionList.querySelectorAll('.session-item.active')) el.classList.remove('active');
-  if (id) sidebarEls.get(id)?.classList.add('active');
-}
-
-async function deleteSession(id) {
-  try {
-    await call('delete_session', { id });
-    if (state.current?.id === id) showHome();
-    removeSession(id);
-  } catch (e) {
-    toast(message(e), true);
-  }
-}
-
-function onSidebarClick(e) {
-  const item = e.target.closest('.session-item');
-  if (!item) return;
-  const del = e.target.closest('.delete');
-  if (!del) {
-    openSession(item.dataset.id);
-    return;
-  }
-  e.stopPropagation();
-  // Two clicks: the first arms the button for a few seconds.
-  if (!del.classList.contains('armed')) {
-    del.classList.add('armed');
-    del.setAttribute('aria-label', 'Click again to delete');
-    del.title = 'Click again to delete';
-    setTimeout(() => {
-      del.classList.remove('armed');
-      del.setAttribute('aria-label', 'Delete session');
-      del.title = '';
-    }, 3000);
-    return;
-  }
-  deleteSession(item.dataset.id);
-}
-
-// ---------- views ----------
+// ---------- Home ----------
 
 function setMode(mode) {
   state.mode = mode;
-  for (const b of document.querySelectorAll('#mode-toggle button')) {
-    b.setAttribute('aria-selected', String(b.dataset.mode === mode));
-  }
+  for (const r of els.modes.querySelectorAll('input')) r.checked = r.value === mode;
   const copy = COPY[mode];
   els.hero.textContent = copy.hero;
-  els.heroSub.textContent = copy.sub;
-  els.prompt.placeholder = copy.placeholder;
-  els.suggestions.innerHTML = '';
-  for (const text of copy.suggestions) {
+  if (!state.current) els.prompt.placeholder = copy.placeholder;
+  els.suggestions.textContent = 'Or try: ';
+  copy.suggestions.forEach((text, i) => {
+    if (i) {
+      const sep = document.createElement('span');
+      sep.setAttribute('aria-hidden', 'true');
+      sep.textContent = ' · ';
+      els.suggestions.append(sep);
+    }
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'suggestion';
+    b.className = 'btn text';
     b.textContent = text;
     b.addEventListener('click', () => {
       els.prompt.value = text;
       autoGrow();
       updateSendState();
-      els.prompt.focus();
+      setPromptError('');
+      focusQuiet(els.prompt);
     });
     els.suggestions.append(b);
+  });
+}
+
+async function loadSessions() {
+  els.sessionsError.hidden = true;
+  try {
+    sessions.reset(await call('list_sessions'));
+  } catch (e) {
+    els.sessionsErrorText.textContent = `Couldn’t load your sessions: ${message(e)}`;
+    els.sessionsError.hidden = false;
+    sessions.render();
   }
 }
+
+async function deleteSession(id) {
+  await cmd('delete_session', { id });
+  const next = sessions.remove(id);
+  focusQuiet(next ?? els.prompt);
+}
+
+// ---------- views ----------
 
 /** Drops the open session's live state before another one replaces it. */
 function closeCurrent() {
@@ -390,42 +307,54 @@ function closeCurrent() {
   if (!s) return;
   s.live?.dispose();
   clearTimeout(s.stTimer);
+  if (els.planPanel.open) els.planPanel.close();
   state.current = null;
 }
 
-function showHome() {
+function setComposerContext(home) {
+  if (home) {
+    els.homeSlot.append(els.composer);
+    els.prompt.setAttribute('aria-labelledby', 'hero');
+    els.prompt.placeholder = COPY[state.mode].placeholder;
+  } else {
+    els.dockSlot.append(els.composer);
+    els.prompt.setAttribute('aria-labelledby', 'prompt-label');
+    els.prompt.placeholder = 'Reply to the tutor';
+  }
+  els.composer.hidden = false;
+  setPromptError('');
+}
+
+/** Shows Home. `focusId`: the session just left (its row gets focus). */
+function showHome({ focusId = null } = {}) {
   closeCurrent();
   state.loading = null;
-  els.home.hidden = false;
   els.conversation.hidden = true;
-  els.homeSlot.append(els.composer);
-  els.title.textContent = 'New session';
-  els.modeChip.hidden = true;
-  els.planToggle.hidden = true;
-  setPanelVisible(false);
+  els.home.hidden = false;
+  setComposerContext(true);
   setMode(state.mode);
-  setActiveSession(null);
   syncBusy();
-  els.prompt.focus();
+  els.home.scrollTop = state.homeScroll;
+  focusQuiet((focusId && sessions.openButton(focusId)) || els.prompt);
 }
 
 function showConversation() {
   const s = state.current;
+  if (!els.home.hidden) state.homeScroll = els.home.scrollTop;
   els.home.hidden = true;
   els.conversation.hidden = false;
   els.title.textContent = s.title;
-  els.modeChip.hidden = false;
-  els.modeChip.textContent = s.mode === 'learn' ? 'Learn' : 'Practice';
-  els.modeChip.classList.toggle('practice', s.mode === 'practice');
-  els.dockSlot.hidden = s.readOnly;
-  els.readonlyBar.hidden = !s.readOnly;
-  if (!s.readOnly) els.dockSlot.append(els.composer);
-  els.phaseStrip.hidden = !s.learn || s.readOnly;
+  const learnLive = s.learn && !s.readOnly;
+  els.phase.hidden = !learnLive;
+  els.phase.textContent = '';
+  els.headWord.hidden = learnLive;
+  els.headWord.textContent = s.readOnly ? 'Read-only' : 'Practice';
   els.planToggle.hidden = true;
-  setPanelVisible(false);
-  els.prompt.placeholder = 'Reply…';
-  setActiveSession(s.id);
-  if (s.learn && !s.readOnly) renderPhase();
+  headStatus('');
+  setComposerContext(false);
+  s.composerShown = true;
+  renderDesk({ quiet: true });
+  if (learnLive) renderPhase();
   syncBusy();
 }
 
@@ -434,25 +363,28 @@ function setTitle(s, title) {
   if (state.current === s) els.title.textContent = title;
 }
 
-// ---------- timeline ----------
+// ---------- page items ----------
 
 function renderItem(item) {
   const s = state.current;
+  const onAnswer = (callId, payload) => cmd('answer', { sessionId: s.id, callId, payload });
   switch (item.kind) {
     case 'user':
       return userEl(item.msg.content);
     case 'assistant':
-      return assistantEl(item.msg);
+      return assistantEl(item.msg, { showThinking: !s.learn });
     case 'notice':
-      return noticeEl(item.text);
+      return noticeEl(item);
     case 'divider':
       return dividerEl(item.text);
+    case 'section':
+      return sectionOpener(item, s.st?.plan);
     case 'job':
       return jobChip(item, { onCancel: s.readOnly ? null : (jobId) => cmd('cancel_job', { sessionId: s.id, jobId }) });
     case 'question':
-      return questionCard(item, { readOnly: s.readOnly, onAnswer: (callId, payload) => cmd('answer', { sessionId: s.id, callId, payload }) });
+      return questionCard(item, { readOnly: s.readOnly, onAnswer });
     case 'choice':
-      return choiceCard(item, { readOnly: s.readOnly, onAnswer: (callId, payload) => cmd('answer', { sessionId: s.id, callId, payload }) });
+      return choiceCard(item, { readOnly: s.readOnly, onAnswer });
     default:
       return document.createElement('div');
   }
@@ -470,6 +402,7 @@ function mountTimeline() {
   els.timeline.textContent = '';
   els.planSlot.textContent = '';
   els.live.textContent = '';
+  els.live.style.minBlockSize = '';
   s.start = Math.max(0, items.length - PAGE);
   const frag = document.createDocumentFragment();
   for (let i = s.start; i < items.length; i++) frag.append(itemEl(items[i]));
@@ -503,35 +436,102 @@ function onMessagesScroll() {
   if (scrollFrame) return;
   scrollFrame = requestAnimationFrame(() => {
     scrollFrame = 0;
-    state.stick = nearBottom();
     if (els.messages.scrollTop < 400) prependOlder();
+    updateContinue();
   });
 }
 
+/**
+ * Appends an item's element to the flow. The live reply already sits at the
+ * end of the timeline (finalised in place, never moved), and a learner entry
+ * that arrives while it is still empty ("Writing…") goes before it.
+ */
 function appendItem(item) {
-  els.timeline.append(itemEl(item));
+  const s = state.current;
+  if (item.el?.isConnected) return;
+  const el = itemEl(item);
+  if (item.kind === 'user' && s?.live?.el.isConnected && !s.live.hasContent) els.timeline.insertBefore(el, s.live.el);
+  else els.timeline.append(el);
 }
 
 function rerenderItem(item) {
   if (!item.el) return; // not mounted yet; renders fresh when scrolled to
+  const old = item.el;
   const next = renderItem(item);
-  // Keep a <details> card open if the learner had opened it.
-  if (item.el.tagName === 'DETAILS' && next.tagName === 'DETAILS') next.open = item.el.open;
-  item.el.replaceWith(next);
+  const hadFocus = old.contains(document.activeElement);
+  // Keep a <details> open if the learner had opened it.
+  if (old.tagName === 'DETAILS' && next.tagName === 'DETAILS') next.open = old.open;
+  old.replaceWith(next);
   item.el = next;
+  if (hadFocus) {
+    // Its focus would be lost with the old element: keep it in the block.
+    let target = next.querySelector('[data-refocus], summary, button:not([disabled]), input, textarea');
+    if (!target) {
+      next.tabIndex = -1;
+      target = next;
+    }
+    focusQuiet(target);
+  }
+}
+
+// ---------- "Continue reading" ----------
+
+/** Shows "↓ Continue reading" when the flow's end is below the viewport, never while streaming. */
+function updateContinue() {
+  const s = state.current;
+  let show = false;
+  if (s && !isStreaming()) show = contentBottom() > els.messages.getBoundingClientRect().bottom + 8;
+  if (els.continueBtn.hidden === show) els.continueBtn.hidden = !show;
+}
+
+function continueReading() {
+  const m = els.messages;
+  const viewTop = m.getBoundingClientRect().top + ALIGN_GAP + 1;
+  const tutors = els.page.querySelectorAll('.entry.tutor');
+  const last = tutors[tutors.length - 1] ?? null;
+  const blocks = [last];
+  if (last) {
+    const after = [...els.page.querySelectorAll('.exercise.pending, .plan-doc, .exercise')].find(
+      (b) => last.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    blocks.push(after ?? null);
+  }
+  const target = blocks.find((b) => b && b.getBoundingClientRect().top > viewTop);
+  if (target) alignUnderHead(target);
+  else m.scrollTo({ top: m.scrollTop + contentBottom() - m.getBoundingClientRect().bottom + ALIGN_GAP, behavior: 'instant' });
+  updateContinue();
+  focusQuiet(!els.composer.hidden ? els.prompt : els.deskNoteButton.hidden ? null : els.deskNoteButton);
 }
 
 // ---------- live reply / errors ----------
 
-function ensureLive() {
-  const s = state.current;
-  if (!s.live) {
-    s.live = new LiveReply({ onPaint: () => scrollToBottom() });
-    els.live.append(s.live.el);
-    clearError();
-    scrollToBottom();
+/**
+ * Starts the live reply. Scrolls once (instant) only if the learner is at the
+ * end — or was, just before their own message was added (s.atEnd).
+ */
+function beginLive(s, { align = true } = {}) {
+  // Release the previous turn's reserved space before measuring.
+  els.live.style.minBlockSize = '';
+  const atEnd = align && (s.atEnd || nearBottom());
+  s.atEnd = false;
+  s.live = new LiveReply({ showThinking: !s.learn });
+  els.timeline.append(s.live.el);
+  clearError();
+  if (atEnd) {
+    const m = els.messages;
+    if (s.live.el.getBoundingClientRect().top > m.getBoundingClientRect().bottom - 64) {
+      // Room for the reply to grow into, so its start can sit under the head
+      // now and the page never has to move while it streams.
+      els.live.style.minBlockSize = `${m.clientHeight}px`;
+      alignUnderHead(s.live.el);
+    }
   }
   return s.live;
+}
+
+function ensureLive() {
+  const s = state.current;
+  return s.live ?? beginLive(s);
 }
 
 function dropLive(s) {
@@ -547,48 +547,68 @@ function clearError() {
   if (s) s.errorEl = null;
 }
 
-function showError(text, action, onRetry) {
+/** The inline failure block at the end of the flow (role="alert"). */
+function showError({ title = 'The reply failed.', text = '', action = 'Retry', onRetry }) {
   const s = state.current;
+  const atEnd = nearBottom();
   clearError();
   const el = document.createElement('div');
-  el.className = 'error-card';
+  el.className = 'turn-error';
   el.setAttribute('role', 'alert');
-  el.innerHTML = `<div class="text"><strong>Reply failed</strong>${escapeHtml(text)}</div>`;
+  const t = document.createElement('p');
+  t.className = 'turn-error-title';
+  t.textContent = title;
+  el.append(t);
+  if (text) {
+    const p = document.createElement('p');
+    p.className = 'turn-error-text';
+    p.textContent = text;
+    el.append(p);
+  }
+  const actions = document.createElement('div');
+  actions.className = 'actions';
   const b = document.createElement('button');
-  b.className = 'btn';
+  b.className = 'btn secondary';
   b.type = 'button';
   b.textContent = action;
   b.addEventListener('click', () => {
     clearError();
     onRetry();
   });
-  el.append(b);
+  actions.append(b);
   if (/model|connect|settings/i.test(text)) {
     const st = document.createElement('button');
-    st.className = 'btn link';
+    st.className = 'btn text';
     st.type = 'button';
     st.textContent = 'Settings';
     st.addEventListener('click', openSettings);
-    el.append(st);
+    actions.append(st);
   }
+  el.append(actions);
   s.errorEl = el;
   els.live.append(el);
-  scrollToBottom();
+  if (atEnd) el.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  updateContinue();
 }
 
-function showTurnError(text, action = 'Retry') {
-  const s = state.current;
-  showError(text, action, () => {
-    cmd('resume_turn', { sessionId: s.id }).catch((err) => {
-      if (state.current === s && !s.errorEl && !running(s.id, 'tutor')) showTurnError(err);
-    });
+function resumeTurn(s) {
+  cmd('resume_turn', { sessionId: s.id }).catch((err) => {
+    if (state.current === s && !s.errorEl && !running(s.id, 'tutor')) showTurnError(err);
   });
+}
+
+function showTurnError(text) {
+  const s = state.current;
+  showError({ text, onRetry: () => resumeTurn(s) });
 }
 
 // ---------- Learn: runtime events ----------
 
 function subscribe() {
-  call('subscribe_events', { onEvent: channel(onRuntimeEvent) }).catch((e) => toast(message(e), true));
+  call('subscribe_events', { onEvent: channel(onRuntimeEvent) }).catch((e) => {
+    els.liveError.textContent = `Live updates are unavailable: ${message(e)}`;
+    els.liveError.hidden = false;
+  });
 }
 
 function onRuntimeEvent(ev) {
@@ -602,7 +622,7 @@ function onRuntimeEvent(ev) {
     state.turns.get(id).add(ev.agent);
   } else if (ev.kind === 'turnEnd') {
     state.turns.get(id)?.delete(ev.agent);
-    if (ev.agent === 'tutor') bumpSession(id);
+    if (ev.agent === 'tutor') sessions.bump(id);
   }
   if (state.loading?.id === id) {
     state.loading.events.push(ev);
@@ -613,17 +633,16 @@ function onRuntimeEvent(ev) {
 }
 
 function onSessionSummary(summary) {
-  const known = state.sessions.some((x) => x.id === summary.id);
+  const known = sessions.has(summary.id);
   const s = state.current;
   if (state.starting && s?.learn && !s.id && !known && summary.mode === 'learn') {
     s.id = summary.id;
-    upsertSession(summary);
-    setActiveSession(s.id);
+    sessions.upsert(summary);
     setTitle(s, summary.title);
     syncBusy();
     return;
   }
-  upsertSession(summary);
+  sessions.upsert(summary);
   if (s?.id === summary.id && summary.title) setTitle(s, summary.title);
 }
 
@@ -632,17 +651,21 @@ function sessionEvent(s, ev) {
     case 'turnStart':
       if (ev.agent === 'tutor') {
         s.orphan = null; // a new turn: an unmatched earlier stream stays as shown
+        s.turnStartedAt = performance.now();
         ensureLive();
+      } else {
+        s.planFailed = false;
       }
       renderPhase();
+      renderDesk();
       syncBusy();
       break;
     case 'turnEnd':
       if (ev.agent === 'tutor') endLive(s, ev.error);
-      else if (ev.error) toast(`Planning failed: ${ev.error}`, true);
+      else if (ev.error) plannerFailed(s, ev.error);
       renderPhase();
+      renderDesk();
       syncBusy();
-      updateComposerHint();
       break;
     case 'text': {
       const live = ensureLive();
@@ -662,19 +685,29 @@ function sessionEvent(s, ev) {
 
 function endLive(s, error) {
   const live = s.live;
+  s.atEnd = false;
   if (live && !error && live.hasContent && !live.midway) {
     // Streamed text whose message op has not arrived yet: keep showing it.
     s.orphan = { el: live.finalize({ content: live.text, thinking: live.thinking }), text: live.text };
-    els.timeline.append(s.orphan.el);
     s.live = null;
   } else {
     dropLive(s);
   }
   if (error) showTurnError(error);
+  else if (state.lastAnnounce < s.turnStartedAt) announce('Reply finished.');
+}
+
+function plannerFailed(s, error) {
+  s.planFailed = true;
+  const item = { kind: 'notice', key: `planfail:${performance.now()}`, text: `Planning failed: ${error}`, error: true };
+  s.tl.items.push(item);
+  appendItem(item);
+  announce('Planning failed.');
 }
 
 function onOp(s, op) {
   if (op.op === 'title' && op.title) setTitle(s, op.title);
+  const free = notEngaged();
   const change = applyOp(s.tl, op);
   if (change?.added) {
     const item = change.added;
@@ -691,21 +724,39 @@ function onOp(s, op) {
     } else {
       if (item.kind === 'user') {
         s.userCount++;
+        s.planFailed = false;
         clearError();
       }
-      // A card ends the streamed segment; drop an empty typing bubble.
+      // An exercise ends the streamed segment; drop an empty "Writing…".
       if ((item.kind === 'question' || item.kind === 'choice') && s.live && !s.live.hasContent) dropLive(s);
+      if (item.kind === 'user') s.atEnd = nearBottom();
       appendItem(item);
+      if (item.kind === 'user') item.el.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+      else if (item.kind === 'section') announce(`New section: ${sectionTitle(item, s.st?.plan)}`);
+      else if (isPending(item)) exerciseArrived(s, item, free);
     }
-    scrollToBottom(item.kind === 'user');
   } else if (change?.updated) {
-    rerenderItem(change.updated);
+    const item = change.updated;
+    rerenderItem(item);
+    if (item.kind === 'question' && item.verdict && !item.verdictSaid) {
+      item.verdictSaid = true;
+      announce(`Feedback: ${verdictText(item.verdict)}.`);
+    }
   }
   if (affectsState(op)) scheduleState();
-  updateComposerHint();
+  renderDesk();
+  if (!isStreaming()) updateContinue();
 }
 
-// ---------- Learn: session state, phase strip, plan ----------
+/** A pending question/choice: the desk switches to its note; focus follows only if free. */
+function exerciseArrived(s, item, free) {
+  renderDesk({ quiet: true });
+  if (free) focusQuiet(item.el.querySelector('[data-first]'));
+  const text = item.kind === 'question' ? item.args.prompt : item.args.question;
+  announce(`${item.kind === 'question' ? 'Question' : 'Choice'}: ${plainText(text)}`);
+}
+
+// ---------- Learn: session state, head, plan ----------
 
 function scheduleState() {
   const s = state.current;
@@ -713,21 +764,31 @@ function scheduleState() {
   s.stTimer = setTimeout(() => refreshState(s), 50);
 }
 
+async function fetchState(s) {
+  try {
+    s.st = await call('session_state', { sessionId: s.id });
+    s.stError = null;
+  } catch (e) {
+    s.stError = message(e);
+  }
+}
+
 async function refreshState(s) {
   if (!s.learn || s.readOnly || !s.id) return;
-  let st;
-  try {
-    st = await call('session_state', { sessionId: s.id });
-  } catch (e) {
-    if (state.current === s) toast(message(e), true);
-    return;
-  }
+  await fetchState(s);
   if (state.current !== s) return;
-  s.st = st;
+  applyState(s);
+}
+
+function applyState(s, { initial = false } = {}) {
+  const free = notEngaged();
   renderPhase();
-  renderPlanCard();
+  renderPlanCard({ free, initial });
   renderPanel();
-  updateComposerHint();
+  renderDesk({ quiet: initial, free });
+  if (!s.st) return;
+  // Section openers seen before any `plan` op take their title from the state.
+  for (const item of s.tl.items) if (item.kind === 'section' && !item.plan && !item.close && item.el && s.st.plan) rerenderItem(item);
   if (!s.checkedUnanswered) {
     s.checkedUnanswered = true;
     offerReplyIfUnanswered(s);
@@ -740,46 +801,53 @@ function offerReplyIfUnanswered(s) {
   if (running(s.id, 'tutor') || running(s.id, 'planner') || st.ended || st.pendingCall) return;
   if (st.phase !== 'measure' && st.phase !== 'teach') return;
   if (s.tl.items.at(-1)?.kind === 'user' && !s.errorEl) {
-    showTurnError('The tutor has not answered this yet.', 'Get a reply');
+    showError({ title: 'The tutor hasn’t answered this yet.', action: 'Get a reply', onRetry: () => resumeTurn(s) });
   }
 }
 
 function renderPhase() {
   const s = state.current;
   if (!s?.learn || s.readOnly) return;
-  renderPhaseStrip(els.phaseStrip, s.st ?? { phase: 'measure' }, running(s.id, 'planner'));
+  renderPhaseNav(els.phase, s.st ?? { phase: 'measure' }, {
+    planning: running(s.id, 'planner'),
+    planFailed: s.planFailed,
+    error: s.stError,
+  });
 }
 
-function renderPlanCard() {
+function renderPlanCard({ free = false, initial = false } = {}) {
   const s = state.current;
   const st = s.st;
   const show = st?.phase === 'awaitApproval' && st.plan;
   const key = show ? `v${st.planVersion}` : '';
   if (key === s.planKey) return;
+  const fresh = !s.planKey;
   s.planKey = key;
   if (s.planVersion !== st?.planVersion) {
     s.planVersion = st?.planVersion;
     s.removed.clear();
   }
+  const wasInside = els.planSlot.contains(document.activeElement);
   if (!show) {
     els.planSlot.textContent = '';
     return;
   }
-  const stick = state.stick;
-  els.planSlot.replaceChildren(
-    planCard(st.plan, {
-      removed: s.removed,
-      draft: s.planDraft,
-      onDraft: (text) => (s.planDraft = text),
-      onApprove: () =>
-        cmd('approve', {
-          sessionId: s.id,
-          removedPlugins: removedPluginList(s.removed),
-        }),
-      onRequest: (text) => cmd('request_plan_change', { sessionId: s.id, text }),
-    }),
-  );
-  if (stick) scrollToBottom();
+  const doc = planCard(st.plan, {
+    removed: s.removed,
+    draft: s.planDraft,
+    formOpen: s.planFormOpen,
+    onDraft: (text) => (s.planDraft = text),
+    onFormOpen: (open) => (s.planFormOpen = open),
+    onApprove: () => cmd('approve', { sessionId: s.id, removedPlugins: removedPluginList(s.removed) }),
+    onRequest: (text) => cmd('request_plan_change', { sessionId: s.id, text }),
+  });
+  els.planSlot.replaceChildren(doc);
+  if (initial) return;
+  const heading = doc.querySelector('.plan-title');
+  if (fresh) {
+    if (free) focusQuiet(heading);
+    announce('Plan ready for review.');
+  } else if (wasInside) focusQuiet(heading);
 }
 
 function panelAvailable(s) {
@@ -787,83 +855,129 @@ function panelAvailable(s) {
   return Boolean(s?.learn && !s.readOnly && st?.plan && (st.phase === 'teach' || st.phase === 'close' || st.ended));
 }
 
-function panelOpen() {
-  return NARROW.matches ? state.panelOpen.narrow : state.panelOpen.wide;
-}
-
-function setPanelVisible(visible) {
-  els.planPanel.hidden = !visible;
-  els.planScrim.hidden = !(visible && NARROW.matches);
-  els.planToggle.setAttribute('aria-expanded', String(visible));
+function planButtonName(st) {
+  if (st.ended || st.phase === 'close') return 'Plan (Close)';
+  const pos = sectionPosition(st);
+  return pos ? `Plan (Teach, section ${pos.n} of ${pos.m})` : 'Plan (Teach)';
 }
 
 function renderPanel() {
   const s = state.current;
   if (!panelAvailable(s)) {
     els.planToggle.hidden = true;
-    setPanelVisible(false);
+    if (els.planPanel.open) els.planPanel.close();
     if (s) s.panelKey = '';
     return;
   }
-  els.planToggle.hidden = false;
   const st = s.st;
-  const key = JSON.stringify([st.planVersion, st.currentSection, st.completedSections, st.lastNodeId, st.checks, st.activePlugins, st.ended, s.panelFormOpen]);
-  if (key !== s.panelKey) {
-    s.panelKey = key;
-    els.planPanel.replaceChildren(
-      planPanel(st, {
-        formOpen: s.panelFormOpen,
-        draft: s.panelDraft,
-        onDraft: (text) => (s.panelDraft = text),
-        onRequest: (text) => cmd('request_plan_change', { sessionId: s.id, text }),
-        onToggleForm: (open) => {
-          s.panelFormOpen = open;
-          renderPanel();
-          const target = open ? els.planPanel.querySelector('.change-form textarea') : els.planPanel.querySelector('.panel-body > .btn');
-          target?.focus();
-        },
-        onClose: () => togglePanel(false),
-      }),
-    );
+  els.planToggle.hidden = false;
+  els.planToggle.setAttribute('aria-label', planButtonName(st));
+  const key = JSON.stringify([st.planVersion, st.currentSection, st.completedSections, st.lastNodeId, st.checks, st.activePlugins, st.ended]);
+  if (key === s.panelKey) return;
+  s.panelKey = key;
+  const hadFocus = els.planPanel.contains(document.activeElement);
+  const inner = document.createElement('div');
+  inner.className = 'sheet-inner';
+  inner.append(
+    planSheet(st, {
+      headingId: 'plan-sheet-heading',
+      formOpen: s.panelFormOpen,
+      draft: s.panelDraft,
+      onDraft: (text) => (s.panelDraft = text),
+      onFormOpen: (open) => (s.panelFormOpen = open),
+      onRequest: (text) => cmd('request_plan_change', { sessionId: s.id, text }),
+      onClose: () => els.planPanel.close(),
+    }),
+  );
+  els.planPanel.replaceChildren(inner);
+  if (hadFocus) focusQuiet($('#plan-sheet-heading'));
+}
+
+function openPlanSheet() {
+  renderPanel();
+  if (els.planToggle.hidden || els.planPanel.open) return;
+  els.planPanel.showModal();
+  focusQuiet($('#plan-sheet-heading'));
+}
+
+// ---------- desk ----------
+
+function pendingItem(s) {
+  const last = s.tl.items.findLast((i) => i.kind === 'question' || i.kind === 'choice');
+  return last && isPending(last) ? last : null;
+}
+
+/** The desk's one state: composer, or a note (with at most one button). */
+function deskState(s) {
+  if (s.readOnly) return { note: READ_ONLY_NOTE, button: 'Start a new session', act: 'new', primary: true };
+  if (!s.learn) return { composer: true };
+  if (pendingItem(s)) return { note: 'Answer the question to continue.', button: 'Go to question', act: 'question' };
+  const phase = s.st?.phase;
+  if (phase === 'awaitApproval') return { note: 'Review the plan to continue.', button: 'Go to plan', act: 'plan' };
+  if (phase === 'plan') {
+    if (s.planFailed && !running(s.id, 'planner')) return { note: 'Planning failed.' };
+    return { note: 'The planner is drafting your plan. You can keep reading.' };
   }
-  setPanelVisible(panelOpen());
+  if (s.planFailed) return { composer: true, note: 'Planning failed. You can describe what you want and try again.' };
+  return { composer: true };
 }
 
-function togglePanel(open = !panelOpen()) {
-  if (NARROW.matches) state.panelOpen.narrow = open;
-  else state.panelOpen.wide = open;
-  setPanelVisible(open && panelAvailable(state.current));
-  if (open) els.planPanel.querySelector('button, textarea')?.focus();
-  else els.planToggle.focus();
-}
-
-function updateComposerHint() {
+function renderDesk({ quiet = false, free = notEngaged() } = {}) {
   const s = state.current;
-  if (!s?.learn || s.readOnly) return;
-  const lastCard = s.tl.items.findLast((i) => i.kind === 'question' || i.kind === 'choice');
-  let hint = 'Reply…';
-  if (lastCard && isPending(lastCard)) hint = 'Answer the question above first…';
-  else if (s.st?.phase === 'awaitApproval') hint = 'Approve the plan above, or request a change';
-  els.prompt.placeholder = hint;
+  if (!s) return;
+  const d = deskState(s);
+  const wasShown = s.composerShown;
+  s.composerShown = Boolean(d.composer);
+  els.composer.hidden = !d.composer;
+  els.deskNote.hidden = !d.note;
+  if (d.note && els.deskNoteText.textContent !== d.note) els.deskNoteText.textContent = d.note;
+  const b = els.deskNoteButton;
+  b.hidden = !d.button;
+  if (d.button) {
+    b.textContent = d.button;
+    b.dataset.act = d.act;
+    b.classList.toggle('primary', Boolean(d.primary));
+    b.classList.toggle('secondary', !d.primary);
+  }
+  // The composer came back (plan approved, question answered): resume there.
+  if (!quiet && d.composer && !wasShown && free) focusQuiet(els.prompt);
+}
+
+function onDeskNoteButton() {
+  const s = state.current;
+  const act = els.deskNoteButton.dataset.act;
+  if (act === 'new') {
+    state.mode = 'learn';
+    showHome();
+    return;
+  }
+  let target = null;
+  if (act === 'question') target = pendingItem(s)?.el?.querySelector('[data-first]');
+  else if (act === 'plan') target = els.planSlot.querySelector('.plan-title');
+  if (!target) return;
+  target.scrollIntoView({ block: 'center', behavior: 'instant' });
+  focusQuiet(target);
 }
 
 // ---------- opening sessions ----------
 
 async function openSession(id) {
-  if (state.practiceBusy && state.current?.id !== id) {
-    toast('Wait for the current reply to finish, or stop it.');
-    return;
-  }
-  setNav(false);
   if (state.current?.id === id) return;
   const loading = { id, events: [], wasRunning: running(id, 'tutor') };
   state.loading = loading;
+  const summary = sessions.get(id);
+  const wantsState = summary?.mode === 'learn' && !summary.readOnly;
   let data;
+  let st = null;
   try {
-    [data] = await Promise.all([call('load_session', { id }), ensureKatex().catch(() => {})]);
+    [data, st] = await Promise.all([
+      call('load_session', { id }),
+      wantsState ? call('session_state', { sessionId: id }).catch((e) => ({ error: message(e) })) : null,
+      ensureKatex().catch(() => {}),
+    ]);
   } catch (e) {
     if (state.loading === loading) state.loading = null;
-    toast(message(e), true);
+    sessions.setRowStatus(id, `Couldn’t open this session: ${message(e)}`);
     return;
   }
   if (state.loading !== loading) return; // another session was opened meanwhile
@@ -876,23 +990,54 @@ async function openSession(id) {
     s.messages = data.messages;
     s.tl.items = data.messages.map((msg, i) => ({ kind: msg.role === 'user' ? 'user' : 'assistant', key: `m${i}`, msg }));
   }
+  if (st?.error) s.stError = st.error;
+  else if (st) s.st = st;
   state.current = s;
   showConversation();
   mountTimeline();
   if (s.learn && !s.readOnly) {
     if (loading.wasRunning) ensureLive().midway = true;
+    if (!s.st && !s.stError) await fetchState(s);
+    if (state.current !== s) return;
+    applyState(s, { initial: true });
     state.loading = null;
     for (const ev of loading.events) sessionEvent(s, ev);
-    updateComposerHint();
-    refreshState(s);
   } else {
     state.loading = null;
     const last = s.messages.at(-1);
-    if (!s.learn && last?.role === 'user') showError('The tutor has not answered this yet.', 'Get a reply', () => runPractice(null));
+    if (!s.learn && last?.role === 'user') {
+      showError({ title: 'The tutor hasn’t answered this yet.', action: 'Get a reply', onRetry: () => runPractice(null) });
+    }
   }
-  scrollToBottom(true);
   fillViewport();
+  resume(s);
   syncBusy();
+}
+
+/**
+ * Resumption cue on open: align the last tutor entry under the head (or the
+ * pending exercise / plan if it would not fit below it) and focus the
+ * learner's next action.
+ */
+function resume(s) {
+  const m = els.messages;
+  const tutors = els.timeline.querySelectorAll('.entry.tutor');
+  const last = tutors[tutors.length - 1] ?? null;
+  const pending = pendingItem(s)?.el ?? null;
+  const plan = els.planSlot.querySelector('.plan-doc');
+  const block = pending ?? plan;
+  let target = last;
+  if (block && (!last || last.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+    const room = m.clientHeight - ALIGN_GAP;
+    if (!last || block.getBoundingClientRect().bottom - last.getBoundingClientRect().top > room) target = block;
+  }
+  if (target) alignUnderHead(target);
+  let focus;
+  if (pending) focus = pending.querySelector('[data-first]');
+  else if (plan) focus = plan.querySelector('.plan-title');
+  else if (s.readOnly) focus = els.deskNoteButton;
+  else focus = els.prompt;
+  focusQuiet(focus);
 }
 
 // ---------- sending ----------
@@ -904,8 +1049,10 @@ async function startLearn(text) {
   state.starting = true;
   showConversation();
   mountTimeline();
-  ensureLive();
+  beginLive(s, { align: false });
+  s.turnStartedAt = performance.now();
   syncBusy();
+  focusQuiet(els.prompt);
   ensureKatex().catch(() => {});
   try {
     const summary = await call('start_teaching', { text });
@@ -918,7 +1065,7 @@ async function startLearn(text) {
       els.prompt.value = text;
       autoGrow();
       updateSendState();
-      toast(message(e), true);
+      setPromptError(message(e));
     } else if (state.current === s && !s.errorEl && !running(s.id, 'tutor')) {
       showTurnError(message(e));
     }
@@ -942,7 +1089,7 @@ async function sendLearner(text) {
         autoGrow();
         updateSendState();
       }
-      toast(message(e), true);
+      setPromptError(message(e));
     } else if (!s.errorEl && !running(s.id, 'tutor')) {
       showTurnError(message(e));
     }
@@ -959,24 +1106,25 @@ async function runPractice(text) {
     state.current = newView({ id: null, mode: 'practice', title: text });
     showConversation();
     mountTimeline();
+    focusQuiet(els.prompt);
   }
   const s = state.current;
   if (text !== null) {
     s.messages.push({ role: 'user', content: text });
     const item = { kind: 'user', key: `m${s.messages.length - 1}`, msg: { role: 'user', content: text } };
     s.tl.items.push(item);
+    s.atEnd = !isNew && nearBottom();
     appendItem(item);
+    if (!isNew) item.el.scrollIntoView({ block: 'nearest', behavior: 'instant' });
   }
-  const live = ensureLive();
-  scrollToBottom(true);
+  const live = beginLive(s, { align: !isNew });
   state.practiceBusy = true;
   syncBusy();
 
   const onEvent = channel((ev) => {
     if (ev.kind === 'session') {
       if (!s.id) s.id = ev.session.id;
-      upsertSession(ev.session);
-      if (state.current === s) setActiveSession(s.id);
+      sessions.upsert(ev.session);
       setTitle(s, ev.session.title);
       updateSendState();
       return;
@@ -985,6 +1133,7 @@ async function runPractice(text) {
     else if (ev.kind === 'thinking') live.addThinking(ev.delta);
   });
 
+  let ok = false;
   try {
     const stored = text === null
       ? await call('retry_reply', { sessionId: s.id, onEvent })
@@ -992,31 +1141,34 @@ async function runPractice(text) {
     s.messages.push(stored);
     const item = { kind: 'assistant', key: `m${s.messages.length - 1}`, msg: stored };
     item.el = live.finalize(stored);
-    s.live = null;
+    if (s.live === live) s.live = null;
     s.tl.items.push(item);
     appendItem(item);
+    ok = true;
   } catch (e) {
-    dropLive(s);
+    if (s.live === live) dropLive(s);
+    else live.dispose();
     if (isNew && !s.id) {
       state.practiceBusy = false;
       showHome();
       els.prompt.value = text;
       autoGrow();
-      toast(message(e), true);
+      setPromptError(message(e));
     } else if (state.current === s) {
-      showError(message(e), 'Retry', () => runPractice(null));
+      showError({ text: message(e), onRetry: () => runPractice(null) });
     }
   } finally {
     state.practiceBusy = false;
+    if (state.current === s) headStatus('');
     syncBusy();
-    if (state.current === s) scrollToBottom();
-    if (s.id) bumpSession(s.id);
+    if (s.id) sessions.bump(s.id);
   }
+  if (ok && state.current === s) announce('Reply finished.');
 }
 
 function stop() {
   const s = state.current;
-  if (s?.id) call('cancel_reply', { sessionId: s.id }).catch((e) => toast(message(e), true));
+  if (s?.id) call('cancel_reply', { sessionId: s.id }).catch((e) => setPromptError(message(e)));
 }
 
 function submit(event) {
@@ -1028,12 +1180,13 @@ function submit(event) {
   const text = els.prompt.value.trim();
   if (!text) return;
   if (!modelReady()) {
-    toast('Choose a model first.', true);
+    setPromptError('Choose a model first.');
     openSettings();
     return;
   }
   els.prompt.value = '';
   autoGrow();
+  setPromptError('');
   updateSendState();
   const s = state.current;
   if (!s) {
@@ -1043,86 +1196,72 @@ function submit(event) {
   else runPractice(text);
 }
 
-// ---------- links inside messages ----------
-
-els.messages.addEventListener('click', (e) => {
-  const a = e.target.closest('a[href]');
-  if (!a) return;
-  e.preventDefault();
-  const url = a.getAttribute('href');
-  if (url.startsWith('https://')) call('open_external', { url }).catch((err) => toast(message(err), true));
-});
+function goHome() {
+  if (state.practiceBusy) {
+    headStatus(GUARD);
+    return;
+  }
+  showHome({ focusId: state.current?.id });
+}
 
 // ---------- wiring ----------
 
 function wire() {
+  els.page = $('#page');
   els.composer.addEventListener('submit', submit);
   els.prompt.addEventListener('input', () => {
     autoGrow();
     updateSendState();
+    if (els.promptError.textContent) setPromptError('');
   });
   els.prompt.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.isComposing) {
       e.preventDefault();
       if (!isBusy()) els.composer.requestSubmit();
     }
   });
-  document.querySelectorAll('#mode-toggle button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
-  const home = () => {
-    if (state.practiceBusy) return toast('Wait for the current reply to finish, or stop it.');
-    setNav(false);
-    showHome();
-  };
-  $('#new-session').addEventListener('click', home);
-  $('#readonly-new').addEventListener('click', () => {
-    state.mode = 'learn';
-    home();
+  els.modes.addEventListener('change', (e) => {
+    if (e.target.name === 'mode') setMode(e.target.value);
   });
-  els.sessionList.addEventListener('click', onSidebarClick);
-  els.sessionList.addEventListener('keydown', (e) => {
-    const item = e.target;
-    if (!item.classList?.contains('session-item')) return;
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      openSession(item.dataset.id);
+  els.back.addEventListener('click', goHome);
+  els.deskNoteButton.addEventListener('click', onDeskNoteButton);
+  els.continueBtn.addEventListener('click', continueReading);
+  els.messages.addEventListener('scroll', onMessagesScroll, { passive: true });
+  els.messages.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href]');
+    if (!a) return;
+    e.preventDefault();
+    const url = a.getAttribute('href');
+    if (url.startsWith('https://')) {
+      call('open_external', { url }).catch((err) => headStatus(`Couldn’t open the link: ${message(err)}`));
     }
   });
-  els.messages.addEventListener('scroll', onMessagesScroll, { passive: true });
-  els.planToggle.addEventListener('click', () => togglePanel());
-  els.planScrim.addEventListener('click', () => togglePanel(false));
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && NARROW.matches && !els.planPanel.hidden) togglePanel(false);
+  els.planToggle.addEventListener('click', openPlanSheet);
+  els.planPanel.addEventListener('close', () => {
+    if (!els.planToggle.hidden) focusQuiet(els.planToggle);
   });
-  NARROW.addEventListener('change', () => {
-    if (panelAvailable(state.current)) setPanelVisible(panelOpen());
+  els.planPanel.addEventListener('click', (e) => {
+    if (e.target === els.planPanel) els.planPanel.close();
   });
   $('#open-settings').addEventListener('click', openSettings);
-  els.modelPill.addEventListener('click', openSettings);
   $('#setup-button').addEventListener('click', openSettings);
-  $('#open-sidebar').addEventListener('click', () => setNav(true));
-  $('#close-sidebar').addEventListener('click', () => setNav(false));
-  $('#scrim').addEventListener('click', () => setNav(false));
-  initSettings({ changed: applyConfig, toast });
+  $('#sessions-retry').addEventListener('click', loadSessions);
+  initSettings({ changed: applyConfig });
 }
 
 async function start() {
   wire();
   showHome();
   if (!available) {
-    toast('Open Learning Harness through its app to use it.', true);
+    els.start.hidden = true;
+    els.unavailable.hidden = false;
+    sessions.render();
     return;
   }
   subscribe();
-  const [config, sessions] = await Promise.allSettled([loadConfig(), call('list_sessions')]);
-  if (config.status === 'fulfilled') applyConfig(config.value);
-  else toast(message(config.reason), true);
-  if (sessions.status === 'fulfilled') {
-    // Keep entries a `session` event may already have added.
-    const seen = new Set(sessions.value.map((x) => x.id));
-    state.sessions = [...state.sessions.filter((x) => !seen.has(x.id)), ...sessions.value].sort((a, b) => time(b.updatedAt) - time(a.updatedAt));
-  } else toast(message(sessions.reason), true);
-  renderSidebar();
-  if (state.current) setActiveSession(state.current.id);
+  const [config] = await Promise.all([loadConfig().catch((e) => ({ error: message(e) })), loadSessions()]);
+  if (config.error) setPromptError(`Couldn’t load your settings: ${config.error}`);
+  else applyConfig(config);
   // Warm KaTeX once the window is idle, not on the startup path.
   (window.requestIdleCallback ?? ((f) => setTimeout(f, 1500)))(() => ensureKatex().catch(() => {}));
 }

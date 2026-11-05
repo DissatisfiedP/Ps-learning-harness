@@ -140,3 +140,14 @@ export function renderMarkdown(source) {
 export function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
+
+/** Rough plain text of a Markdown snippet, for short screen-reader messages. */
+export function plainText(source, max = 140) {
+  const text = String(source ?? '')
+    .replace(/```[\s\S]*?(```|$)/g, ' ')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`#>~|$\\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}

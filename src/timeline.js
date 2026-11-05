@@ -1,21 +1,25 @@
 // Folds a Learn session's op log into the ordered list of things the
-// conversation shows. Items are updated in place (a question card gets its
-// answer and verdict, a job chip its state and brief), so every op yields at
+// conversation shows. Items are updated in place (a question block gets its
+// answer and verdict, a job line its state and brief), so every op yields at
 // most one added or updated item.
 //
 // Item kinds:
 //   user / assistant  { msg }
-//   notice            { text }                       plan-notice messages
+//   notice            { text, error? }               plan-notice messages
 //   job               { jobId, jobKind, state, question, error, result, brief }
 //   question          { callId, args, answer, failed, verdict, note }
 //   choice            { callId, args, answer, failed }
 //   divider           { text }                       compaction
+//   section           { sectionId, close, plan }     UI-only, from `phase` ops
+//
+// `tl.plan` is the latest `plan` op payload; section openers take their
+// title and goal from it.
 
 const RESEARCH_PREFIX = /^\[research brief\]\s*/;
 const NOTICE_PREFIX = /^\[plan update\]\s*/;
 
 export function createTimeline() {
-  return { items: [], byKey: new Map(), seen: new Set() };
+  return { items: [], byKey: new Map(), seen: new Set(), plan: null, lastSection: null };
 }
 
 function add(tl, item) {
@@ -74,9 +78,24 @@ export function applyOp(tl, op) {
     }
     case 'compaction':
       return add(tl, { kind: 'divider', key: op.opId, text: 'Earlier turns summarized' });
+    case 'plan':
+      if (op.payload) tl.plan = op.payload;
+      return null;
+    case 'phase':
+      return applyPhase(tl, op);
     default:
       return null;
   }
+}
+
+/** A section opener for `phase: teach` (with a section) and `phase: close`. */
+function applyPhase(tl, op) {
+  const close = op.phase === 'close';
+  if (!close && !(op.phase === 'teach' && op.sectionId)) return null;
+  const id = close ? '\u0000close' : op.sectionId;
+  if (tl.lastSection === id) return null;
+  tl.lastSection = id;
+  return add(tl, { kind: 'section', key: op.opId ?? `section:${id}`, sectionId: close ? null : op.sectionId, close, plan: tl.plan });
 }
 
 function applyMessage(tl, op) {
@@ -137,7 +156,7 @@ function applyTool(tl, op) {
   return null;
 }
 
-/** Ops after which the phase strip / plan panel must be refreshed. */
+/** Ops after which the running head, desk and plan must be refreshed. */
 export function affectsState(op) {
   return op.op === 'phase' || op.op === 'plan' || op.op === 'approve' || op.op === 'pluginGrant' || op.op === 'tool';
 }
