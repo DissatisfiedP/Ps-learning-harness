@@ -56,7 +56,13 @@ fn replay_message(m: &crate::Message) -> Vec<Value> {
     let mut native_text: Option<String> = None;
     for block in &m.content {
         match block {
-            ContentBlock::Text { text: t } => text = Some(t.clone()),
+            ContentBlock::Text { text: t } => match text.as_mut() {
+                Some(acc) => {
+                    acc.push_str("\n\n");
+                    acc.push_str(t);
+                }
+                None => text = Some(t.clone()),
+            },
             ContentBlock::ToolCall {
                 id,
                 name,
@@ -104,13 +110,14 @@ fn replay_message(m: &crate::Message) -> Vec<Value> {
             out.push(msg);
         }
         Role::User => {
-            // A user message: optional text, then each tool result as its own
-            // `{role:"tool"}` message. tool-result-only messages emit just those.
+            // Tool results must directly follow the assistant's tool_calls, so
+            // they come first; any user text follows as its own message.
             let body = text.or(native_text);
-            if body.is_some() || tool_results.is_empty() {
+            let only_text = tool_results.is_empty();
+            out.extend(tool_results);
+            if body.is_some() || only_text {
                 out.push(json!({ "role": "user", "content": body.unwrap_or_default() }));
             }
-            out.extend(tool_results);
         }
     }
     out

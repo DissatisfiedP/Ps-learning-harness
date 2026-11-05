@@ -131,11 +131,47 @@ pub struct PendingCall {
     pub args: serde_json::Value,
 }
 
+/// A job result that is done but not yet delivered into the conversation
+/// (it waits while a learner answer is pending, §4.16 delivery rule).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedResult {
+    pub job_id: String,
+    pub kind: String,
+    pub question: String,
+    pub result: serde_json::Value,
+}
+
+/// A job that is queued or running according to the op log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenJob {
+    pub job_id: String,
+    pub kind: String,
+    pub state: String,
+    pub question: String,
+    pub blocking: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+}
+
+/// A plugin granted for one section (by the plan or by `plugin_request`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Grant {
+    pub section_id: String,
+    pub plugin: String,
+    /// plan | request | learner
+    pub by: String,
+}
+
 /// Derived session state, rebuilt by replaying ops. Never stored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionState {
     pub phase: Phase,
+    /// `session_end` succeeded.
+    pub ended: bool,
     /// The goal record, verbatim JSON from `goal_set`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<serde_json::Value>,
@@ -146,16 +182,31 @@ pub struct SessionState {
     pub probe: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Plan>,
+    /// Number of `plan` ops so far (1 = the first plan).
     pub plan_version: u32,
+    /// The plan version the learner last approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_section: Option<String>,
+    /// Sections closed by an accepted `section_done`, in order.
+    pub completed_sections: Vec<String>,
     /// nodeId -> passing checks seen so far.
     pub checks: BTreeMap<String, Vec<CheckVerdict>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_call: Option<PendingCall>,
-    /// Job results delivered but not yet consumed into a turn.
-    pub queued_jobs: Vec<serde_json::Value>,
-    pub granted_plugins: Vec<String>,
+    /// Done job results not yet delivered into the conversation.
+    pub queued_jobs: Vec<QueuedResult>,
+    /// Jobs still queued or running according to the log.
+    pub open_jobs: Vec<OpenJob>,
+    /// Plugins granted per section (plan sections after learner removals,
+    /// plus mid-section `plugin_request` grants).
+    pub grants: Vec<Grant>,
+    /// Plugins active in the current section.
+    pub active_plugins: Vec<String>,
+    /// `nodeId` of the latest teach-phase `question_ask` (map highlight).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_node_id: Option<String>,
     /// desktop | mobile
     pub platform: String,
     /// Learner-model summary, or "no graph yet" (graph is out of scope).
@@ -169,5 +220,23 @@ impl SessionState {
     pub fn current_section(&self) -> Option<&Section> {
         let id = self.current_section.as_ref()?;
         self.plan.as_ref()?.sections.iter().find(|s| &s.id == id)
+    }
+
+    /// The first plan section not yet completed: where teaching resumes after
+    /// an approval or a revision.
+    pub fn next_open_section(&self) -> Option<String> {
+        self.plan
+            .as_ref()?
+            .sections
+            .iter()
+            .find(|s| !self.completed_sections.contains(&s.id))
+            .map(|s| s.id.clone())
+    }
+
+    /// Whether a node has at least one `check` question graded `correct`.
+    pub fn node_passed(&self, node_id: &str) -> bool {
+        self.checks
+            .get(node_id)
+            .is_some_and(|v| v.iter().any(|c| c.verdict == "correct"))
     }
 }

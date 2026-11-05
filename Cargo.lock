@@ -1443,10 +1443,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "providers",
+ "reqwest 0.12.28",
+ "research-search",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "ulid",
 ]
 
@@ -1459,6 +1462,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "tokio",
 ]
 
 [[package]]

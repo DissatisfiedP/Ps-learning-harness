@@ -15,7 +15,21 @@ use crate::{
 };
 
 pub(crate) fn body(req: &ChatRequest) -> Value {
-    let messages: Vec<Value> = req.messages.iter().map(replay_message).collect();
+    // Roles must alternate: merge consecutive same-role messages (e.g. tool
+    // results followed by a delivered job message), keeping block order.
+    let mut messages: Vec<Value> = Vec::with_capacity(req.messages.len());
+    for m in req.messages.iter().map(replay_message) {
+        match messages.last_mut() {
+            Some(prev) if prev["role"] == m["role"] => {
+                if let (Some(dst), Some(src)) =
+                    (prev["content"].as_array_mut(), m["content"].as_array())
+                {
+                    dst.extend(src.iter().cloned());
+                }
+            }
+            _ => messages.push(m),
+        }
+    }
     let system = json!([{
         "type": "text",
         "text": req.system,

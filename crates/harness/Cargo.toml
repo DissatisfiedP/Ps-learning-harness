@@ -5,11 +5,14 @@ edition.workspace = true
 
 [dependencies]
 providers = { path = "../providers" }
+research-search = { path = "../research-search" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tracing = "0.1"
 ulid = "1"
 
 [lints]

@@ -169,11 +169,17 @@ async fn chat_replay_shape_and_cross_wire_native_drop() {
         },
         Message {
             role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                call_id: "call_a".into(),
-                content: "pong".into(),
-                is_error: false,
-            }],
+            content: vec![
+                ContentBlock::ToolResult {
+                    call_id: "call_a".into(),
+                    content: "pong".into(),
+                    is_error: false,
+                },
+                // e.g. a delivered job result in the same user turn
+                ContentBlock::Text {
+                    text: "[research brief] done".into(),
+                },
+            ],
         },
     ];
     // A plain stop stream.
@@ -185,8 +191,8 @@ async fn chat_replay_shape_and_cross_wire_native_drop() {
     let (_done, _, _) = run_full(ProviderId::Deepseek, &base, &messages, &[ping_tool()]).await;
     let body = body_of(&raw.await.unwrap());
     let msgs = body["messages"].as_array().unwrap();
-    // system + assistant + tool result.
-    assert_eq!(msgs.len(), 3);
+    // system + assistant + tool result + the user's text after it.
+    assert_eq!(msgs.len(), 4);
     assert_eq!(msgs[0]["role"], "system");
     // assistant: text + tool_calls, no anthropic native block.
     assert_eq!(msgs[1]["role"], "assistant");
@@ -204,6 +210,9 @@ async fn chat_replay_shape_and_cross_wire_native_drop() {
     assert_eq!(msgs[2]["role"], "tool");
     assert_eq!(msgs[2]["tool_call_id"], "call_a");
     assert_eq!(msgs[2]["content"], "pong");
+    // User text follows the tool message; it never splits call from result.
+    assert_eq!(msgs[3]["role"], "user");
+    assert_eq!(msgs[3]["content"], "[research brief] done");
     // prompt_cache_key is set.
     assert_eq!(body["prompt_cache_key"], "sess-1");
     // tools are in the function/name shape.

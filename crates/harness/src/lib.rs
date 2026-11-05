@@ -1,15 +1,24 @@
-//! App core: sessions, provider connections, and running a tutor turn.
-//! The Tauri shell is a thin command layer over [`Harness`].
+//! App core: sessions, provider connections, and the agent runtime (tutor,
+//! planner, researcher). The Tauri shell is a thin command layer over
+//! [`Harness`].
 
+mod agent;
 mod config;
+pub mod events;
+mod files;
+mod jobs;
+pub mod plugins;
 mod prompts;
+pub mod replay;
 mod sessions;
 pub mod state;
+pub mod tools;
+mod web;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use providers::workbuddy::{self, LoginStart};
@@ -18,12 +27,14 @@ use providers::{
     ProviderError, ProviderId, Role, StopReason, StreamEvent, ToolSpec, Usage,
 };
 use serde::Serialize;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Semaphore};
 
 pub use config::{ModelChoice, ModelRole, Roles, Settings};
+pub use events::{AgentEvent, AgentName, Coalescer, Envelope, EventSink};
 pub use prompts::{Composer, PluginManifest, TemplateValues};
 pub use providers;
-pub use sessions::{Ending, Mode, Session, SessionSummary, StoredMessage};
+pub use sessions::{Ending, Mode, Op, RemovedPlugin, Session, SessionSummary, StoredMessage};
+pub use state::SessionState;
 
 const MAX_TOKENS: u32 = 8192;
 const LOGIN_POLL: Duration = Duration::from_millis(1500);
@@ -47,11 +58,12 @@ pub enum Error {
     Prompt(String),
 }
 
-/// Streamed to the UI while a turn runs.
+/// Streamed to the UI during a Practice turn (`send`/`retry`). Learn sessions
+/// use [`AgentEvent`]s through the event sink instead.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ChatEvent<'a> {
-    /// First event of `send` when it created a new session.
+    /// First event when a new session was created.
     Session {
         session: &'a SessionSummary,
     },
@@ -117,18 +129,36 @@ pub struct RoleInfo {
 }
 
 pub struct Harness {
-    repo: PathBuf,
-    client: Client,
-    store: sessions::Store,
-    config: Mutex<config::Config>,
-    running: Mutex<HashMap<String, oneshot::Sender<()>>>,
-    login_cancelled: AtomicBool,
+    pub(crate) repo: PathBuf,
+    pub(crate) client: Client,
+    pub(crate) store: sessions::Store,
+    pub(crate) config: Mutex<config::Config>,
+    /// Stop handles of running tutor/practice turns, by session.
+    pub(crate) running: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    pub(crate) login_cancelled: AtomicBool,
     /// Input/output tokens per role, accumulated in memory.
-    role_usage: Mutex<HashMap<ModelRole, RoleUsage>>,
+    pub(crate) role_usage: Mutex<HashMap<ModelRole, RoleUsage>>,
+    /// Per-session turn lock: tutor turns, answers and job deliveries for one
+    /// session are serialized; different sessions never wait on each other.
+    pub(crate) turn_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Registered plugins (scaffolding, M5).
+    pub(crate) plugins: Mutex<plugins::PluginRegistry>,
+    /// Running jobs by job id.
+    pub(crate) jobs: Mutex<HashMap<String, jobs::JobHandle>>,
+    /// Background tasks by session (jobs, wakes, titles).
+    pub(crate) background: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
+    /// Sessions whose interrupted jobs were already restarted.
+    pub(crate) recovered: Mutex<HashSet<String>>,
+    /// Concurrency per role: Reader 3 (researcher, titles), Planner 1.
+    pub(crate) reader_slots: Arc<Semaphore>,
+    pub(crate) planner_slots: Arc<Semaphore>,
+    /// Where runtime events go (the UI); `None` drops them.
+    pub(crate) sink: Mutex<Option<EventSink>>,
 }
 
 impl Harness {
-    /// `repo` is the synced data repo; `config_dir` is device-local.
+    /// `repo` is the synced data repo; `config_dir` is device-local. Cheap:
+    /// no session is read and no prompt composed until first use.
     pub fn open(repo: &Path, config_dir: &Path) -> Result<Self, Error> {
         std::fs::create_dir_all(repo)?;
         let client = Client::builder()
@@ -138,12 +168,25 @@ impl Harness {
         Ok(Self {
             repo: repo.to_owned(),
             client,
-            store: sessions::Store::new(repo),
+            store: sessions::Store::new(repo, config_dir),
             config: Mutex::new(config::Config::load(config_dir)?),
             running: Mutex::new(HashMap::new()),
             login_cancelled: AtomicBool::new(false),
             role_usage: Mutex::new(HashMap::new()),
+            turn_locks: Mutex::new(HashMap::new()),
+            plugins: Mutex::new(plugins::PluginRegistry::default()),
+            jobs: Mutex::new(HashMap::new()),
+            background: Mutex::new(HashMap::new()),
+            recovered: Mutex::new(HashSet::new()),
+            reader_slots: Arc::new(Semaphore::new(3)),
+            planner_slots: Arc::new(Semaphore::new(1)),
+            sink: Mutex::new(None),
         })
+    }
+
+    /// Where runtime events (turns, ops, jobs) go.
+    pub fn set_event_sink(&self, sink: Option<EventSink>) {
+        *lock(&self.sink) = sink;
     }
 
     // ---- sessions -------------------------------------------------------
@@ -158,11 +201,21 @@ impl Harness {
 
     pub fn delete_session(&self, id: &str) -> Result<(), Error> {
         self.cancel(id);
+        let jobs: Vec<String> = lock(&self.jobs)
+            .iter()
+            .filter(|(_, h)| h.session_id == id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for job in jobs {
+            let _ = self.cancel_job(id, &job);
+        }
         self.store.delete(id)
     }
 
-    /// Appends the learner's message (creating the session when `session_id`
-    /// is `None`) and streams the tutor's reply.
+    /// Practice mode: appends the learner's message (creating the session
+    /// when `session_id` is `None`) and streams the reply from
+    /// `prompts/practice.md`. Learn sessions run through the agent runtime
+    /// ([`Harness::start_teaching`] and friends).
     pub async fn send(
         &self,
         session_id: Option<&str>,
@@ -170,6 +223,11 @@ impl Harness {
         text: &str,
         on_event: &mut (dyn FnMut(ChatEvent<'_>) + Send),
     ) -> Result<StoredMessage, Error> {
+        if mode != Mode::Practice {
+            return Err(Error::Invalid(
+                "Learn sessions run through the tutor; use start_teaching".into(),
+            ));
+        }
         let text = text.trim();
         if text.is_empty() {
             return Err(Error::Invalid("message is empty".into()));
@@ -178,7 +236,9 @@ impl Harness {
         self.model_choice()?;
         let id = match session_id {
             Some(id) => {
-                self.store.load(id)?;
+                if self.store.load(id)?.summary.mode != Mode::Practice {
+                    return Err(Error::Invalid("this is not a Practice session".into()));
+                }
                 id.to_owned()
             }
             None => {
@@ -192,13 +252,19 @@ impl Harness {
         self.reply(&id, on_event).await
     }
 
-    /// Re-runs the tutor after a failed turn (last message must be the learner's).
+    /// Practice mode: re-runs the reply after a failed turn (last message
+    /// must be the learner's).
     pub async fn retry(
         &self,
         session_id: &str,
         on_event: &mut (dyn FnMut(ChatEvent<'_>) + Send),
     ) -> Result<StoredMessage, Error> {
         let session = self.store.load(session_id)?;
+        if session.summary.mode != Mode::Practice {
+            return Err(Error::Invalid(
+                "Learn sessions resume with resume_turn".into(),
+            ));
+        }
         if session.messages.last().map(|m| m.role) != Some(Role::User) {
             return Err(Error::Invalid("nothing to retry".into()));
         }
@@ -219,7 +285,7 @@ impl Harness {
     ) -> Result<StoredMessage, Error> {
         let session = self.store.load(session_id)?;
         let choice = self.model_choice()?;
-        let system = prompt(&self.repo, session.summary.mode)?;
+        let system = practice_prompt(&self.repo)?;
         let history: Vec<Message> = session
             .messages
             .iter()
@@ -609,24 +675,15 @@ impl Harness {
     }
 }
 
-/// Mode prompt: the learner's override in `<repo>/prompts/<mode>.md` wins over
-/// the bundled text.
-fn prompt(repo: &Path, mode: Mode) -> Result<String, Error> {
-    let (name, bundled) = match mode {
-        Mode::Learn => ("learn.md", include_str!("../prompts/learn.md")),
-        Mode::Practice => ("practice.md", include_str!("../prompts/practice.md")),
-    };
-    match std::fs::read_to_string(repo.join("prompts").join(name)) {
-        Ok(text) if !text.trim().is_empty() => Ok(text),
-        Ok(_) => Ok(bundled.to_owned()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(bundled.to_owned()),
-        Err(e) => Err(e.into()),
-    }
+/// The Practice prompt (unchanged until the coach is built). A learner
+/// override in `<repo>/prompts/practice.md` wins over the bundled text.
+fn practice_prompt(repo: &Path) -> Result<String, Error> {
+    Composer::new(repo).load("practice.md")
 }
 
 /// A poisoned lock only means another command panicked mid-update of plain
 /// data; keep serving.
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
