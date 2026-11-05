@@ -6,7 +6,6 @@
   <title>Learning Harness</title>
   <link rel="stylesheet" href="./vendor/katex/katex.min.css" />
   <link rel="stylesheet" href="./styles.css" />
-  <script src="./vendor/katex/katex.min.js" defer></script>
   <script type="module" src="./app.js"></script>
 </head>
 <body>
@@ -48,6 +47,10 @@
           <span class="mode-chip" id="session-mode" hidden></span>
           <h1 id="session-title">New session</h1>
         </div>
+        <button class="plan-toggle btn small" id="plan-toggle" type="button" aria-controls="plan-panel" aria-expanded="false" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
+          Plan
+        </button>
         <button class="model-pill" id="model-pill" type="button" title="Change model">
           <span class="dot" aria-hidden="true"></span>
           <span id="model-pill-text">Choose a model</span>
@@ -81,8 +84,21 @@
       </section>
 
       <section class="conversation" id="conversation" hidden>
-        <div class="messages" id="messages" aria-live="polite"></div>
-        <div class="composer-dock" id="dock-composer-slot"></div>
+        <div class="conv-main">
+          <nav class="phase-strip" id="phase-strip" aria-label="Session progress" hidden></nav>
+          <div class="messages" id="messages">
+            <div class="timeline" id="timeline" role="log" aria-live="polite" aria-relevant="additions"></div>
+            <div class="plan-slot" id="plan-slot"></div>
+            <div class="live" id="live"></div>
+          </div>
+          <div class="composer-dock" id="dock-composer-slot"></div>
+          <div class="readonly-bar" id="readonly-bar" hidden>
+            <p>This session was made with an earlier version of the tutor and is read-only.</p>
+            <button class="btn primary" id="readonly-new" type="button">Start a new session</button>
+          </div>
+        </div>
+        <div class="plan-scrim" id="plan-scrim" hidden></div>
+        <aside class="plan-panel" id="plan-panel" aria-label="Plan" hidden></aside>
       </section>
 
       <form class="composer" id="composer">
