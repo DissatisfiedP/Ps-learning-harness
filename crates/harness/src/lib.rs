@@ -2,7 +2,9 @@
 //! The Tauri shell is a thin command layer over [`Harness`].
 
 mod config;
+mod prompts;
 mod sessions;
+pub mod state;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +21,7 @@ use serde::Serialize;
 use tokio::sync::oneshot;
 
 pub use config::{ModelChoice, ModelRole, Roles, Settings};
+pub use prompts::{Composer, PluginManifest, TemplateValues};
 pub use providers;
 pub use sessions::{Ending, Mode, Session, SessionSummary, StoredMessage};
 
@@ -40,6 +43,8 @@ pub enum Error {
     NotFound(String),
     #[error("{0}")]
     Invalid(String),
+    #[error("prompt: {0}")]
+    Prompt(String),
 }
 
 /// Streamed to the UI while a turn runs.
