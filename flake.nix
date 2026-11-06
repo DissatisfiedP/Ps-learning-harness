@@ -1,5 +1,5 @@
 {
-  description = "Learning Harness — Tauri v2 app (Rust core, web UI) backed by plain files + git sync";
+  description = "Learning Harness — Tauri v2 app (Rust core, plain web UI) backed by plain files";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -24,75 +24,67 @@
             };
           };
 
-          # Android SDK composition for the Tauri v2 mobile target.
-          androidSdk = (
-            pkgs.androidenv.composeAndroidPackages {
+          # Rust toolchain and the Tauri CLI. The UI is plain ES modules: no Node.
+          tools = with pkgs; [
+            rustc
+            cargo
+            clippy
+            rustfmt
+            rust-analyzer
+            cargo-tauri
+            pkg-config
+            git
+          ];
+
+          # Libraries Tauri v2 links on Linux (WebKitGTK 4.1 + libsoup 3).
+          libs = with pkgs; [
+            openssl
+            gtk3
+            webkitgtk_4_1
+            libsoup_3
+            librsvg
+            glib-networking
+          ];
+
+          common = {
+            buildInputs = libs;
+            LANG = "C.UTF-8";
+            LC_ALL = "C.UTF-8";
+          };
+
+          # Android SDK + NDK for `cargo tauri android`; no emulator image.
+          androidSdk =
+            (pkgs.androidenv.composeAndroidPackages {
               platformVersions = [ "34" ];
               buildToolsVersions = [ "34.0.0" ];
               includeNDK = true;
               ndkVersion = "26.1.10909125";
               includeEmulator = false;
               includeSystemImages = false;
-            }
-          ).androidsdk;
-
-          # Native tools: Rust core + shell. The UI is plain ES modules (no Node build).
-          baseNative = with pkgs; [
-            rustc
-            cargo
-            clippy
-            rustfmt
-            rust-analyzer
-            git
-            pkg-config
-          ];
-
-          # Tauri v2 Linux prerequisites: WebKitGTK + libsoup and friends (§6.1).
-          baseBuild = with pkgs; [
-            openssl
-            gtk3
-            webkitgtk_4_1
-            libsoup_3
-            librsvg
-            libayatana-appindicator
-            glib-networking
-            libsecret
-            xdo
-          ];
-
-          defaultHook = ''
-            echo "learning-harness dev shell: $(rustc --version)"
-          '';
+            }).androidsdk;
+          sdkRoot = "${androidSdk}/libexec/android-sdk";
         in
         {
-          # Desktop + core work (build order steps 1–2).
-          default = pkgs.mkShell {
-            nativeBuildInputs = baseNative;
-            buildInputs = baseBuild;
-            LANG = "C.UTF-8";
-            LC_ALL = "C.UTF-8";
-            shellHook = defaultHook;
-          };
+          default = pkgs.mkShell (common // { nativeBuildInputs = tools; });
 
-          # Android: SDK + platform-tools + NDK + JDK. No emulator image.
-          android = pkgs.mkShell {
-            nativeBuildInputs = baseNative ++ [
-              androidSdk
-              pkgs.jdk21
-            ];
-            buildInputs = baseBuild;
-            LANG = "C.UTF-8";
-            LC_ALL = "C.UTF-8";
-            JAVA_HOME = pkgs.jdk21.home;
-            ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
-            ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
-            ANDROID_NDK_ROOT = "${androidSdk}/libexec/android-sdk/ndk-bundle";
-            ANDROID_NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk-bundle";
-            GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${androidSdk}/libexec/android-sdk/build-tools/34.0.0/aapt2";
-            shellHook = ''
-              for d in "$ANDROID_HOME"/cmake/*/bin; do [ -d "$d" ] && export PATH="$d:$PATH"; done
-            '' + defaultHook;
-          };
+          android = pkgs.mkShell (
+            common
+            // {
+              nativeBuildInputs = tools ++ [
+                androidSdk
+                pkgs.jdk21
+              ];
+              JAVA_HOME = pkgs.jdk21.home;
+              ANDROID_HOME = sdkRoot;
+              ANDROID_SDK_ROOT = sdkRoot;
+              ANDROID_NDK_ROOT = "${sdkRoot}/ndk-bundle";
+              ANDROID_NDK_HOME = "${sdkRoot}/ndk-bundle";
+              GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${sdkRoot}/build-tools/34.0.0/aapt2";
+              shellHook = ''
+                for d in "$ANDROID_HOME"/cmake/*/bin; do [ -d "$d" ] && export PATH="$d:$PATH"; done
+              '';
+            }
+          );
         }
       );
     };
