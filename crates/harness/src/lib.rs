@@ -7,6 +7,7 @@ mod config;
 pub mod events;
 mod files;
 mod jobs;
+mod map;
 pub mod plugins;
 mod prompts;
 pub mod replay;
@@ -31,6 +32,7 @@ use tokio::sync::{oneshot, Semaphore};
 
 pub use config::{ModelChoice, ModelRole, Roles, Settings};
 pub use events::{AgentEvent, AgentName, Coalescer, Envelope, EventSink};
+pub use map::{MapNode, MapPlan};
 pub use prompts::{Composer, PluginManifest, TemplateValues};
 pub use providers;
 pub use sessions::{Ending, Mode, Op, RemovedPlugin, Session, SessionSummary, StoredMessage};
@@ -210,6 +212,20 @@ impl Harness {
             let _ = self.cancel_job(id, &job);
         }
         self.store.delete(id)
+    }
+
+    /// The Map page's data: every non-legacy Learn session with an approved
+    /// plan, newest first, with check verdicts per idea (ui-design §7.6).
+    pub fn learning_map(&self) -> Result<Vec<MapPlan>, Error> {
+        let mut out = Vec::new();
+        for summary in self.store.list()? {
+            if summary.mode != Mode::Learn || summary.read_only {
+                continue;
+            }
+            let state = self.store.with_ops(&summary.id, replay::replay_state)?;
+            out.extend(map::plan_of(summary, state));
+        }
+        Ok(out)
     }
 
     /// Practice mode: appends the learner's message (creating the session

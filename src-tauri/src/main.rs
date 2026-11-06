@@ -15,7 +15,7 @@ use std::time::Duration;
 use harness::providers::workbuddy::LoginStart;
 use harness::providers::{ModelInfo, ProviderId};
 use harness::{
-    AgentEvent, ChatEvent, Coalescer, Envelope, Harness, Mode, ModelChoice, ModelRole,
+    AgentEvent, ChatEvent, Coalescer, Envelope, Harness, MapPlan, Mode, ModelChoice, ModelRole,
     ProviderStatus, RemovedPlugin, RoleInfo, RoleTestResult, RoleUsageEntry, Session, SessionState,
     SessionSummary, Settings, StoredMessage,
 };
@@ -86,6 +86,12 @@ async fn delete_session(h: H<'_>, id: String) -> Result<()> {
 #[tauri::command]
 async fn session_state(h: H<'_>, session_id: String) -> Result<SessionState> {
     blocking(&h, move |h| h.session_state(&session_id)).await
+}
+
+/// The Map page: approved plans of Learn sessions with check verdicts.
+#[tauri::command]
+async fn learning_map(h: H<'_>) -> Result<Vec<MapPlan>> {
+    blocking(&h, |h| h.learning_map()).await
 }
 
 #[tauri::command]
@@ -302,6 +308,7 @@ fn main() {
             load_session,
             delete_session,
             session_state,
+            learning_map,
             subscribe_events,
             start_teaching,
             send_learner_message,

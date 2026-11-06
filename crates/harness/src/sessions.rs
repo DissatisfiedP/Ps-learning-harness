@@ -428,6 +428,19 @@ impl Store {
         Ok(ops)
     }
 
+    /// Runs `f` over a session's ops without touching the LRU order or
+    /// filling it (scans over every session would otherwise evict the open
+    /// ones). A cached session is borrowed, not cloned.
+    pub fn with_ops<R>(&self, id: &str, f: impl FnOnce(&[Op]) -> R) -> Result<R, Error> {
+        {
+            let cache = lock(&self.cache);
+            if let Some((_, ops)) = cache.iter().find(|(k, _)| k == id) {
+                return Ok(f(ops));
+            }
+        }
+        Ok(f(&read_ops(&self.existing_path(id)?)?))
+    }
+
     pub fn summary(&self, id: &str) -> Result<SessionSummary, Error> {
         let path = self.existing_path(id)?;
         let mut s = read_header(&path)?
