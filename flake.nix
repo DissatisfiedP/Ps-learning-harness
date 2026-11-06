@@ -1,10 +1,16 @@
 {
   description = "Learning Harness — Tauri v2 app (Rust core, plain web UI) backed by plain files";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
   outputs =
-    { nixpkgs, ... }:
+    { nixpkgs, fenix, ... }:
     let
       systems = [
         "x86_64-linux"
@@ -24,13 +30,30 @@
             };
           };
 
-          # Rust toolchain and the Tauri CLI. The UI is plain ES modules: no Node.
-          tools = with pkgs; [
-            rustc
+          # Stable Rust from fenix (pinned by flake.lock). The Android shell adds
+          # the std libraries for the four ABIs `cargo tauri android` builds.
+          rust = fenix.packages.${system};
+          components = with rust.stable; [
             cargo
+            rustc
             clippy
             rustfmt
+            rust-src
             rust-analyzer
+          ];
+          androidTargets = [
+            "aarch64-linux-android"
+            "armv7-linux-androideabi"
+            "i686-linux-android"
+            "x86_64-linux-android"
+          ];
+          hostToolchain = rust.combine components;
+          androidToolchain = rust.combine (
+            components ++ map (t: rust.targets.${t}.stable.rust-std) androidTargets
+          );
+
+          # The Tauri CLI and build tools. The UI is plain ES modules: no Node.
+          tools = with pkgs; [
             cargo-tauri
             pkg-config
             git
@@ -65,12 +88,12 @@
           sdkRoot = "${androidSdk}/libexec/android-sdk";
         in
         {
-          default = pkgs.mkShell (common // { nativeBuildInputs = tools; });
+          default = pkgs.mkShell (common // { nativeBuildInputs = [ hostToolchain ] ++ tools; });
 
           android = pkgs.mkShell (
             common
             // {
-              nativeBuildInputs = tools ++ [
+              nativeBuildInputs = [ androidToolchain ] ++ tools ++ [
                 androidSdk
                 pkgs.jdk21
               ];
