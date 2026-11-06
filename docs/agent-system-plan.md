@@ -1,6 +1,6 @@
 # Agent system plan
 
-`learning-harness-architecture.md` (the architecture) is the source of truth. This file records where the code departs from it and what is built so far.
+`docs/architecture.md` (the architecture) is the source of truth. This file records where the code departs from it and what is built so far.
 
 ## Decisions that depart from the architecture
 
@@ -11,9 +11,9 @@
 | Dev server | None. The old `crates/container` HTTP server was removed. | R1 forbids a separate server process. Its logic duplicated the Tauri commands. |
 | Keyless web search | Wikipedia search API. | DuckDuckGo's HTML endpoint serves its bot page to Rust HTTP clients. Mojeek serves a captcha. |
 
-## Decisions for the agent-runtime build (docs/build-prompt.md)
+## Decisions for the agent runtime
 
-These settle what the work order left open. Recorded before code so the choices are auditable.
+These settle what the architecture left open. Recorded before code so the choices are auditable.
 
 | Decision | Chosen | Why |
 |---|---|---|
@@ -27,7 +27,7 @@ These settle what the work order left open. Recorded before code so the choices 
 | Job delivery | A job's result is persisted on its `job` op (`done`/`failed`). Delivery takes the session lock, skips if an answer is pending (the next tutor turn delivers first), else appends a tagged user message (`research-brief` / `plan-notice`, with `jobId`) and wakes the tutor in Measure/Teach/Close. A message's `jobId` marks the result delivered, so pending deliveries are derivable after a restart. | M4 delivery rule; resumable. |
 | Scope `brief` op | Written when the scope brief is *delivered*, not when the researcher submits it. | The `probe_done` gate then means "the tutor has the brief in its conversation", never just "it exists in the log". |
 | Tool op shape | Two ops per call, matched by `callId`: the call (before acting, no `result`) and the result (`args` omitted). Planner tool ops carry `agent: "planner"` and are not part of the tutor's messages. Researcher tool loops stay in memory. | An append-only log can't fill in a result; the planner's loop is not conversation; jobs don't touch the conversation (prompts/README). |
-| `questionId` | The `question_ask` call id. The learner's answer result includes it as `questionId`, so `verdict_record` and `probe_done.evidence` can cite it. | The contract had no id field; see README fix in `docs/build-report.md`. |
+| `questionId` | The `question_ask` call id. The learner's answer result includes it as `questionId`, so `verdict_record` and `probe_done.evidence` can cite it. | The contract had no id field; the tool contract in `crates/harness/prompts/README.md` documents it. |
 | Op ordering | Op ids come from a process-wide monotonic ULID generator, so two ops written in one millisecond replay in write order (`at`, then `opId`). | A tool call and its result are often written in the same ms. |
 | Plan phase | `Plan` is used for the initial planning only. Revisions (learner or `plan_change_request`) run the planner as a background job while the session stays in Teach; only a revision that needs approval moves to `awaitApproval`. | The tutor and learner keep talking while the planner thinks; matches "Plan → Teach: plan_keep, or a minor change". |
 | Teaching position | The current section is always "the first plan section not closed by an accepted `section_done`", recomputed on approve and on applied revisions. | A section added before the current one (missing foundation) is taught next. |
@@ -96,6 +96,15 @@ These follow arch §8.
 4. **PDF and page-image reading** (`source_page_image`, PDFs in `source_*`/`page_fetch`): refused with "PDF reading isn't built yet".
 5. **Git sync** with per-file conflict resolution via `git2` (arch §4.18, §6.4).
 6. **Secure OS storage for credentials** (arch §6.5, still open). Today: a 0600 file outside the repo.
+
+## Known gaps in what is built
+
+1. **No real-model run on record.** The runtime is proven against the scripted provider in `crates/harness/tests/runtime_e2e.rs` (`cargo test -p harness --test runtime_e2e`); how reliably real models quote `questionId` or shape `probe_done` is untested.
+2. **The UI is verified in headless Chromium against a mocked backend,** not inside Tauri/WebKitGTK.
+3. **A turn already running is invisible when a session is opened after a restart;** the UI guesses from a trailing learner message and offers "Get a reply". Exposing "turn running" and "last turn failed" in `session_state` would remove the guess.
+4. **Persisted native reasoning blocks** (`message.native`) have no size cap.
+5. **Compaction** covers the tutor only and triggers on estimated size (characters / 4) against the catalog context window (100k when unknown).
+6. **Interrupted jobs restart when their session is opened,** not at app start.
 
 ## Agent roster (target)
 

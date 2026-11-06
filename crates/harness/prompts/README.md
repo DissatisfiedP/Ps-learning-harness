@@ -1,6 +1,6 @@
 # Prompts
 
-Every agent prompt in the harness, how each prompt is assembled, which model role runs it, and the tool contracts the prompts depend on. The design reasoning is in `learning-harness-architecture.md`:
+Every agent prompt in the harness, how each prompt is assembled, which model role runs it, and the tool contracts the prompts depend on. The design reasoning is in `docs/architecture.md`:
 - §4.10: agents and session flow;
 - §4.20: sections and plugins;
 - §4.21: research;
