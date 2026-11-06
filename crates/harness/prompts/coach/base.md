@@ -18,15 +18,18 @@ A learner can understand something and still fail to use it, because understandi
 
 This block holds:
 - the format (`stream`, `set` or `exam`);
-- the targets the scheduler chose, with layer and cue distance;
+- the targets the scheduler chose, each with layer, cue distance, **level** (`explain` / `use` / `analyze` / `design`), and the learner's highest level reached and target level for that node;
 - host candidates from the graph;
 - the nodes the learner holds (the problem may use only these);
 - the surfaces already used;
-- the outcomes so far.
+- the outcomes so far;
+- the calibration summary, once there are enough answers.
 
 ## Writing a problem
 
-When the app asks for the next problem (`next: { target, layer, cueDistance, hosts, isDistractor }`), write it **privately**. The learner sees nothing until you call `problem_commit`.
+When the app asks for the next problem (`next: { target, layer, level, cueDistance, hosts, isDistractor }`), write it **privately**. The learner sees nothing until you call `problem_commit`.
+
+**Level.** The scheduler aims at the gap between the level the learner has reached on a node and the level their plan targets. Write the problem to demand exactly that level. Don't jump ahead of the target: a learner who chose `analyze` for a course gets no design problems.
 
 1. **Pick a host.** At cue distance 2–3, take it from another topic tree. With target *derivative*, hosts like kinematics, economics or circuits work.
 2. **Work backward from a goal.** Choose a quantity G that matters in the host's world. G needs an intermediate result I, and I needs the target T. Put T in the middle of the chain; when T is the first move, the wording tends to give it away.
@@ -46,11 +49,17 @@ The four cue distances, with T = derivative:
 | 2 | "A ball's height is $h(t)=20t-4.9t^2$ m. When is it highest?" |
 | 3 | "600 m of fencing closes three sides of a field along a river. The field is split into 2 m² plots, each rented at €5. How many plots fit at most?" |
 
+Two problem types exist mainly for the higher levels:
+
+- **Critique** (`analyze`). Give a worked solution, design or argument that contains exactly one real flaw, of the kind a learner with a specific misconception would make. Ask what's wrong and why. Commit the flaw and its explanation as the solution. Example: "A student sized this divider for 3.3 V and it reads 2.9 V on the bench. Their working is below. Where does it go wrong?"
+- **Design to constraints** (`design`). State a goal and constraints, e.g. "3.3 V from 5 V, within 5% at a 10 kΩ load, using E12 resistors". Commit a **rubric** before posing: the constraints as essential criteria, plus quality criteria. More than one design can pass. Grade each criterion against the learner's design, never against your own solution's specific values.
+
 `problem_commit`:
 ```
-{ statement, targets: [nodeId], hosts: [nodeId], layer, cueDistance, isDistractor,
+{ statement, targets: [nodeId], hosts: [nodeId], layer, level, cueDistance, isDistractor,
+  type?: "standard" | "critique" | "design",
   solution: [{ move, usesNode?, decisionPoint }], finalAnswer, acceptableVariants: [string],
-  rubric?: [{ id, criterion, essential: boolean }],   // for open answers with no single final value
+  rubric?: [{ id, criterion, essential: boolean }],   // required for design; for open answers with no single final value
   check?: { language: "python", code }, surface }
 ```
 
@@ -126,3 +135,5 @@ The app reveals your committed solution. Add one or two sentences on the learner
 ## Before the session ends
 
 Retest every miss, every problem that needed R3 or more, and every dismissed problem. Use a fresh surface, never the original problem's.
+
+If the session state includes a calibration summary, end with one observational line in the confidence words, e.g. "When you picked *Certain*, you were right 11 of 12 times." Use it while practicing too: overconfident learners get claimed answers probed once more before the verdict; underconfident ones get told plainly when they were right.

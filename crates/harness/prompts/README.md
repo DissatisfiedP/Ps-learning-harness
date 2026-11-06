@@ -52,7 +52,7 @@ Measure, Teach and Close are the tutor's. Plan is the planner's.
 
 | Agent | Files | Talks to the learner | Runs | Model role | Ends with |
 |---|---|---|---|---|---|
-| **Tutor** | `tutor/base.md` + `tutor/phases/{measure,teach}.md` + `tutor/modes/<mode>.md` + `plugins/<id>.md` | yes | Whole teaching session, except planning | Tutor | `session_end` |
+| **Tutor** | `tutor/base.md` + `tutor/phases/{measure,teach}.md` (+ `tutor/hunt.md` while a hunt is active) + `tutor/modes/<mode>.md` + `plugins/<id>.md` | yes | Whole teaching session, except planning | Tutor | `session_end` |
 | **Planner** | `planner/base.md` (+ `planner/exam.md` when `purpose = exam`) | through the plan card | After `probe_done`; on a learner change request; on `plan_change_request` | Planner | `plan_write` or `plan_keep` |
 | **Coach** | `coach/base.md` + `plugins/<id>.md` | yes | Whole practice session | Tutor | `problem_conclude` per problem |
 | Researcher | `jobs/researcher.md` | no | `scope` on `goal_set`; `verify`, `scope` and `source` on request from any agent | Reader | `brief_submit` |
@@ -94,7 +94,7 @@ The learner picks a model per role in Settings. The harness maps agents to roles
    - `{{phase_instructions}}`, filled from the phase file.
 3. Inside the phase file:
    - **measure:** `{{active_plugins}}` gets the read-only plugins the brief suggested with `phase: "measure"`.
-   - **teach:** the section header fields (including `section.notes`, written by the planner), `{{mode}}` from `tutor/modes/<section.mode>.md`, and `{{active_plugins}}` from the section's plugins plus any granted mid-section.
+   - **teach:** the section header fields (including `section.notes`, written by the planner), `{{mode}}` from `tutor/modes/<section.mode>.md`, and `{{active_plugins}}` from the section's plugins plus any granted mid-section. Learning-system flags add more (see below): `section.targetLevel`, `section.learnerNote`, `section.knownNote` (with `known_section`), and `{{hunt}}` = the body of `tutor/hunt.md` with `{{hunt.state}}` filled (with `hunt_active`).
 
 **Planner system prompt:**
 1. `shared/accuracy.md`, `learner-signals.md`, `learner-files.md`.
@@ -108,7 +108,21 @@ Its **messages** are the session conversation (the same messages the tutor sees,
 
 **Caching.** Shared fragments and agent bases come first and never change within a session, so providers that cache by prefix keep them. Phase and section parts change only at phase changes, section boundaries, plan revisions and plugin grants, never turn by turn.
 
-Fragments wrapped in `{{#flag}} … {{/flag}}` are included only when the flag is set. Today the only flag is `mermaid`, set once the UI renders mermaid.
+Fragments wrapped in `{{#flag}} … {{/flag}}` are included only when the flag is set; an unset flag drops the block without error, and placeholders inside a dropped block are never required.
+
+| Flag | Set when | Design |
+|---|---|---|
+| `mermaid` | the UI renders mermaid | — |
+| `levels` | target levels are built | `docs/learning-system.md` §2 |
+| `starting_point` | the starting-point setting is built | §3 |
+| `plan_controls` | plan-card controls and known sections are built | §4 |
+| `known_section` | `plan_controls` is on **and** the current section has `assumedKnown: true` (per compose) | §4 |
+| `hunts` | hunts, debriefs, heuristics and the frontier are built | §5 |
+| `hunt_active` | `hunts` is on **and** the current section's hunt is enabled and not skipped (per compose) | §5 |
+| `field_guide` | discourse and venues in briefs, plus the close guide, are built | §6 |
+| `calibration` | the calibration summary is built | §7 |
+
+The learning-system flags gate **behavior** (what the model is told to do). Turn each one on in the same change that builds its code and session-state fields. With all of them off, the prompts compose as they did before these features were written.
 
 ## Tool contracts
 
@@ -117,20 +131,24 @@ Tools are scoped by agent and phase. A tool that is absent is never described to
 | Tool | Who / phase | Arguments → result |
 |---|---|---|
 | `choice_ask` | tutor (all phases) | `{ question, options[], recommended? }` → a choice or free text |
-| `question_ask` | tutor: measure (`probe`), teach (`predict`, `check`) | `{ role, nodeId?, strand?, format: free \| choice, prompt, options?, answer, explanation? }` → `{ questionId, answer, thinking, thinkingWhileReading?, confidence?, dontKnow, verdict? }`. `questionId` is the id `verdict_record` and `probe_done.evidence` use. In teach, `nodeId` must be in the current section |
+| `question_ask` | tutor: measure (`probe`), teach (`predict`, `check`) | `{ role, nodeId?, strand?, format: free \| choice, prompt, options?, answer, explanation? }` → `{ questionId, answer, thinking, thinkingWhileReading?, confidence?, dontKnow, verdict? }`. `questionId` is the id `verdict_record` and `probe_done.evidence` use. In teach, `nodeId` must be in the current section. With `levels`: `level: explain \| use \| analyze \| design`, required for `probe` and `check` |
 | `verdict_record` | tutor: measure, teach | `{ questionId, verdict: correct \| partial \| wrong, note }` |
 | `research_request` | tutor, coach (all phases) | `{ kind: verify \| scope, question, context }` or `{ kind: source, path, question }` → ack; the brief arrives as a message. Several can run at once |
 | `research` | planner | Same arguments; **blocks** and returns the brief as the tool result |
 | `file_find`, `file_read` | tutor, planner, coach | Read-only access to the learner's files: `file_find { pattern }` (name fragment or glob) → paths; `file_read { path, lines? }` → text (≤ 256 KiB) |
 | `graph_search` | tutor, planner, graph builder | `{ query, scope: nodes \| topics }` (absent until the graph exists) |
-| `goal_set` | tutor: measure | See `tutor/phases/measure.md`; starts the `scope` job |
-| `probe_done` | tutor: measure | See `measure.md`; refused while a question is open or before the scope brief has arrived. On success the planner runs |
-| `plan_write` | planner | See `planner/base.md` |
+| `goal_set` | tutor: measure | See `tutor/phases/measure.md`; starts the `scope` job. With `levels`: purpose `course` and `depth`; with `hunts`: `explore`; with `starting_point`: `startingPoint` |
+| `probe_done` | tutor: measure | See `measure.md`; refused while a question is open or before the scope brief has arrived. On success the planner runs. With `starting_point`: zero probe questions allowed for `new`, at most five for `quick` |
+| `plan_write` | planner | See `planner/base.md`. Learning-system section fields: `targetLevel`, `assumedKnown`, `knownNote`, `learnerNote`, `hunt { available, reason }`; refused if `hunt.enabled` is set, or `hunt.available` while explore is `off` |
 | `plan_keep` | planner | `{ reason }`; answers a change request without changing the plan |
+| `plan_ask` | planner (with `plan_controls`) | `{ question, options[] }`; shown on the plan card; pauses the planner until the learner answers |
 | `plan_change_request` | tutor: teach | `{ reason: learner \| missing-foundation \| ahead \| detour \| probe-wrong, evidence, learnerWords? }` → ack; the planner's answer arrives as a message |
 | `plugin_request` | tutor: teach | `{ plugin, reason }` → granted or refused (platform, unknown id, limit) |
-| `section_done` | tutor: teach | `{ sectionId, evidence, carryOver }`; refused while a section node lacks a passing check |
+| `section_done` | tutor: teach | `{ sectionId, evidence, carryOver }`; refused while a section node lacks a passing check. With `levels`: also needs one passing check at `level ≥ targetLevel`. A known section closes on one passing check at its target level |
 | `session_end` | tutor: teach, close | `{}`. After the last `section_done` the phase is Close and the tutor writes the close, then calls it |
+| `hunt_send` | tutor: teach (with `hunt_active`) | `{ sectionId, question, lookAt: [{ kind, venue?, why }], bringBack: [string] }`; refused unless the current section's hunt is enabled |
+| `debrief_record` | tutor: teach (with `hunt_active`) | `{ huntId, claims: [{ claim, source?, verdict: correct \| partial \| wrong \| tip \| offroute, note, attribution?, scope? }] }`; teaching questions in a hunted section are refused until it's recorded |
+| `frontier_park` | tutor: all phases (with `hunts`) | `{ topic, why }` → appended to `frontier.jsonl` |
 | `problem_commit`, `problem_conclude` | coach | See `coach/base.md` |
 | `audit_submit`, `necessity_submit` | problem checker | See `jobs/problem-checker.md` |
 | `web_search`, `page_fetch`, `source_outline`, `source_search`, `source_read`, `source_page_image`, `brief_submit` | researcher | See `jobs/researcher.md`; search via `crates/research-search` (Brave → Wikipedia) |

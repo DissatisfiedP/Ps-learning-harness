@@ -13,3 +13,11 @@ Exam mode trades depth for coverage on purpose. Change the steps above as follow
 7. **Fit the time.** If the plan doesn't fit the sittings available, cut the lowest weight × weakness nodes first and list what was cut in `approach`, so the learner decides with full information.
 
 Add to each node: `weight` (0–1) and `practiceOnly` (boolean).
+{{#levels}}
+
+**Target levels come from the papers.** For each section, set `targetLevel` to the highest level the past papers actually ask on its nodes: `explain` for "state and justify", `use` for routine calculation, `analyze` for "explain why this circuit/proof/result fails", `design` for "design a … that …". Don't aim above what the exam asks, however natural it seems; the learner's time is the scarce resource here.
+{{/levels}}
+{{#hunts}}
+
+**No hunts in exam mode.** Explore is `off` for exam goals; never mark a hunt available.
+{{/hunts}}

@@ -693,6 +693,7 @@ not a boxed card: a top `--hair` and `--s7` spacing.
 - **Suggest a change:** a text button that reveals (no animation) a labelled textarea "What should change, and why?" with the secondary button "Send to planner" and a "Cancel" text button. Today the textarea is always visible; this progressive disclosure keeps one primary action. The draft is kept (`planDraft`). After a successful send: status "Sent. The planner is revising the plan."; the textarea clears.
 - **Approve:** "Approving…" → the card is removed when the phase changes (unchanged). The "Plan approved …" notice arrives via the op log.
 - **New `planVersion`:** re-render in place, reset the tool checkboxes, and if focus was inside the old card, focus the new heading.
+- **Learning-system controls (not built):** the "⋯" menus, known sections and the planner's question on the card are specified in §7.7.1–§7.7.3. Learning outcomes decide those features (`docs/learning-system.md`); this document only decides how they look.
 
 **Plan sheet** (teach, close or ended; opened by the head's "Plan" button). A modal `<dialog>`:
 
@@ -712,6 +713,7 @@ Behavior:
 - It is **closed by default at every width**. Today it is open by default on wide screens; this changes.
 - The sheet re-renders only when its key changes (today's `panelKey` logic).
 - Opening focuses the sheet heading. Closing returns focus to the "Plan" button (unchanged).
+- The plan sheet carries the same "⋯" controls as the plan card (§7.7.1); edits made there go through the background planner job.
 
 #### 7.2.10 Phase and progress indicator
 
@@ -925,6 +927,126 @@ the op logs without disturbing the open-session cache.
 
 **Performance.** One IPC call per visit. No layout reads while rendering. Each group has
 `content-visibility: auto`, so closed and off-screen plans cost nothing to lay out.
+
+**Learning-system additions (not built; §7.7.6):** the reached and aimed level in the detail line, a "Where the field lives" disclosure and a calibration line per plan group.
+
+### 7.7 Learning-system surfaces (not built)
+
+These surfaces present the features in `docs/learning-system.md`. That document says *what* and *why*; this section only says how they look, under the Carrel rules:
+- one primary action;
+- no badges or pills;
+- native controls;
+- nothing moves on its own;
+- extra controls hidden until asked for.
+
+Where these rules and a learning feature conflict, the feature wins and this section changes.
+
+#### 7.7.1 Plan card "⋯" controls
+
+```
+ PROPOSED PLAN                                              ⋯   ← text button "Plan options", aria-haspopup="dialog"
+ Understand voltage dividers
+ You already use Ohm's law fluently …
+
+ 1  Series current                                          ⋯   ← "Options for ⟨section title⟩"
+    Guided · Socratic, short steps
+    Goal: explains why the current is the same everywhere in one path
+ 2  Divider rule
+    Guided · Socratic · Aim: Use                                ← "Aim: ⟨level⟩" only with levels
+    Goal: finds an unknown resistor from a measured output
+    Analyze only · Hunt on                                      ← summary of THIS learner's edits, --fs-small --ink-2
+ 3  Loaded dividers                                         ⋯
+    …
+
+ [Send changes]   Discard                                      ← replaces Approve while edits are pending
+```
+
+- **"⋯" opens an inline disclosure** under its row, never a popover over other content. Its controls are native:
+  - **Plan options:**
+    - Depth (radios: Just pass / Solid / Deep);
+    - Explore (radios: Off / Suggest / On);
+    - Sitting length (number input, minutes);
+    - Style (radios: "Let me reason it out" / "Explain it to me").
+  - **Section options:**
+    - How far (radios: Explain / Use / Analyze / Design, each with a one-line description);
+    - Include (radios: Keep / Don't need this);
+    - "Parts I already know…" (textarea);
+    - Tools (checkboxes; moved here from the always-visible fieldset);
+    - Hunt (checkbox), present only when the planner marked a hunt available, with the planner's one-line reason as its description;
+    - Note for the planner (textarea).
+- **Edits are local until sent.** While any edit is pending:
+  - the primary button reads **"Send changes"**, with an optional "Comment for the planner" textarea revealed above it;
+  - "Discard" is a text button;
+  - **Approve is not shown.**
+  - Sending writes one `edit_plan` call; the status reads "Sent. The planner is revising the plan."
+- **Edited sections** show a one-line summary of the learner's own choices ("Analyze only", "Don't need this", "You know part of this", "Hunt on") in `--fs-small --ink-2`. Defaults aren't summarized.
+- A planner **warning** about a choice (e.g. a level below the goal) appears as one sentence in the approach text, not as an alert.
+
+#### 7.7.2 Known sections
+
+- A section with `assumedKnown` renders in `--ink-3` with the line "You said you know this. One quick check when we get here." The title stays readable, and nothing is struck through.
+- In the plan sheet: "Known · not checked yet" → "Known · checked ✓" after a pass. After a miss (`knownRefuted`), the section renders normally and its line reads "Checked: needs teaching after all".
+- The section opener in the flow (§7.2.6) for a known section reads "SECTION 2 OF 5 · QUICK CHECK".
+
+#### 7.7.3 Planner question on the card (`plan_ask`)
+
+- Rendered inside the plan card, above the sections, with the same markup as a choice block (§7.2.5).
+- Kicker "The planner asks"; the submit button reads "Answer".
+- While it's pending, "Send changes" and Approve are hidden: the question is the one action.
+- When answered, it collapses to "You answered: ⟨choice⟩" until the new plan version replaces the card.
+
+#### 7.7.4 Hunt card
+
+A new flow item (kind `hunt`), with the same container as a pending question (`--raised`, `--line`, `--r`).
+
+```
+ HUNT                                                    ← small caps, --fs-meta --ink-3
+ Find out why op-amp circuits almost always use negative
+ feedback, and where people disagree about it.          ← the question, --font-read --fs-read
+
+ Where to look
+ • A forum thread on r/AskElectronics: people explain it to beginners
+ • TI's "Op Amps for Everyone", chapter 3: the reference treatment
+ Bring back: what you found (with sources if you have them),
+ your questions, anything surprising, practical tips.
+ No deadline. Come back whenever you're ready.
+
+ What you found
+ [ notes …                                         ]      ← textarea, grows
+ Links  [ https://… ]  + Add link                         ← one input per link
+ Files  [Attach…]                                         ← native file input, multiple
+ [I'm back]    Skip hunt                                  ← primary + text button
+```
+
+- Nothing in the return form is required. "I'm back" with an empty form asks once, inline: "Send with nothing? You can also skip." (Send / Skip).
+- **While the hunt is out,** the desk stays usable (the learner can ask the tutor things), and the running head shows "Hunt" next to the section label. Nothing reminds or nags; there's no timer.
+- "Skip hunt" is visible before and during the hunt; it needs no confirmation.
+- **Answered state:** the question, then "│ YOU" with the notes, links and file names. Files the app can't read yet show "(not readable yet; the tutor has your description)".
+- **The debrief** follows as an ordinary tutor reply. The tutor's sorted claims (`debrief_record`) render after it as a compact list: each claim with its verdict word and glyph ("Correct ✓", "Partly ◐", "Not right ✗", "Rule of thumb", "Saved for later"), in ink, not colour.
+
+#### 7.7.5 Close: field guide and calibration
+
+After the close text, two disclosures (closed by default; these are reference material, not reading):
+- **"Where the field lives"**:
+  - "Useful now", grouped as Ask / Discussion / Reference;
+  - "Later", with what unlocks each venue ("after op-amps").
+
+  Each venue is a name, a link, and its one-line note. With depth `pass`, only Ask.
+- **"Your confidence"**: one line per reported confidence choice ("Fairly sure: right 9 of 15"). Shown only when the calibration threshold is met.
+
+Frontier items parked in the session appear as one line, "Saved for later: ⟨topics⟩", with a text button "Start a session" per item.
+
+#### 7.7.6 Map page additions
+
+- **Detail line:** adds "Reached: ⟨level⟩ · Aim: ⟨level⟩" when known. Box states stay the three of §7.6; the level is words, not a fourth visual state.
+- **Per plan group:**
+  - a closed "Where the field lives" disclosure (venues from that session's brief; moves to topics when the graph exists);
+  - one calibration line under the counts, when the threshold is met.
+- **Frontier:** a "Saved for later" list at the bottom of the page. Each item has a "Start a session" text button.
+
+#### 7.7.7 Settings
+
+- **Learning** section (new, between Model roles and Providers): "Starting point for new sessions", with the radios Measure me / Quick check / I'm new to this. The description reads "How much I check what you already know before planning. You can change it per session."
 
 ---
 

@@ -53,10 +53,15 @@ Example, for a session message that said: "For a divider, the current is the sam
 For each proposition give:
 - `tempId`;
 - `statement`, with math in LaTeX;
-- `kind`;
-- `attribution` for contested claims;
+- `kind`: `mechanism`, `fact`, `procedure`, `perceptual`, `argument` or **`heuristic`**;
+- `attribution` for contested claims and for every heuristic;
+- `scope` for every heuristic: when it applies and when it doesn't;
 - `quote`: verbatim from the chunk, at most 300 characters. If no passage supports the proposition word for word, drop it.
 - `locator`.
+
+**Heuristics.** A practitioner's rule of thumb, useful and true *enough* but not a law, is kind `heuristic`, never `fact`. Example: "Place a 100 nF ceramic capacitor next to each IC's power pin" (attribution: "electronics hobbyist and design-guide practice"; scope: "digital and mixed-signal boards; not a substitute for proper decoupling analysis at high frequency"). Most heuristics in sessions come from hunt debriefs, where the tutor already marked them `tip` with attribution and scope; use those.
+
+**Claims the learner brought back from a hunt** appear in the session as the learner's return plus the tutor's `debrief_record`. Only claims the debrief marked `correct`, `partial` (use the corrected part) or `tip` become propositions. Their provenance is `source.type: "hunt"`, with the learner's source if they gave one. Claims marked `wrong` become misconceptions, not nodes. `offroute` claims are already on the frontier list; don't extract them.
 
 ## 2. Identity
 
@@ -88,18 +93,18 @@ Each new proposition gets exactly one home: the **most specific existing topic**
 ## 5. Learner evidence (sessions only)
 
 - `misconceptions`: what the learner believed wrongly, in their own words where possible, with the locator and whether it was repaired.
-- `demonstrated`: propositions the learner showed they hold, with the check that showed it.
+- `demonstrated`: propositions the learner showed they hold, with the check that showed it and that check's `level` (`explain`, `use`, `analyze` or `design`). A level is about the learner, so it goes here and never on the proposition itself.
 
 ## Output
 
 ```
 graph_submit {
-  propositions: [{ tempId, statement, kind, attribution?, quote, locator,
+  propositions: [{ tempId, statement, kind, attribution?, scope?, quote, locator,
                    sameAs: nodeId | null, home?: topicId, newTopic?: { title, parent } }],
   requires:  [{ from, to, weight, rationale }],      // from/to: tempId or nodeId
   supports: [...], attacks: [...], contrasts: [...],
   chains:    [{ premises: [id], conclusion: id }],
   misconceptions: [{ about: id | null, note, locator, repaired: boolean }],
-  demonstrated:   [{ id, locator, how: "check-correct" | "check-partial" | "task-passed" }] }
+  demonstrated:   [{ id, locator, how: "check-correct" | "check-partial" | "task-passed", level? }] }
 ```
 Give empty arrays rather than omitting fields. A chunk that is all logistics gets an empty submission.

@@ -33,6 +33,19 @@ Input: the goal record, or (when the tutor or planner asks mid-session) a narrow
 6. **Conventions:** differences in notation and terminology, especially between the learner's material and the standard.
 7. **Plugins:** name one only when a specific strand needs it, and say for which phase (`measure` or `teach`). The catalog: {{plugin_catalog}}
 8. **Currency:** for fast-moving subjects, record dates and versions. For exams, record what the exam board publishes about format and weighting.
+{{#field_guide}}
+9. **Where the field lives.** For each strand, record its `discourse`:
+   - `settled`: textbook material with nothing live to discuss;
+   - `practitioner-lore`: practitioners share tips and rules of thumb that the textbooks skip;
+   - `active-debate`: competent people currently disagree.
+
+   Then list **venues**: places where people learning or working in this field ask questions, discuss, or look things up. For each venue give:
+   - `kind`: `ask` (somewhere to ask for help), `discussion` (somewhere practitioners talk) or `reference`;
+   - `entryLevel`: what someone must already hold for the venue to be useful, in plain words ("anyone", "op-amp basics", "graduate analysis");
+   - a one-line `note`.
+
+   Prefer venues that are active now: check that the forum, subreddit or channel has recent posts, and record the date you checked. Five to ten venues across all levels is right. A calculus 1 learner gets places to ask for help; research venues are useless to them.
+{{/field_guide}}
 
 ```
 brief_submit { kind: "scope", summary,           // 5–10 sentences
@@ -42,6 +55,9 @@ brief_submit { kind: "scope", summary,           // 5–10 sentences
   suggestedPlugins: [{ plugin, strand, phase, reason }],
   sources: [{ title, url | path, note }], uncertain: [string] }
 ```
+{{#field_guide}}
+Each strand also gets `discourse`, and the brief gets `venues: [{ name, url?, kind, entryLevel, note, checked }]`, where `checked` is the date you confirmed the venue is active.
+{{/field_guide}}
 Stop when sources agree. There is no hard budget, but don't keep searching once more results add nothing new.
 
 ## Task `verify`: answer one question

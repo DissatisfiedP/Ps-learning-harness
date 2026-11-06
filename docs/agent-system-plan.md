@@ -100,6 +100,21 @@ These follow arch §8.
 5. **Git sync** with per-file conflict resolution via `git2` (arch §4.18, §6.4).
 6. **Secure OS storage for credentials** (arch §6.5, still open). Today: a 0600 file outside the repo.
 
+## Learning-system changes (designed, not built)
+
+**Source of truth:** `docs/learning-system.md`. These are changes to how the harness *teaches*. They don't change the stack, runtime, storage, sync or plugin system. They extend existing records, tools, ops, gates and UI surfaces.
+
+| Feature | Prompt flag | Code to build |
+|---|---|---|
+| Target levels (§2) | `levels` | `depth` and purpose `course` on `goal_set`; `targetLevel` on sections; `level` on `question_ask`; `levelReached` on `probe_done`; the extra `section_done` condition; derived highest level per node; Map detail text |
+| Starting point (§3) | `starting_point` | `startingPoint` on `goal_set` and in settings; `probe_done` limits for `new`/`quick`; Settings "Learning" section |
+| Plan controls (§4) | `plan_controls`, `known_section` | `edit_plan` command + `planEdit` op + planner job; `plan_ask` tool + `planAsk`/`planAnswer` ops + `answer_plan_question` command; `assumedKnown` sections, their one-check gate and `knownRefuted`; plan card "⋯" UI (ui-design §7.7.1–7.7.3) |
+| Hunts (§5) | `hunts`, `hunt_active` | `explore` on `goal_set`; `hunt` on sections (planner may only mark available); `hunt_send`, `debrief_record`, `frontier_park` tools; `hunt_return`/`hunt_skip`/`start_from_frontier` commands; hunt ops; `frontier.jsonl`; the debrief-before-teaching gate; hunt card UI (ui-design §7.7.4) |
+| Field guide (§6) | `field_guide` | `discourse` and `venues` kept from the scope brief; close and Map disclosures |
+| Calibration (§7) | `calibration` | Per-plan, per-confidence-bucket accuracy from ops; the 20/5/15 thresholds; `session_state.calibration`; close and Map lines |
+
+Turn each flag on in the same change that builds its code. The review checklist is `docs/learning-system.md` §10.
+
 ## Known gaps in what is built
 
 1. **No real-model run on record.** The runtime is proven against the scripted provider in `crates/harness/tests/runtime_e2e.rs` (`cargo test -p harness --test runtime_e2e`); how reliably real models quote `questionId` or shape `probe_done` is untested.

@@ -1,6 +1,16 @@
 # Learning harness — architecture review
 
-Status: design document, last revised 2026-11-05. Partly built: see `docs/agent-system-plan.md` for what exists and where the code departs from this document. Agent prompts live in `crates/harness/prompts/` (index: `crates/harness/prompts/README.md`).
+Status: design document, last revised 2026-11-06. Partly built: see `docs/agent-system-plan.md` for what exists and where the code departs from this document. Agent prompts live in `crates/harness/prompts/` (index: `crates/harness/prompts/README.md`).
+
+**Two layers.** This document covers the technical architecture and the core learning design. The learning-system features added on 2026-11-06 are specified in **`docs/learning-system.md`**, which is their source of truth:
+- target levels;
+- starting point;
+- plan controls;
+- hunts;
+- field guide;
+- calibration.
+
+Those features change how the harness teaches. They change nothing in the stack, runtime, storage, sync or plugin system described here.
 
 How to read this:
 - §1–2: what we need and what LearnHarness (LH) taught us.
@@ -31,6 +41,10 @@ Claims marked **[inference]** are reasoned, not verified.
 | R11 | Research as a resource throughout: the field is scoped from sources at the start, and the researcher can be called at any point when something comes up | owner |
 | R12 | The tutor can't drift from the approved plan; the plan changes only through a separate planner, on request | owner |
 | R13 | The learner picks models per role (heavy tutor, deep planner, light reader, …), labeled so the choice follows the job; the harness maps agents to roles | owner |
+| R14 | Target levels: the learner and planner set how far each section goes (Explain / Use / Analyze / Design); sections close only on evidence at that level | owner; `docs/learning-system.md` §2 |
+| R15 | Learner-chosen starting point: full measurement, a quick check, or none for complete beginners | owner; LearnHarness user complaint; §3 |
+| R16 | Plan-card controls (hidden behind "⋯") for what and how far, applied through the planner; self-reported known parts are verified, not trusted | owner; §4 |
+| R17 | Opt-in guided hunts with a correcting debrief, a field guide to where the field lives, a frontier list of parked topics, and calibration feedback | owner; §5–§7 |
 
 ---
 
@@ -823,6 +837,23 @@ Rules:
 | Harness picks models automatically | No decisions for the learner | Depends on provider catalogs the harness can't rank reliably; ignores the learner's budget and accounts |
 | **Five labeled roles, harness maps agents to roles, Tutor fallback** (chosen) | Choices match jobs the learner can understand; the guidance steers money toward the tutor | Five pickers instead of one (only one is required) |
 
+### 4.23 Learning-system features
+
+Six features are specified, with their rationale, alternatives, data, gates, acceptance criteria and sources, in `docs/learning-system.md`:
+- target levels;
+- starting point;
+- plan controls;
+- hunts and debriefs;
+- field guide;
+- calibration.
+
+Their effect on this document:
+- the graph gains the `heuristic` node kind and `hunt` provenance (§5 below);
+- plan sections gain fields (§5 below);
+- the phase machine of §4.10 gains the gates listed in `learning-system.md` §8.
+
+Prompt behavior for each feature sits behind a template flag until its code is built (`crates/harness/prompts/README.md`, "Composition").
+
 ---
 
 ## 5. Schemas and example records
@@ -833,7 +864,8 @@ Shapes are written in TypeScript notation because it is compact. The Rust core m
 type Id = string;            // ULID
 type Iso = string;           // ISO 8601 timestamp
 
-type Kind = "mechanism" | "fact" | "procedure" | "perceptual" | "argument";
+type Kind = "mechanism" | "fact" | "procedure" | "perceptual" | "argument"
+          | "heuristic";   // graph nodes only, never a teaching mode (docs/learning-system.md §5)
 
 interface Provenance {
   source:
@@ -897,6 +929,10 @@ interface Section {
   mode: Kind; style: "socratic" | "expository" | "mixed";
   plugins: string[];                       // plugin ids, ≤ 3
   notes: string; exit: string; desktopOnly?: boolean;
+  // learning system (docs/learning-system.md §8):
+  targetLevel?: "explain" | "use" | "analyze" | "design";
+  assumedKnown?: boolean; knownNote?: string; learnerNote?: string;
+  hunt?: { available: boolean; reason: string; enabled: boolean };   // enabled only by the learner
 }
 
 interface PluginManifest {                 // frontmatter of prompts/plugins/<id>.md
@@ -1035,9 +1071,10 @@ Not built yet:
 
 ## 8. Build order
 
-1. **Done:** provider crate with streaming for seven providers; Tauri shell on desktop; session op logs; streaming Markdown/KaTeX UI; settings and credentials; Learn/Practice with one prompt each (`prompts/learn.md`, `prompts/practice.md`).
-2. **Agent runtime:** tool calling in `providers`; resumable `tool` ops; the phase machine; the prompt composer (shared → agent → phase → section → mode → plugins); plugin scaffolding (loader, platform filter, three-plugin limit, `plugin_request`); model roles (§4.22).
-3. **Tutor + planner in mechanism mode:** measure (goal → probe, with the scope job in the background), planner + plan card + approval, teach with sections and `plan_change_request`; compaction turns; researcher job (`scope`, `verify`, `source`).
+1. **Done:** provider crate with streaming for seven providers; Tauri shell on desktop; session op logs; streaming Markdown/KaTeX UI; settings and credentials.
+2. **Done:** agent runtime: tool calling in `providers`; resumable `tool` ops; the phase machine; the prompt composer (shared → agent → phase → section → mode → plugins); plugin scaffolding (loader, platform filter, three-plugin limit, `plugin_request`); model roles (§4.22).
+3. **Done:** tutor + planner in mechanism mode: measure (goal → probe, with the scope job in the background), planner + plan card + approval, teach with sections and `plan_change_request`; compaction turns; researcher job (`scope`, `verify`, `source`). Carrel UI and the plan-based Map page.
+3b. **Learning-system features** (`docs/learning-system.md`), in order: target levels and starting point; plan controls and known sections; calibration; field guide; hunts, debriefs and the frontier. The `heuristic` node kind waits for step 4.
 4. **Graph core:** entity files + op logs, alias resolution, chain re-validation, graph builder job, derived index, topic splitter.
 5. **Sync:** `git2` with per-file conflict resolution.
 6. **Learner model + practice:** outcomes log, FSRS, layers, the coach (write → problem checker → check script → pose), stream/set/exam formats, exam mode.
