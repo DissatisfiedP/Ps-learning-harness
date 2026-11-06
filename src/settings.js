@@ -182,7 +182,7 @@ function roleFieldset(info, required) {
     </div>
     <div class="warnings" id="warn-${role}"></div>
     <div class="actions">
-      <button class="btn primary" type="button" data-act="save">Use this model</button>
+      <button class="btn ${required ? 'primary' : 'secondary'}" type="button" data-act="save">Use this model</button>
       <button class="btn text" type="button" data-act="clear" ${unset ? 'disabled' : ''}>Clear</button>
       <button class="btn text" type="button" data-act="test">Test</button>
     </div>`;
@@ -368,16 +368,22 @@ function providerRow(p) {
   return el;
 }
 
+let keyFieldId = 0;
+
 function keyRow(p, label, say) {
+  const id = `key-${p.id}-${++keyFieldId}`;
   const row = document.createElement('div');
-  row.className = 'inline-field';
+  row.className = 'field';
   row.innerHTML = `
-    <input class="input" type="password" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" />
-    <button class="btn secondary" type="button">Save</button>`;
+    <label for="${id}">${escapeHtml(label)}</label>
+    <div class="inline-field">
+      <input class="input" id="${id}" type="password" autocomplete="off" spellcheck="false" />
+      <button class="btn secondary" type="button">Save</button>
+    </div>`;
   const input = row.querySelector('input');
   const save = async () => {
     const key = input.value.trim();
-    if (!key) return input.focus();
+    if (!key) return input.focus({ preventScroll: true });
     say('Saving…');
     try {
       await call('save_api_key', { provider: p.id, key });
@@ -486,7 +492,7 @@ function workbuddyBody(p, body, say) {
   }
   const signIn = document.createElement('button');
   signIn.type = 'button';
-  signIn.className = 'btn primary';
+  signIn.className = 'btn secondary';
   signIn.textContent = 'Sign in with WorkBuddy';
   signIn.addEventListener('click', () => startLogin(signIn, say));
   const hint = document.createElement('p');

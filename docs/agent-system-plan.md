@@ -41,6 +41,7 @@ These settle what the work order left open. Recorded before code so the choices 
 | `tracing` | Added as a dependency (cached); `debug` events for model calls (first token, total), tool time, turn time and job duration. No subscriber is installed by the library. | M7.9. |
 | Capability values | `capabilities` fields are `Option<bool>`; catalogs leave `None` = unverified. | M1/M2 warnings show "unverified". |
 | Legacy sessions | Learn sessions without a `phase` op are read-only; Learn sessions are created with a `phase` op on line 2, Practice sessions without one (Practice is never read-only). `learn.md` and its loader branch are deleted. | M4 clean cutover. |
+| Learning map before the graph | A read-only `learning_map` command returns every approved Learn plan with per-node check counts; the UI's Map page (ui-design §7.6) draws it and starts Practice on picked ideas. | The knowledge graph (Not built yet 1) is the real source; plans plus check verdicts are the learner data that exists today. The command reads op logs without touching the open-session LRU. |
 
 ## Layout
 
@@ -56,7 +57,7 @@ crates/
   research-search/  web search for the researcher (Brave → Wikipedia)
 src-tauri/          Tauri v2 shell: one command per Harness method, async + spawn_blocking for IO
 src/                UI: app.js, cards.js, timeline.js, reply.js, stream.js, markdown.js,
-                    settings.js, api.js, styles.css, vendor/
+                    map.js + map-layout.js (Map page), settings.js, api.js, styles.css, vendor/
 ```
 
 ## What is built
@@ -81,7 +82,7 @@ src/                UI: app.js, cards.js, timeline.js, reply.js, stream.js, mark
 - **Plugin scaffolding:** `Plugin` trait, registry filtered by platform, manifests from `prompts/plugins/*.md` (matched by id), three per section, three tools per plugin, `plugin_request`, `pluginGrant` ops. No real plugins are registered, so the planner's catalog says "none available".
 - **Practice mode:** unchanged single prompt (`practice.md`) until the coach is built.
 - **Legacy Learn sessions** (no `phase` op) open read-only.
-- **UI:** sessions sidebar; Learn home; phase strip; question, choice and plan cards; plan side panel/drawer; job chips; plan notices; block-cached streaming Markdown + KaTeX; lazy timeline; settings role cards.
+- **UI ("Carrel", `docs/ui-design.md`):** Home (start + session list); one running head and desk per session; question, choice and plan blocks; plan sheet; job lines; plan notices; block-cached streaming Markdown + KaTeX; lazy timeline; settings role fieldsets; the Map page (each approved plan as a layered map of ideas with check state; pick ideas → Practice).
 
 Data locations: the data repo is `$LEARNING_HARNESS_REPO`, or `<app data dir>/repo` by default. Config is `<app config dir>`. On Linux these are `~/.local/share/com.learning-harness.app/repo` and `~/.config/com.learning-harness.app`.
 
@@ -89,7 +90,7 @@ Data locations: the data repo is `$LEARNING_HARNESS_REPO`, or `<app data dir>/re
 
 These follow arch §8.
 
-1. **Graph storage:** nodes, topics, the op log, alias resolution, chain re-validation (arch §4.2–4.6), the graph builder job (arch §4.7) and `graph_search`. `learner_state` renders "no graph yet".
+1. **Graph storage:** nodes, topics, the op log, alias resolution, chain re-validation (arch §4.2–4.6), the graph builder job (arch §4.7) and `graph_search`. `learner_state` renders "no graph yet". Until then the Map page draws plan maps (`learning_map`).
 2. **Outcomes log, FSRS and the practice coach,** with the problem checker job (arch §4.8, §4.11–4.13).
 3. **Real plugins** (sandbox, code runner, REPL, CAS, live search, image sets, demos, figures, argument map) and measure-phase read-only plugins suggested by the brief.
 4. **PDF and page-image reading** (`source_page_image`, PDFs in `source_*`/`page_fetch`): refused with "PDF reading isn't built yet".

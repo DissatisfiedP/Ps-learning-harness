@@ -242,9 +242,9 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   min-block-size: var(--head-h);
 }
 .home-col > .home-bar .wordmark { font-weight: 600; color: var(--ink-2); }
+.home-links { display: flex; gap: var(--s4); }
 .home-alert { color: var(--danger); font-size: var(--fs-small); }
 .home-col > .start { margin-block-start: var(--s9); }
-.home-col > .start > * { font-family: var(--font-ui); }
 .home-col .start > .hero {
   font: 400 var(--fs-display)/1.15 var(--font-read);
   color: var(--ink);
@@ -261,9 +261,6 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .mode-desc { display: block; font-size: var(--fs-small); color: var(--ink-3); }
 .setup-notice { margin-block-end: var(--s3); color: var(--ink-2); }
 .home .composer-slot { margin-block-start: var(--s2); }
-.hint { margin-block-start: var(--s2); font-size: var(--fs-small); color: var(--ink-3); }
-.suggestions { margin-block-start: var(--s3); font-size: var(--fs-small); color: var(--ink-3); }
-.suggestions .btn.text { font-size: var(--fs-small); }
 .unavailable { margin-block-start: var(--s9); color: var(--ink-2); }
 
 .sessions {
@@ -287,14 +284,11 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   border: 0; border-radius: var(--r); background: none;
   text-align: start;
 }
-.session-open:hover {
-  transition: background-color var(--dur-hover) linear;
-}
-.session-open:hover { background: var(--raised); }
+.session-open:hover { background: var(--raised); transition: background-color var(--dur-hover) linear; }
 .session-title { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
 .session-meta { flex: none; font-size: var(--fs-small); color: var(--ink-3); }
 .session-delete { font-size: var(--fs-small); }
-.session-delete.armed { color: var(--danger); }
+.session-delete.armed { color: var(--ink); font-weight: 600; }
 @media (hover: hover) {
   .session-delete { opacity: 0; }
   .session:hover .session-delete, .session:focus-within .session-delete, .session-delete.armed { opacity: 1; }
@@ -323,7 +317,7 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .head-inner > .phase, .head-inner > .head-word { flex: none; color: var(--ink-3); }
-.head-inner > #plan-toggle { flex: none; text-decoration: underline; text-underline-offset: 0.18em; }
+.head-inner > #plan-toggle { flex: none; }
 .head-inner > .head-status { flex: 1 0 100%; font-size: var(--fs-small); color: var(--ink-2); }
 .head-inner > .head-status:not(:empty) { padding-block-end: var(--s2); }
 .phase ol { display: flex; list-style: none; margin: 0; padding: 0; white-space: nowrap; }
@@ -341,12 +335,12 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   scroll-padding-block: var(--head-h) calc(var(--desk-min) + 16px);
 }
 .page { padding-block: var(--s6) var(--s8); }
-/* While a reply streams, scroll anchoring is off: with the growing reply as
-   the only candidate, the browser would otherwise follow the stream. Older
-   pages prepended meanwhile keep their manual compensation (prependOlder).
-   #live (errors, and the space reserved for an aligned reply) sits below the
-   growing reply, so it must never be the anchor either. */
-.messages.streaming, .live { overflow-anchor: none; }
+/* Scroll anchoring stays on (§9.5), so inserts and size changes above the
+   viewport never shift what the learner is reading. Two things are never
+   the anchor: the reply that is still growing (the browser would otherwise
+   follow its tail) and #live (errors, and the space reserved below an
+   aligned reply). */
+.entry.streaming, .live { overflow-anchor: none; }
 .page > div > * { font-family: var(--font-ui); font-size: var(--fs-ui); line-height: 1.45; }
 /* Off-screen history skips layout and paint; `auto` remembers real sizes. */
 .timeline > * { content-visibility: auto; contain-intrinsic-block-size: auto 240px; }
@@ -356,7 +350,7 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .timeline > :nth-last-child(-n+2) { content-visibility: visible; }
 
 .timeline > *, .plan-slot > *, .live > * { margin-block-start: var(--s6); }
-.timeline > .entry, .live > .entry { margin-block-start: var(--s7); }
+.timeline > .entry { margin-block-start: var(--s7); }
 .timeline > :first-child { margin-block-start: 0; }
 .timeline:empty + .plan-slot:empty + .live > :first-child { margin-block-start: 0; }
 
@@ -369,7 +363,7 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   text-align: start;
   overflow-wrap: break-word;
 }
-.page .entry.tutor, .page .exercise .prose, .page .plan-doc .prose { font-family: var(--font-read); }
+.page .entry.tutor { font-family: var(--font-read); }
 .prose > :first-child { margin-block-start: 0; }
 .prose > :last-child { margin-block-end: 0; }
 .prose p { margin-block: 0 1em; text-wrap: pretty; }
@@ -553,11 +547,19 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 /* desk */
 .desk { background: var(--paper); border-block-start: var(--hair); padding-block-end: env(safe-area-inset-bottom); }
 .desk-inner {
+  position: relative;
   display: flex; flex-direction: column; justify-content: center; gap: var(--s2);
   min-block-size: var(--desk-min);
   padding-block: var(--s3);
 }
-.desk-inner > .continue { align-self: flex-end; font-size: var(--fs-small); }
+/* Sits on the page just above the desk, so showing it never resizes the
+   desk or the scroller (the periphery changes in place, §2.9). */
+.desk-inner > .continue {
+  position: absolute; inset-block-end: calc(100% + 1px); inset-inline-end: var(--gutter);
+  padding-inline: var(--s2);
+  background: var(--paper);
+  font-size: var(--fs-small);
+}
 .desk-note {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s2) var(--s4);
   color: var(--ink-2);
@@ -565,7 +567,6 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .composer-row { display: flex; align-items: flex-end; gap: var(--s2); }
 .composer-row .input { flex: 1; min-inline-size: 0; min-block-size: 44px; max-block-size: max(30dvh, 160px); overflow-y: auto; }
 .composer-row .btn { flex: none; min-block-size: 44px; }
-.desk .composer-row .btn { min-block-size: 44px; }
 @media (min-width: 600px) and (pointer: fine) {
   .desk .composer-row .input { min-block-size: 40px; }
   .desk .composer-row .btn { min-block-size: 40px; }
@@ -675,13 +676,63 @@ dialog {
 .provider-state { flex: 1 1 8em; font-size: var(--fs-small); color: var(--ink-3); }
 .provider-body { display: grid; gap: var(--s3); margin-block-start: var(--s3); justify-items: start; }
 .provider-body > * { max-inline-size: 100%; }
-.provider-body .inline-field { inline-size: 100%; }
+.provider-body .inline-field, .provider-body > .field { inline-size: 100%; }
+.provider-body > .field { margin: 0; }
 .inline-field { display: flex; flex-wrap: wrap; gap: var(--s2); }
 .inline-field .input { flex: 1 1 14em; inline-size: auto; }
 .theme-choice { margin-block-start: var(--s3); display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); }
 .theme-choice > legend { inline-size: 100%; }
 .theme-choice label { display: inline-flex; align-items: center; gap: var(--s2); min-block-size: 24px; cursor: pointer; }
 @media (pointer: coarse) { .theme-choice label, .mode { min-block-size: 44px; } }
+
+/* ---------- Map (§7.6) ---------- */
+.map-page > * { font: 400 var(--fs-ui)/1.45 var(--font-ui); }
+.map-intro { font-size: var(--fs-small); color: var(--ink-2); }
+.map-agenda { margin-block-start: var(--s2); font-size: var(--fs-small); color: var(--ink-3); }
+.map-agenda .btn.text { font-size: var(--fs-small); }
+.map-status { color: var(--ink-3); }
+.map-status.danger { color: var(--danger); }
+/* Closed and off-screen plans skip layout and paint. */
+.map-group {
+  margin-block-start: var(--s6); padding-block-start: var(--s5);
+  border-block-start: var(--hair);
+  content-visibility: auto; contain-intrinsic-block-size: auto 320px;
+}
+.map-goal { cursor: pointer; min-block-size: 24px; font: 600 var(--fs-read)/1.35 var(--font-read); color: var(--ink); }
+.map-meta { margin-block-start: var(--s1); font-size: var(--fs-small); color: var(--ink-3); }
+.map-all {
+  display: inline-flex; align-items: center; gap: var(--s2);
+  margin-block-start: var(--s3); min-block-size: 24px;
+  font-size: var(--fs-small); color: var(--ink-2); cursor: pointer;
+}
+/* A drawing wider than the column scrolls inside its own box; the padding
+   leaves room for focus rings. */
+.map-scroll { margin-block-start: var(--s4); padding: 4px; overflow-x: auto; }
+.map-graph { position: relative; margin-inline: auto; }
+.map-edges { position: absolute; inset: 0; overflow: visible; color: var(--rule-strong); }
+.map-edges > path { fill: none; stroke: currentColor; stroke-width: 1.25; }
+/* Fixed size (map-layout.js BOX): the layout never measures text. */
+.map-node {
+  position: absolute; inline-size: 144px; block-size: 56px;
+  display: flex; align-items: flex-start; gap: var(--s2);
+  padding: 8px 10px;
+  border: 1px dashed var(--rule-strong); border-radius: var(--r);
+  background: var(--paper);
+  font-size: var(--fs-small); line-height: 1.3; color: var(--ink-2);
+  cursor: pointer;
+}
+.map-node.is-checked, .map-node.is-missed { border-style: solid; color: var(--ink); }
+.map-node:has(input:checked) { padding: 7px 9px; border: 2px solid var(--accent); background: var(--select); }
+.map-node input { flex: none; margin: 0.15em 0 0; }
+.map-node-text {
+  flex: 1; min-inline-size: 0;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.map-glyph { flex: none; }
+.map-detail { margin-block-start: var(--s3); min-block-size: 1.45em; font-size: var(--fs-small); color: var(--ink-2); }
+.map-desk { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); }
+.map-count { flex: 1; color: var(--ink-2); }
 
 /* ---------- phone ---------- */
 @media (max-width: 599px) {
@@ -701,7 +752,7 @@ dialog {
 
 /* ---------- forced colors ---------- */
 @media (forced-colors: active) {
-  .btn, .btn.primary, .btn.secondary, .input, .exercise.pending, .seg, .rows .row, .sheet, .entry.user, .you {
+  .btn, .btn.primary, .btn.secondary, .input, .exercise.pending, .seg, .rows .row, .sheet, .entry.user, .you, .map-node {
     border-color: ButtonBorder;
   }
   .btn.primary { border: 1px solid ButtonBorder; }

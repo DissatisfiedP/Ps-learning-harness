@@ -90,11 +90,6 @@ export function sectionPosition(st) {
   return { n: i >= 0 ? i + 1 : sections.length, m: sections.length };
 }
 
-/** Text of the current phase, e.g. "Teach 2/5" or "Plan · awaiting approval". */
-export function phaseLabel(st, { planning = false, planFailed = false } = {}) {
-  return labelFor(PHASES[phaseIndex(st)], st, { planning, planFailed, current: true });
-}
-
 function labelFor(phase, st, { planning, planFailed, current }) {
   switch (phase) {
     case 'measure':
@@ -273,12 +268,12 @@ function questionForm(item, onAnswer) {
     if (!dontKnow) {
       if (!answer) {
         status.set('Write an answer, or choose “I don’t know”.');
-        (answerInput ?? options[0])?.focus();
+        (answerInput ?? options[0])?.focus({ preventScroll: true });
         return;
       }
       if (!chosen) {
         status.set('How sure are you? Pick one.');
-        confRadios[0].focus();
+        confRadios[0].focus({ preventScroll: true });
         return;
       }
     }
@@ -397,7 +392,7 @@ export function choiceCard(item, { onAnswer, readOnly }) {
   otherText.id = otherId;
   otherText.placeholder = 'Something else…';
   otherText.addEventListener('input', () => (otherRadio.checked = Boolean(otherText.value) || otherRadio.checked));
-  otherRadio.addEventListener('change', () => otherRadio.checked && otherText.focus());
+  otherRadio.addEventListener('change', () => otherRadio.checked && otherText.focus({ preventScroll: true }));
   otherRow.append(otherLabel, otherTextLabel, otherText);
   fs.append(otherRow);
   (radios[0] ?? otherRadio).dataset.first = '';
@@ -412,7 +407,7 @@ export function choiceCard(item, { onAnswer, readOnly }) {
     const answer = otherRadio.checked ? otherText.value.trim() : (radios.find((r) => r.checked)?.value ?? '');
     if (!answer) {
       status.set(otherRadio.checked ? 'Write your own answer.' : 'Pick an option.');
-      (otherRadio.checked ? otherText : radios[0] ?? otherRadio).focus();
+      (otherRadio.checked ? otherText : radios[0] ?? otherRadio).focus({ preventScroll: true });
       return;
     }
     const controls = [...form.querySelectorAll('input, button')];
@@ -486,7 +481,7 @@ function changeForm({ draft, onDraft, onRequest, onCancel }) {
     const text = f.input.value.trim();
     if (!text) {
       status.set('Describe the change first.');
-      f.input.focus();
+      f.input.focus({ preventScroll: true });
       return;
     }
     send.disabled = true;

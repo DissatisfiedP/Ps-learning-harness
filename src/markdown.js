@@ -48,24 +48,44 @@ const mathCache = lru(3000);
 // ---------- KaTeX, loaded lazily ----------
 
 const KATEX_URL = new URL('./vendor/katex/katex.min.js', import.meta.url).href;
-let katexLoad = null;
+const KATEX_CSS = new URL('./vendor/katex/katex.min.css', import.meta.url).href;
+let cssLoad = null;
+let jsLoad = null;
 
-/** Loads KaTeX once; resolves when `window.katex` is ready. */
+/** Inserts `el` (before `before`, or at the end of <head>) and waits for it. */
+function load(el, before = null) {
+  return new Promise((resolve, reject) => {
+    el.onload = () => resolve();
+    el.onerror = () => {
+      el.remove();
+      reject(new Error('KaTeX failed to load'));
+    };
+    document.head.insertBefore(el, before);
+  });
+}
+
+/**
+ * Loads KaTeX (script and stylesheet) once; resolves when `window.katex` is
+ * ready and its CSS applies. Neither is on the startup path: Home renders no
+ * math, so the stylesheet does not block the first paint. The stylesheet goes
+ * before styles.css, whose `.katex` size override must keep winning. A failed
+ * part is retried on the next call.
+ */
 export function ensureKatex() {
-  if (window.katex) return Promise.resolve();
-  if (!katexLoad) {
-    katexLoad = new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = KATEX_URL;
-      s.onload = () => resolve();
-      s.onerror = () => {
-        katexLoad = null;
-        reject(new Error('KaTeX failed to load'));
-      };
-      document.head.append(s);
+  cssLoad ??= load(
+    Object.assign(document.createElement('link'), { rel: 'stylesheet', href: KATEX_CSS }),
+    document.querySelector('link[rel="stylesheet"]'),
+  ).catch((e) => {
+    cssLoad = null;
+    throw e;
+  });
+  if (!window.katex) {
+    jsLoad ??= load(Object.assign(document.createElement('script'), { src: KATEX_URL })).catch((e) => {
+      jsLoad = null;
+      throw e;
     });
   }
-  return katexLoad;
+  return Promise.all([cssLoad, jsLoad]);
 }
 
 /** Typeset one formula. `exact` is false when KaTeX was not available yet. */

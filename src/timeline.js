@@ -13,13 +13,14 @@
 //   section           { sectionId, close, plan }     UI-only, from `phase` ops
 //
 // `tl.plan` is the latest `plan` op payload; section openers take their
-// title and goal from it.
+// title and goal from it. `tl.lastExercise` is the newest question or choice
+// item, so the desk can ask "is one pending?" without scanning the list.
 
 const RESEARCH_PREFIX = /^\[research brief\]\s*/;
 const NOTICE_PREFIX = /^\[plan update\]\s*/;
 
 export function createTimeline() {
-  return { items: [], byKey: new Map(), seen: new Set(), plan: null, lastSection: null };
+  return { items: [], byKey: new Map(), seen: new Set(), plan: null, lastSection: null, lastExercise: null };
 }
 
 function add(tl, item) {
@@ -140,11 +141,12 @@ function applyTool(tl, op) {
     return { updated: item };
   }
   const args = op.args ?? {};
-  if (op.name === 'question_ask') {
-    return add(tl, { kind: 'question', key, callId: op.callId, args, answer: null, failed: null, verdict: null, note: null });
-  }
-  if (op.name === 'choice_ask') {
-    return add(tl, { kind: 'choice', key, callId: op.callId, args, answer: null, failed: null });
+  if (op.name === 'question_ask' || op.name === 'choice_ask') {
+    const item = op.name === 'question_ask'
+      ? { kind: 'question', key, callId: op.callId, args, answer: null, failed: null, verdict: null, note: null }
+      : { kind: 'choice', key, callId: op.callId, args, answer: null, failed: null };
+    tl.lastExercise = item;
+    return add(tl, item);
   }
   if (op.name === 'verdict_record') {
     const item = tl.byKey.get(`call:${args.questionId}`);

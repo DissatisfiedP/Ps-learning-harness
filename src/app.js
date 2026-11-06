@@ -15,6 +15,7 @@ import { initSettings, loadConfig, openSettings } from './settings.js';
 import { LiveReply, assistantEl, userEl } from './reply.js';
 import { affectsState, applyOp, createTimeline, isPending } from './timeline.js';
 import { createSessionList } from './sessions.js';
+import { createMap } from './map.js';
 import {
   choiceCard,
   dividerEl,
@@ -40,9 +41,7 @@ const els = {
   liveError: $('#live-error'),
   hero: $('#hero'),
   modes: $('#mode-toggle'),
-  suggestions: $('#suggestions'),
   notice: $('#setup-notice'),
-  homeHint: $('#home-hint'),
   sessionList: $('#session-list'),
   sessionsError: $('#sessions-error'),
   sessionsErrorText: $('#sessions-error-text'),
@@ -69,18 +68,25 @@ const els = {
   homeSlot: $('#home-composer-slot'),
   dockSlot: $('#dock-composer-slot'),
   announcer: $('#announcer'),
+  openMap: $('#open-map'),
+  mapView: $('#map'),
+  mapBack: $('#map-back'),
+  mapHeading: $('#map-heading'),
+  mapPage: $('#map-page'),
+  mapCount: $('#map-count'),
+  mapClear: $('#map-clear'),
+  mapPractise: $('#map-practise'),
+  mapError: $('#map-error'),
 };
 
 const COPY = {
   learn: {
     hero: 'What do you want to learn?',
     placeholder: 'Describe a topic or a goal…',
-    suggestions: ['Derivatives from first principles', 'How TCP handshakes work', 'Bayes’ theorem, intuitively'],
   },
   practice: {
     hero: 'What do you want to practise?',
     placeholder: 'Name a topic, or paste a problem set…',
-    suggestions: ['Chain rule problems', 'Big-O of recursive functions', 'Conditional probability'],
   },
 };
 
@@ -102,6 +108,8 @@ const state = {
   config: { providers: [], settings: {} },
   homeScroll: 0,
   lastAnnounce: 0,
+  lastAnnounceKind: '', // 'exercise' for a question/choice announcement
+  mapLoad: 0, // increments per Map visit; stale learning_map results are dropped
 };
 
 function newView(summary) {
@@ -115,7 +123,6 @@ function newView(summary) {
     tl: createTimeline(),
     start: 0, // index of the oldest mounted item
     live: null, // LiveReply while the tutor streams
-    orphan: null, // finished stream whose message op has not arrived yet
     errorEl: null,
     st: null, // SessionState
     stError: null, // session_state failure message
@@ -131,6 +138,7 @@ function newView(summary) {
     planFailed: false,
     composerShown: true,
     turnStartedAt: 0,
+    openersVersion: null, // plan version section openers were last refreshed for
     atEnd: false, // learner was at the end when their last message was added
     userCount: 0,
     checkedUnanswered: false,
@@ -141,6 +149,8 @@ const sessions = createSessionList(els.sessionList, {
   onOpen: (id) => openSession(id),
   onDelete: (id) => deleteSession(id),
 });
+
+const map = createMap(els.mapPage, { onChange: renderMapDesk });
 
 // ---------- utilities ----------
 
@@ -153,11 +163,22 @@ async function cmd(name, args) {
   }
 }
 
-/** Polite screen-reader message: cleared first, set on the next frame. */
-function announce(text) {
+/**
+ * Polite screen-reader message: cleared first, set on the next frame.
+ * Messages from the same frame are joined, so none overwrites another.
+ */
+let announceQueue = [];
+function announce(text, kind = '') {
   state.lastAnnounce = performance.now();
-  els.announcer.textContent = '';
-  requestAnimationFrame(() => (els.announcer.textContent = text));
+  state.lastAnnounceKind = kind;
+  if (!announceQueue.length) {
+    els.announcer.textContent = '';
+    requestAnimationFrame(() => {
+      els.announcer.textContent = announceQueue.join(' ');
+      announceQueue = [];
+    });
+  }
+  announceQueue.push(text);
 }
 
 const focusQuiet = (el) => el?.focus({ preventScroll: true });
@@ -213,25 +234,27 @@ function isStreaming() {
   return running(s.id, 'tutor') || (state.starting && !s.id);
 }
 
-const isBusy = isStreaming;
-
 function syncBusy() {
   const s = state.current;
-  const busy = isBusy();
-  // While a reply grows, nothing may move the page: no scroll anchoring either
-  // (it would otherwise "follow" the tail when the reply is the only anchor).
-  els.messages.classList.toggle('streaming', busy);
+  const busy = isStreaming();
   els.send.textContent = !s ? 'Start' : busy ? 'Stop' : 'Send';
-  els.send.classList.toggle('primary', !busy);
-  els.send.classList.toggle('secondary', busy);
+  if (els.send.classList.contains('secondary') !== busy) {
+    // The Send/Stop swap is a state change, not a hover: never fade it, even
+    // when the pointer still rests on the button (§8).
+    els.send.style.transition = 'none';
+    els.send.classList.toggle('primary', !busy);
+    els.send.classList.toggle('secondary', busy);
+    getComputedStyle(els.send).backgroundColor; // commit the new colour untransitioned
+    els.send.style.transition = '';
+  }
   if (busy) els.send.setAttribute('aria-label', 'Stop the reply');
   else els.send.removeAttribute('aria-label');
   updateSendState();
-  updateContinue();
+  scheduleFrame();
 }
 
 function updateSendState() {
-  els.send.disabled = isBusy() ? !state.current?.id : !els.prompt.value.trim();
+  els.send.disabled = isStreaming() ? !state.current?.id : !els.prompt.value.trim();
 }
 
 function headStatus(text) {
@@ -259,27 +282,6 @@ function setMode(mode) {
   const copy = COPY[mode];
   els.hero.textContent = copy.hero;
   if (!state.current) els.prompt.placeholder = copy.placeholder;
-  els.suggestions.textContent = 'Or try: ';
-  copy.suggestions.forEach((text, i) => {
-    if (i) {
-      const sep = document.createElement('span');
-      sep.setAttribute('aria-hidden', 'true');
-      sep.textContent = ' · ';
-      els.suggestions.append(sep);
-    }
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'btn text';
-    b.textContent = text;
-    b.addEventListener('click', () => {
-      els.prompt.value = text;
-      autoGrow();
-      updateSendState();
-      setPromptError('');
-      focusQuiet(els.prompt);
-    });
-    els.suggestions.append(b);
-  });
 }
 
 async function loadSessions() {
@@ -295,6 +297,7 @@ async function loadSessions() {
 
 async function deleteSession(id) {
   await cmd('delete_session', { id });
+  state.turns.delete(id);
   const next = sessions.remove(id);
   focusQuiet(next ?? els.prompt);
 }
@@ -325,23 +328,25 @@ function setComposerContext(home) {
   setPromptError('');
 }
 
-/** Shows Home. `focusId`: the session just left (its row gets focus). */
-function showHome({ focusId = null } = {}) {
+/** Shows Home. `focusId`: the session just left (its row gets focus); `focus`: an element to focus instead. */
+function showHome({ focusId = null, focus = null } = {}) {
   closeCurrent();
   state.loading = null;
   els.conversation.hidden = true;
+  els.mapView.hidden = true;
   els.home.hidden = false;
   setComposerContext(true);
   setMode(state.mode);
   syncBusy();
   els.home.scrollTop = state.homeScroll;
-  focusQuiet((focusId && sessions.openButton(focusId)) || els.prompt);
+  focusQuiet(focus ?? ((focusId && sessions.openButton(focusId)) || els.prompt));
 }
 
 function showConversation() {
   const s = state.current;
   if (!els.home.hidden) state.homeScroll = els.home.scrollTop;
   els.home.hidden = true;
+  els.mapView.hidden = true;
   els.conversation.hidden = false;
   els.title.textContent = s.title;
   const learnLive = s.learn && !s.readOnly;
@@ -431,14 +436,37 @@ function fillViewport() {
   while (state.current?.start > 0 && m.scrollHeight <= m.clientHeight + 200) prependOlder();
 }
 
+/**
+ * One coalesced frame for everything that reads layout after a change:
+ * older history near the top, reserved space below the view, and the
+ * "Continue reading" button. Scroll events and ops only schedule it.
+ */
 let scrollFrame = 0;
-function onMessagesScroll() {
-  if (scrollFrame) return;
-  scrollFrame = requestAnimationFrame(() => {
-    scrollFrame = 0;
-    if (els.messages.scrollTop < 400) prependOlder();
-    updateContinue();
-  });
+function scheduleFrame() {
+  if (!scrollFrame) scrollFrame = requestAnimationFrame(onFrame);
+}
+
+function onFrame() {
+  scrollFrame = 0;
+  if (!state.current || els.conversation.hidden) return;
+  if (els.messages.scrollTop < 400) prependOlder();
+  releaseReserve();
+  updateContinue();
+}
+
+/**
+ * Gives back the space reserved for an aligned reply (#live's min height),
+ * but only the part below the viewport: the scroll position stays valid, so
+ * nothing in view moves.
+ */
+function releaseReserve() {
+  const reserved = parseFloat(els.live.style.minBlockSize);
+  if (!reserved) return;
+  const m = els.messages;
+  const slack = m.scrollHeight - m.clientHeight - m.scrollTop;
+  if (slack < 1) return;
+  const next = Math.max(0, reserved - slack);
+  els.live.style.minBlockSize = next ? `${next}px` : '';
 }
 
 /**
@@ -506,12 +534,12 @@ function continueReading() {
 // ---------- live reply / errors ----------
 
 /**
- * Starts the live reply. Scrolls once (instant) only if the learner is at the
- * end — or was, just before their own message was added (s.atEnd).
+ * Starts the live reply. With `align` (turn start only), scrolls once,
+ * instantly, if the learner is at the end — or was, just before their own
+ * message was added (s.atEnd). A later model call in the same turn starts a
+ * new reply segment without aligning, so the page never moves mid-turn.
  */
-function beginLive(s, { align = true } = {}) {
-  // Release the previous turn's reserved space before measuring.
-  els.live.style.minBlockSize = '';
+function beginLive(s, { align = false } = {}) {
   const atEnd = align && (s.atEnd || nearBottom());
   s.atEnd = false;
   s.live = new LiveReply({ showThinking: !s.learn });
@@ -529,9 +557,9 @@ function beginLive(s, { align = true } = {}) {
   return s.live;
 }
 
-function ensureLive() {
+function ensureLive({ align = false } = {}) {
   const s = state.current;
-  return s.live ?? beginLive(s);
+  return s.live ?? beginLive(s, { align });
 }
 
 function dropLive(s) {
@@ -547,14 +575,14 @@ function clearError() {
   if (s) s.errorEl = null;
 }
 
-/** The inline failure block at the end of the flow (role="alert"). */
-function showError({ title = 'The reply failed.', text = '', action = 'Retry', onRetry }) {
+/** The inline failure block at the end of the flow: `alert` for failures, `status` for recovery offers. */
+function showError({ title = 'The reply failed.', text = '', action = 'Retry', onRetry, role = 'alert' }) {
   const s = state.current;
   const atEnd = nearBottom();
   clearError();
   const el = document.createElement('div');
   el.className = 'turn-error';
-  el.setAttribute('role', 'alert');
+  el.setAttribute('role', role);
   const t = document.createElement('p');
   t.className = 'turn-error-title';
   t.textContent = title;
@@ -588,7 +616,7 @@ function showError({ title = 'The reply failed.', text = '', action = 'Retry', o
   s.errorEl = el;
   els.live.append(el);
   if (atEnd) el.scrollIntoView({ block: 'nearest', behavior: 'instant' });
-  updateContinue();
+  scheduleFrame();
 }
 
 function resumeTurn(s) {
@@ -621,7 +649,9 @@ function onRuntimeEvent(ev) {
     if (!state.turns.has(id)) state.turns.set(id, new Set());
     state.turns.get(id).add(ev.agent);
   } else if (ev.kind === 'turnEnd') {
-    state.turns.get(id)?.delete(ev.agent);
+    const agents = state.turns.get(id);
+    agents?.delete(ev.agent);
+    if (agents?.size === 0) state.turns.delete(id);
     if (ev.agent === 'tutor') sessions.bump(id);
   }
   if (state.loading?.id === id) {
@@ -650,9 +680,8 @@ function sessionEvent(s, ev) {
   switch (ev.kind) {
     case 'turnStart':
       if (ev.agent === 'tutor') {
-        s.orphan = null; // a new turn: an unmatched earlier stream stays as shown
         s.turnStartedAt = performance.now();
-        ensureLive();
+        ensureLive({ align: true });
       } else {
         s.planFailed = false;
       }
@@ -684,17 +713,14 @@ function sessionEvent(s, ev) {
 }
 
 function endLive(s, error) {
-  const live = s.live;
   s.atEnd = false;
-  if (live && !error && live.hasContent && !live.midway) {
-    // Streamed text whose message op has not arrived yet: keep showing it.
-    s.orphan = { el: live.finalize({ content: live.text, thinking: live.thinking }), text: live.text };
-    s.live = null;
-  } else {
-    dropLive(s);
-  }
+  // The message op (the persisted truth) always arrives before turnEnd and
+  // has finalised the reply; what is left is an empty "Writing…" or a
+  // view that joined mid-turn.
+  dropLive(s);
+  releaseReserve();
   if (error) showTurnError(error);
-  else if (state.lastAnnounce < s.turnStartedAt) announce('Reply finished.');
+  else if (!(state.lastAnnounceKind === 'exercise' && state.lastAnnounce >= s.turnStartedAt)) announce('Reply finished.');
 }
 
 function plannerFailed(s, error) {
@@ -712,15 +738,11 @@ function onOp(s, op) {
   if (change?.added) {
     const item = change.added;
     if (item.kind === 'assistant') {
-      if (s.orphan && s.orphan.text === item.msg.content) {
-        item.el = s.orphan.el;
-        s.orphan = null;
-        rerenderItem(item);
-      } else if (s.live) {
+      if (s.live) {
         item.el = s.live.finalize(item.msg);
         s.live = null;
-        appendItem(item);
-      } else appendItem(item);
+      }
+      appendItem(item);
     } else {
       if (item.kind === 'user') {
         s.userCount++;
@@ -745,7 +767,7 @@ function onOp(s, op) {
   }
   if (affectsState(op)) scheduleState();
   renderDesk();
-  if (!isStreaming()) updateContinue();
+  if (!isStreaming()) scheduleFrame();
 }
 
 /** A pending question/choice: the desk switches to its note; focus follows only if free. */
@@ -753,7 +775,7 @@ function exerciseArrived(s, item, free) {
   renderDesk({ quiet: true });
   if (free) focusQuiet(item.el.querySelector('[data-first]'));
   const text = item.kind === 'question' ? item.args.prompt : item.args.question;
-  announce(`${item.kind === 'question' ? 'Question' : 'Choice'}: ${plainText(text)}`);
+  announce(`${item.kind === 'question' ? 'Question' : 'Choice'}: ${plainText(text)}`, 'exercise');
 }
 
 // ---------- Learn: session state, head, plan ----------
@@ -787,8 +809,12 @@ function applyState(s, { initial = false } = {}) {
   renderPanel();
   renderDesk({ quiet: initial, free });
   if (!s.st) return;
-  // Section openers seen before any `plan` op take their title from the state.
-  for (const item of s.tl.items) if (item.kind === 'section' && !item.plan && !item.close && item.el && s.st.plan) rerenderItem(item);
+  // Section openers seen before any `plan` op take their title from the
+  // state: refresh them once per plan version, not on every state refresh.
+  if (s.st.plan && s.openersVersion !== s.st.planVersion) {
+    s.openersVersion = s.st.planVersion;
+    for (const item of s.tl.items) if (item.kind === 'section' && !item.plan && !item.close && item.el) rerenderItem(item);
+  }
   if (!s.checkedUnanswered) {
     s.checkedUnanswered = true;
     offerReplyIfUnanswered(s);
@@ -801,7 +827,7 @@ function offerReplyIfUnanswered(s) {
   if (running(s.id, 'tutor') || running(s.id, 'planner') || st.ended || st.pendingCall) return;
   if (st.phase !== 'measure' && st.phase !== 'teach') return;
   if (s.tl.items.at(-1)?.kind === 'user' && !s.errorEl) {
-    showError({ title: 'The tutor hasn’t answered this yet.', action: 'Get a reply', onRetry: () => resumeTurn(s) });
+    showError({ title: 'The tutor hasn’t answered this yet.', action: 'Get a reply', onRetry: () => resumeTurn(s), role: 'status' });
   }
 }
 
@@ -872,7 +898,9 @@ function renderPanel() {
   const st = s.st;
   els.planToggle.hidden = false;
   els.planToggle.setAttribute('aria-label', planButtonName(st));
-  const key = JSON.stringify([st.planVersion, st.currentSection, st.completedSections, st.lastNodeId, st.checks, st.activePlugins, st.ended]);
+  let checks = 0;
+  for (const list of Object.values(st.checks ?? {})) checks += list.length;
+  const key = [st.planVersion, st.currentSection, st.completedSections.length, st.lastNodeId, checks, st.activePlugins.join(','), st.ended].join('|');
   if (key === s.panelKey) return;
   s.panelKey = key;
   const hadFocus = els.planPanel.contains(document.activeElement);
@@ -902,9 +930,10 @@ function openPlanSheet() {
 
 // ---------- desk ----------
 
+/** The pending question or choice, if any. Read-only sessions have none. */
 function pendingItem(s) {
-  const last = s.tl.items.findLast((i) => i.kind === 'question' || i.kind === 'choice');
-  return last && isPending(last) ? last : null;
+  const last = s.tl.lastExercise;
+  return !s.readOnly && last && isPending(last) ? last : null;
 }
 
 /** The desk's one state: composer, or a note (with at most one button). */
@@ -934,7 +963,7 @@ function renderDesk({ quiet = false, free = notEngaged() } = {}) {
   const b = els.deskNoteButton;
   b.hidden = !d.button;
   if (d.button) {
-    b.textContent = d.button;
+    if (b.textContent !== d.button) b.textContent = d.button;
     b.dataset.act = d.act;
     b.classList.toggle('primary', Boolean(d.primary));
     b.classList.toggle('secondary', !d.primary);
@@ -1006,7 +1035,7 @@ async function openSession(id) {
     state.loading = null;
     const last = s.messages.at(-1);
     if (!s.learn && last?.role === 'user') {
-      showError({ title: 'The tutor hasn’t answered this yet.', action: 'Get a reply', onRetry: () => runPractice(null) });
+      showError({ title: 'The tutor hasn’t answered this yet.', action: 'Get a reply', onRetry: () => runPractice(null), role: 'status' });
     }
   }
   fillViewport();
@@ -1049,7 +1078,7 @@ async function startLearn(text) {
   state.starting = true;
   showConversation();
   mountTimeline();
-  beginLive(s, { align: false });
+  beginLive(s);
   s.turnStartedAt = performance.now();
   syncBusy();
   focusQuiet(els.prompt);
@@ -1107,6 +1136,7 @@ async function runPractice(text) {
     showConversation();
     mountTimeline();
     focusQuiet(els.prompt);
+    ensureKatex().catch(() => {});
   }
   const s = state.current;
   if (text !== null) {
@@ -1173,7 +1203,7 @@ function stop() {
 
 function submit(event) {
   event.preventDefault();
-  if (isBusy()) {
+  if (isStreaming()) {
     stop();
     return;
   }
@@ -1204,6 +1234,53 @@ function goHome() {
   showHome({ focusId: state.current?.id });
 }
 
+// ---------- Map ----------
+
+async function showMap() {
+  if (!els.home.hidden) state.homeScroll = els.home.scrollTop;
+  els.home.hidden = true;
+  els.mapView.hidden = false;
+  els.mapError.textContent = '';
+  focusQuiet(els.mapHeading);
+  const visit = ++state.mapLoad;
+  map.loading();
+  try {
+    const plans = await call('learning_map');
+    if (visit === state.mapLoad && !els.mapView.hidden) map.render(plans);
+  } catch (e) {
+    if (visit === state.mapLoad && !els.mapView.hidden) map.failed(message(e), showMap);
+  }
+}
+
+function renderMapDesk(count) {
+  els.mapCount.textContent = count ? `${count} selected` : 'Nothing selected';
+  els.mapClear.hidden = !count;
+  els.mapPractise.disabled = !count;
+  els.mapPractise.textContent = count ? `Practise ${count} ${count === 1 ? 'idea' : 'ideas'}` : 'Practise';
+  if (count) els.mapError.textContent = '';
+}
+
+/** Starts a Practice session on the selected ideas, mixed rather than blocked. */
+function practiseSelection() {
+  const picked = map.selection();
+  if (!picked.length) return;
+  if (!modelReady()) {
+    els.mapError.textContent = 'Choose a model first.';
+    openSettings();
+    return;
+  }
+  // The first line doubles as the session title until the generated one arrives.
+  const lines = picked.map(({ title, goal }) => `- ${title} (from “${goal}”)`);
+  const text = [
+    `Practise: ${picked.map((p) => p.title).join(', ')}`,
+    '',
+    'Mix them together rather than one at a time. From my Learn sessions:',
+    ...lines,
+  ].join('\n');
+  map.clear();
+  runPractice(text);
+}
+
 // ---------- wiring ----------
 
 function wire() {
@@ -1217,7 +1294,7 @@ function wire() {
   els.prompt.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.isComposing) {
       e.preventDefault();
-      if (!isBusy()) els.composer.requestSubmit();
+      if (!isStreaming()) els.composer.requestSubmit();
     }
   });
   els.modes.addEventListener('change', (e) => {
@@ -1226,7 +1303,7 @@ function wire() {
   els.back.addEventListener('click', goHome);
   els.deskNoteButton.addEventListener('click', onDeskNoteButton);
   els.continueBtn.addEventListener('click', continueReading);
-  els.messages.addEventListener('scroll', onMessagesScroll, { passive: true });
+  els.messages.addEventListener('scroll', scheduleFrame, { passive: true });
   els.messages.addEventListener('click', (e) => {
     const a = e.target.closest('a[href]');
     if (!a) return;
@@ -1246,6 +1323,13 @@ function wire() {
   $('#open-settings').addEventListener('click', openSettings);
   $('#setup-button').addEventListener('click', openSettings);
   $('#sessions-retry').addEventListener('click', loadSessions);
+  els.openMap.addEventListener('click', showMap);
+  els.mapBack.addEventListener('click', () => showHome({ focus: els.openMap }));
+  els.mapClear.addEventListener('click', () => {
+    map.clear();
+    focusQuiet(els.mapPractise.disabled ? els.mapHeading : els.mapPractise);
+  });
+  els.mapPractise.addEventListener('click', practiseSelection);
   initSettings({ changed: applyConfig });
 }
 
@@ -1254,6 +1338,7 @@ async function start() {
   showHome();
   if (!available) {
     els.start.hidden = true;
+    els.openMap.hidden = true;
     els.unavailable.hidden = false;
     sessions.render();
     return;

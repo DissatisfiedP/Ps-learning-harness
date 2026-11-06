@@ -141,7 +141,8 @@ both lists:
 
 | Moment | Center (the one thing in focus) | Periphery (visible, static) | Out of view |
 |---|---|---|---|
-| Home | The start question and its input | Session list below the fold; "Settings" | — |
+| Home | The start question and its input | Session list below the fold; "Map" and "Settings" | — |
+| Map | The idea map of one plan, or the list beside it | Running head; desk with the selection and "Practise" | Sessions, the composer |
 | Waiting for the first words | The learner's own message, with "Writing…" under it | Running head; desk with Stop | — |
 | Tutor writing | The growing text (it never moves) | Running head; desk with Stop | Tutor reasoning (Learn) |
 | Reading a finished reply | The reply | Desk composer | — |
@@ -156,7 +157,7 @@ both lists:
 ### 3.2 Removed, hidden, peripheral
 
 - **Removed:** sidebar in sessions; avatars; per-reply model and author metadata; model pill and status dot; mode pills and dots; badges and pills; gradients; drop shadows; spinners; typing dots; caret blink; toasts; suggestion chips; the uppercase accent kickers; the second header band.
-- **Hidden until asked:** the session list (Home only), the plan (sheet), research briefs (disclosure), settings (Home only, plus a link inside model-related errors), tutor reasoning in Practice (closed disclosure after the reply).
+- **Hidden until asked:** the session list (Home only), the plan (sheet), the learning map (its own page, reached from Home only), research briefs (disclosure), settings (Home only, plus a link inside model-related errors), tutor reasoning in Practice (closed disclosure after the reply).
 - **Peripheral and static:** the running head (back, title, phase position, Plan) and the desk (composer, Stop, or the "continue" note).
 
 ---
@@ -433,7 +434,7 @@ state at a time:
 | **Read-only** | `SessionSummary.readOnly`. | "This session was made with an earlier version of the tutor and can't continue." plus the primary button "Start a new session" (goes to Home in Learn mode). |
 
 - A rejected send (`send_learner_message` rejects) puts the text back in the textarea, as today. The rejection message appears directly under the textarea in `--danger` text, `--fs-small`, with `role="status"`. It stays until the next input event or the next successful send.
-- There is no "Enter to send · Shift+Enter…" line in sessions. On Home, the hint "Enter to start · Shift+Enter for a new line" is shown under the input in `--ink-3` `--fs-small`. In sessions it is `aria-describedby` text only.
+- There is no visible "Enter to send / start" hint anywhere, on Home or in sessions. The keys are standard; they are exposed only as `aria-describedby` text on the input (`.sr-only`).
 - Hiding the composer follows today's backend rules exactly: anything the backend would reject (pending card, plan phase, read-only) gets a note instead of an input.
 
 ### 6.4 Flow entries (inside the page column)
@@ -474,8 +475,8 @@ Live reply (`#live`):
 Desktop:
 
 ```
- Learning Harness                                              Settings
- (wordmark, --fs-ui 600 --ink-2, plain text)          (text button)
+ Learning Harness                                         Map   Settings
+ (wordmark, --fs-ui 600 --ink-2, plain text)    (text buttons)
 
             What do you want to learn?          ← --fs-display, serif, left-aligned in column
             ( ) Learn — the tutor finds what you know, plans, then teaches
@@ -485,9 +486,7 @@ Desktop:
             ┌────────────────────────────────────────────┐
             │ Describe a topic or a goal…                 │ [Start]
             └────────────────────────────────────────────┘
-            Enter to start · Shift+Enter for a new line
-            Or try: Derivatives from first principles · How TCP handshakes work ·
-                    Bayes' theorem, intuitively
+            (no hint line, no suggestions: the question and the input are the whole start area)
 
             ─────────────────────────────────────────────
             Your sessions
@@ -500,10 +499,10 @@ Desktop:
               Old learn session                    Read-only · 1 Jan  Delete
 ```
 
-- **Column:** the same 56 ch column as the session page. The top bar holds the wordmark (plain text, no logo mark) and a "Settings" text button. Vertical offset: `--s9` above the display line on desktop, `--s7` on phone.
-- **Mode:** a real radio group (`fieldset` + `legend` "Mode", visually hidden legend), replacing `role="tablist"` (wrong semantics). Each option shows the label (`--fs-ui` 600) and its one-line description (`--fs-small`, `--ink-3`, linked via `aria-describedby`). Switching mode updates the display line, placeholder and suggestions from today's `COPY`.
+- **Column:** the same 56 ch column as the session page. The top bar holds the wordmark (plain text, no logo mark) and two text buttons, "Map" (§7.6) and "Settings". "Map" is hidden when there is no app backend. Vertical offset: `--s9` above the display line on desktop, `--s7` on phone.
+- **Mode:** a real radio group (`fieldset` + `legend` "Mode", visually hidden legend), replacing `role="tablist"` (wrong semantics). Each option shows the label (`--fs-ui` 600) and its one-line description (`--fs-small`, `--ink-3`, linked via `aria-describedby`). Switching mode updates the display line and placeholder from today's `COPY`.
 - **Input:** the same `#composer` element moved into the home slot (keep today's slot mechanism). Its label is the display line (`aria-labelledby` = `#hero`). The button reads "Start" (primary).
-- **Suggestions:** one line, "Or try:" followed by text buttons separated by `·`. They fill the input. They are not chips.
+- **No suggestions.** There is no "Or try:" line. Example topics are content the learner did not ask for (a seductive detail, §2.3) and a second set of targets next to the one input (§2.8).
 - **Setup notice** (no model ready): a paragraph above the input, "Connect a model to start." followed by the text button "Open settings". Start stays enabled. Pressing it without a model shows the inline status "Choose a model first." under the input and opens Settings (today's toast becomes inline).
 - **Session list** under the heading "Your sessions" (`h2`, `--fs-ui` 600):
   - Groups Today / Yesterday / Previous 7 days / Older, as small-caps `h3` in `--fs-meta` `--ink-3`.
@@ -537,10 +536,12 @@ Phone: the same stacked order. The display line is 28 px. Session-row meta wraps
   - At `turnStart` (tutor), if the learner is "at the end" (the bottom of the flow is within 120 px of the viewport bottom, today's `nearBottom`) and the live element's top would be below the visible area, scroll **once**, instantly, so the live element's top sits `--s6` below the running head.
   - After that, never scroll during the turn.
   - If the learner is not at the end, do nothing.
-- **Jump to end:** when the flow's end is below the viewport *and* the turn has ended, the desk shows a trailing text button "↓ Continue reading" in place of nothing. It is static. Activating it scrolls instantly so the first unread block (the top of the last tutor entry, or of the first exercise after it) sits under the head. It is hidden again once the end is in view. It never appears during streaming, so it cannot flicker.
+- **Jump to end:** when the flow's end is below the viewport *and* the turn has ended, a text button "↓ Continue reading" (`--fs-small`, `--paper` background) appears at the trailing end of the column, resting on the desk's top edge. It is positioned over the page, so showing it never resizes the desk or the scroller. It is static. Activating it scrolls instantly so the first unread block (the top of the last tutor entry, or of the first exercise after it) sits under the head. It is hidden again once the end is in view. It never appears during streaming, so it cannot flicker.
 - **Tutor reasoning (`thinking`):** in Learn, do not render it. Skip `paintThinking`, and keep accumulating the string so `finalize` stays correct. Reason: spoiler risk (D11) and coherence (§2.3).
 - **Stop:** the desk button "Stop" → `cancel_reply`. The finalised message carries `ending: interrupted` and shows "Stopped here."
-- **Overflow anchoring:** keep the default `overflow-anchor: auto` on the scroller, so items inserted *above* the viewport (prepended pages, job lines) do not shift what the learner is reading. Keep today's manual compensation in `prependOlder`.
+- **Overflow anchoring:** keep the default `overflow-anchor: auto` on the scroller at all times, so items inserted or resized *above* the viewport (prepended pages, job lines, verdicts) do not shift what the learner is reading. Only two elements opt out: the reply that is still streaming (`.entry.streaming`; otherwise the browser follows its tail) and `#live`. Keep today's manual compensation in `prependOlder`.
+- **One alignment per turn:** a turn can contain several model calls, each persisted as its own message (e.g. feedback, then `verdict_record`, then more text). Only `turnStart` aligns; a later segment of the same turn starts its reply without scrolling.
+- **Reserved space:** the space reserved under an aligned reply (`#live`'s minimum height, so the reply's start can sit under the head) is released as soon as it is below the viewport (at turn end and on scroll). Space in view is never taken away, so nothing moves.
 
 #### 7.2.3 Reply finished
 
@@ -804,6 +805,127 @@ Settings is a modal `<dialog>` that fills the viewport (`inline-size: 100vw; blo
 - **Appearance** is new and UI-only: a radio group bound to `localStorage["lh.theme"]`.
 - Phone: the same single column; button rows wrap.
 
+### 7.6 Learning map (its own page)
+
+The architecture's knowledge graph (proposition nodes, topic tree, FSRS state) is not built yet
+(`docs/agent-system-plan.md`, "Not built yet" 1). What exists is each Learn session's approved plan:
+a dependency map of ideas (`plan.nodes[].requires`) plus the check verdicts recorded against them.
+The Map page draws that, and lets the learner pick ideas to practise. When the graph lands, the
+data source changes (topics instead of plans); the page shape stays.
+
+**Where it lives, and why there.** A separate page reached only from Home ("Map" in the top bar).
+It is never Home's background (LearnHarness draws its graph behind the start input) and never
+inside a session. A drawing in the periphery of the start question or the lesson is visual clutter
+and a seductive detail (§2.1, §2.3; [Rosenholtz 2007; Sundararajan & Adesope 2020]); choosing what
+to practise is a deliberate, separate task, which is when an open learner model helps most
+[Mitrovic & Martin 2007; Long & Aleven 2017].
+
+```
+ ← Home   Learning map                                            (running head)
+ ──────────────────────────────────────────────────────────────
+ Ideas from the plans of your Learn sessions. What an idea needs
+ sits above it. Pick ideas to practise them together.              (--fs-small --ink-2)
+ Select: Needs work (2) · Checked (9)                              (text buttons)
+
+ ▾ Understand derivatives                       (summary: goal, --font-read 600 --fs-read)
+   From "Derivatives" · 3 Nov · 7 ideas, 3 checked, 1 needs work   (--fs-small --ink-3)
+   [ ] Select all 7
+        ┌──────────────┐   ┌──────────────┐
+        │☐ Secant slope ✓│   │☐ Limits       │                    (solid border: checked)
+        └──────┬───────┘   └──────┬───────┘
+               └───────┬──────────┘
+             ┌─────────┴──────────┐
+             │☐ Difference quotient ◐│                            (◐ needs work)
+             └─────────┬──────────┘
+             ┌ ─ ─ ─ ─ ┴ ─ ─ ─ ─ ┐
+             │☐ Power rule        │                              (dashed: not checked yet)
+             └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+   Power rule · mechanism · not checked yet · Needs: Difference quotient   (detail line)
+ ▸ Chain rule drills …                                             (older plans start closed)
+ ──────────────────────────────────────────────────────────────
+ 3 selected  Clear                                   [Practise 3 ideas]   (desk)
+```
+
+**Layout** (`src/map-layout.js`, pure, deterministic; no simulation, no stored positions):
+
+- One drawing per plan. Prerequisites above, dependents below: a layered DAG, which keeps
+  edge crossings (the largest readability cost) low and is the layout LearnHarness itself uses for
+  plans [Purchase 1997; Sugiyama 1981; Gansner 1993]. Top-down, not radial [Burch 2011].
+- Layer = longest path from an idea with no in-plan prerequisite; such an idea then moves down to
+  sit one layer above the first idea that needs it, so foundations stay next to their use and long
+  edges do not cut across other boxes. A cycle's back edge is ignored.
+  Order within a layer: plan order, then four barycenter sweeps (down, up, down, up). Layers are
+  centred on the widest one.
+- Boxes have a fixed size (144×56 px, 12 px apart, 40 px between layers; four fit the desktop
+  column), so the layout needs no measuring and no layout reads. Titles clamp at two lines; the
+  full title is in the detail line.
+- The same plan always gives the same picture (mental-map stability [Misue 1995]). Nothing moves
+  after render; a drawing wider than the column scrolls horizontally inside its own box.
+- Edges: `--rule-strong` hairlines from the bottom of a prerequisite to the top of the idea that
+  needs it, with a small arrowhead. SVG, `aria-hidden`.
+
+**Learner state** in ink, glyph and words, never hue (WCAG 1.4.1; at most three states
+[Haroz & Whitney 2012]):
+
+| State | Rule | Box |
+|---|---|---|
+| Checked | at least one `correct` check verdict | solid `--line` border, `✓` after the title, `--ink` |
+| Needs work | checks recorded, none `correct` | solid border, `◐` after the title, `--ink` |
+| Not checked yet | no check verdict | dashed `--rule-strong` border, `--ink-2` |
+| *Selected* (any state) | the box's checkbox is checked | `--select` fill and a 2 px `--accent` border |
+
+No percentages, meters or "due" labels: FSRS state does not exist yet, and §2.7 applies.
+
+**Controls and accessibility.** Every box is a native `<label>` holding a checkbox, so the drawing
+*is* the list: Tab walks the ideas layer by layer, Space toggles, and the label carries the title
+and the state in words. A hidden description gives "Needs: … · Leads to: …". Focusing or clicking
+an idea writes its detail line under the drawing (kind, state, section, needs, leads to); it is
+static otherwise and never announced. "Select all N" is a checkbox with the indeterminate state
+for a partial selection.
+
+**Agenda shortcuts, not preselection.** "Select: Needs work (n) · Checked (n)" add those ideas to
+the selection. Nothing is selected on open (defaults steer choices [Johnson & Goldstein 2003]);
+the shortcuts point at what is worth practising (missed checks first), since unaided learners tend
+to pick easy or massed material [Kornell & Bjork 2007; Kornell & Metcalfe 2006].
+
+**Desk.** One state: "n selected", a "Clear" text button, and the one primary button,
+"Practise n ideas" (disabled, reading "Practise", with nothing selected). Pressing it starts a
+Practice session whose first message lists the selected ideas and asks for them mixed, not one at
+a time [Rohrer & Taylor 2007; Brunmair & Richter 2019]. Its first line doubles as the session
+title until the generated title arrives:
+
+```
+Practise: Power rule, Chain rule
+
+Mix them together rather than one at a time. From my Learn sessions:
+- Power rule (from “Understand derivatives”)
+- Chain rule (from “Understand derivatives”)
+```
+
+Without a model the desk shows "Choose a model first." in `--danger` under the button and opens
+Settings. The selection survives leaving the Map for Home and coming back; it is cleared once a
+practice session starts.
+
+**Groups.** One `details` per plan, newest first. The newest is open; older ones start closed.
+The summary is the plan goal; the line under it gives the session title, date and counts in words.
+
+**States.** Loading: "Loading the map…" (static). Empty: "Nothing to map yet. Ideas appear here
+once you approve a plan in a Learn session." Failure: "Couldn't load the map: ⟨message⟩" in
+`--danger` with a "Try again" text button. The page is loaded once per visit and does not update
+while open (P3).
+
+**Focus.** Opening focuses the page heading (`tabindex="-1"`); "← Home" returns focus to Home's
+"Map" button.
+
+**Backend.** One read-only command, `learning_map()`, returns
+`[{ sessionId, title, updatedAt, goal, nodes: [{ id, title, kind, requires, section, correct, missed }] }]`
+for every Learn session that is not read-only and whose plan was approved at least once, newest
+first. `correct` counts `correct` check verdicts for the node; `missed` counts the others. It reads
+the op logs without disturbing the open-session cache.
+
+**Performance.** One IPC call per visit. No layout reads while rendering. Each group has
+`content-visibility: auto`, so closed and off-screen plans cost nothing to lay out.
+
 ---
 
 ## 8. Motion policy
@@ -955,7 +1077,7 @@ Nothing in this table scrolls, moves focus or animates.
 | 11 | Indigo/violet accent with purple gradient | One lamp-green accent, used sparingly (§5.3) |
 | 12 | Bouncing typing dots, blinking caret, spinners | Static "Writing…", no caret, static job text (§6.4, §7.2.8) |
 | 13 | Stream-following autoscroll | Turn-start alignment once, then no movement (§7.2.2) |
-| 14 | Suggestion chips | One line of text buttons (§7.1) |
+| 14 | Suggestion chips | Removed; Home has no suggestions (§7.1) |
 | 15 | Icon segmented control as `role="tablist"` | Radio group with descriptions (§7.1) |
 | 16 | Toasts | Inline persistent status (§9.7) |
 | 17 | "Reasoning" disclosure above every reply | Hidden in Learn; closed "Tutor's working" after the reply in Practice (§7.2.2, §7.3) |
@@ -968,7 +1090,7 @@ Nothing in this table scrolls, moves focus or animates.
 
 ## 11. Constraints the implementer must keep
 
-1. **Backend contract, exactly.** Use only the commands and events listed below, with the payload shapes given. Do not change Rust.
+1. **Backend contract, exactly.** Use only the commands and events listed below, with the payload shapes given. The one Rust addition is the read-only `learning_map` command for the Map page (§7.6); nothing else in Rust changes for the UI.
    - **Events:** subscribe once via `subscribe_events({ onEvent: channel })`. The event kinds are `session`, `turnStart`, `text`, `thinking`, `op` and `turnEnd(error?)`.
      - Ignore events for other sessions, except `session` (list upsert).
      - Live text is replaced by the assistant `message` op, which is the persisted truth.
@@ -1044,6 +1166,34 @@ shows the notice line and desk note first; the head label appears when the
 back-end's `phase: plan` op arrives (which is when a real planner run starts).
 This is not a deviation from the contract — the UI never invents state.
 
+### Revision, 2026-11-06
+
+An audit of `src/` against this document, plus the Map page (§7.6). Verified in headless
+Chromium 155 against the same mock with a `learning_map` handler, at 1440×900 and 390×844, light
+and dark; `learning_map` itself was checked against real op-log files in a throwaway test.
+
+| Area | Change |
+|---|---|
+| Home | The "Or try:" suggestions and the visible Enter hint are gone (owner decision; §6.3, §7.1). "Map" sits next to "Settings". |
+| Finalize jump | The streaming reply carried the class `live`, which also matched `.live > *` (32 px margin) until finalize removed it: the reply jumped up 32 px. It is now `.streaming`; measured shift on finalize: 0 px. |
+| Mid-turn scroll | A second model call in the same turn re-ran the turn-start alignment. Now only `turnStart` aligns (§7.2.2); measured: `scrollTop` unchanged across a second segment. |
+| Anchoring | Scroll anchoring was switched off for the whole scroller while streaming; it now stays on, with only the streaming entry and `#live` excluded (§7.2.2). M2/M3 re-measured: unchanged `scrollTop`. |
+| Reserved space | Released below the viewport at turn end and on scroll, instead of staying until the next turn. |
+| Continue reading | No longer a desk row that resized the desk and scroller on every toggle; it rests on the desk edge (§7.2.2). |
+| Read-only open | An unanswered legacy question stole the resumption target and dropped focus; focus now lands on "Start a new session". |
+| Midway join | "Still working…" no longer appears while a joined-mid-turn reply is actively being written. |
+| Announcements | Messages in the same frame are joined instead of overwriting each other. "Reply finished." is suppressed only after a question or choice announcement in that turn. The "hasn't answered yet" recovery block is `role="status"`, not `alert`. |
+| Math | Blocks streamed before KaTeX loaded are re-rendered at finalize instead of keeping raw TeX. KaTeX's stylesheet is loaded with its script (inserted before `styles.css`), so it no longer blocks Home's first paint. |
+| Dead code | The orphan-stream path (unreachable: the message op always precedes `turnEnd`), `phaseLabel`, the `isBusy` alias and redundant CSS rules are removed. |
+| Focus | Every programmatic focus uses `preventScroll` (validation focus in exercises, plan change and API-key forms). |
+| Settings | One primary per screen: "Use this model" is primary for Tutor only; WorkBuddy sign-in is secondary. API-key fields have a visible label. |
+| Other | Armed "Delete?" is ink 600, not `--danger` (not a failure). The Plan button underlines only on hover/focus. The Send/Stop swap never fades. |
+| Performance | Layout reads after ops are coalesced into one rAF with the scroll handler; the pending-exercise lookup is O(1) (`tl.lastExercise`) instead of a scan per op; section openers refresh once per plan version instead of on every state refresh; the plan sheet key no longer serialises all check history; empty turn-tracking entries are pruned. |
+
+Kept deliberately: after a planner failure with the composer hidden, the desk note reads
+"Planning failed." without "You can describe what you want…", because there is no input to
+describe it in.
+
 
 ---
 
@@ -1096,7 +1246,7 @@ Use the mocked backend: serve `src/` with `index.html` patched to load a `window
 
 - [ ] S1 Session `legacy`: there is no composer. The desk shows the read-only note and "Start a new session", which goes to Home.
 - [ ] S2 Session `pr` (Practice): sending calls `send_message` with `mode:"practice"` and a fresh channel. Retry calls `retry_reply`. The head shows "Practice", and there is no phase or Plan.
-- [ ] S3 Home: the mode control is a radio group with descriptions. The list shows group headings and rows at least 48 px tall. Delete needs two presses.
+- [ ] S3 Home: the mode control is a radio group with descriptions. There is no "Or try:" line and no visible Enter hint. The list shows group headings and rows at least 48 px tall. Delete needs two presses.
 - [ ] S4 Settings: role fieldsets with inline status after "Use this model". Appearance → Dark switches the theme, and the choice persists across a reload.
 - [ ] S5 At 390 px nothing scrolls horizontally (`document.documentElement.scrollWidth <= 390`), and every button is at least 44 px tall under `pointer: coarse` emulation.
 
@@ -1109,6 +1259,15 @@ Use the mocked backend: serve `src/` with `index.html` patched to load a `window
 
 - [ ] F1 Opening `long` mounts ≤ 40 timeline items. Scrolling to the top prepends more without a visible jump.
 - [ ] F2 A 20 000-character streamed reply (bench page, if present) still renders with the block cache: completed blocks are not re-rendered, which you can check by counting `renderBlock` calls or comparing with the existing bench result.
+
+**Map (§7.6)**
+
+- [ ] G1 Home → "Map" shows the Map page with one group per approved plan, newest open; Home and sessions show no drawing. "← Home" returns focus to "Map".
+- [ ] G2 In a group, every prerequisite box sits in a higher layer than the boxes that need it; reopening the page gives identical box positions.
+- [ ] G3 Boxes show ✓ / ◐ / dashed border for checked / needs work / not checked, and the label's accessible name contains the state in words. No hue other than the selection accent is used.
+- [ ] G4 Nothing is selected on open. "Needs work (n)" selects exactly those n ideas; "Select all" shows the indeterminate state for a partial group; the desk count follows.
+- [ ] G5 "Practise n ideas" calls `send_message` with `mode:"practice"` and a first message listing the selected titles; the session view opens in Practice.
+- [ ] G6 `document.getAnimations()` is empty on the Map page, and at 390 px only a drawing's own box scrolls horizontally (`document.documentElement.scrollWidth <= 390`).
 
 ---
 
@@ -1180,6 +1339,24 @@ Reading and typography
 - Schotter, Tran & Rayner 2014 — Don't believe what you read (only once): comprehension is supported by regressions during reading. *Psychological Science*. https://doi.org/10.1177/0956797614531148
 - Delgado, Vargas, Ackerman & Salmerón 2018 — Don't throw away your printed books: a meta-analysis on reading media and comprehension. *Educational Research Review*. https://doi.org/10.1016/j.edurev.2018.09.003
 - Butterick, *Practical Typography* — Line length: https://practicaltypography.com/line-length.html · Point size: https://practicaltypography.com/point-size.html
+
+Learning map (§7.6)
+- Purchase 1997 — Which aesthetic has the greatest effect on human understanding? *GD '97*, LNCS 1353. https://doi.org/10.1007/3-540-63938-1_67
+- Sugiyama, Tagawa & Toda 1981 — Methods for visual understanding of hierarchical system structures. *IEEE SMC* 11(2). https://doi.org/10.1109/TSMC.1981.4308636
+- Gansner, Koutsofios, North & Vo 1993 — A technique for drawing directed graphs. *IEEE TSE* 19(3). https://doi.org/10.1109/32.221135
+- Burch et al. 2011 — Evaluation of traditional, orthogonal, and radial tree diagrams by an eye tracking study. *IEEE TVCG* 17(12). https://doi.org/10.1109/TVCG.2011.193
+- Misue, Eades, Lai & Sugiyama 1995 — Layout adjustment and the mental map. *JVLC* 6(2). https://doi.org/10.1006/jvlc.1995.1010
+- Amadieu, van Gog & Paas 2009 — Effects of prior knowledge and concept-map structure on disorientation, cognitive load, and learning. *Learning and Instruction* 19(5). https://doi.org/10.1016/j.learninstruc.2009.02.005
+- Nesbit & Adesope 2006 — Learning with concept and knowledge maps: a meta-analysis. *RER* 76(3). https://doi.org/10.3102/00346543076003413
+- Rosenholtz, Li & Nakano 2007 — Measuring visual clutter. *Journal of Vision* 7(2):17. https://doi.org/10.1167/7.2.17
+- Haroz & Whitney 2012 — How capacity limits of attention influence information visualization effectiveness. *IEEE TVCG* 18(12). https://doi.org/10.1109/TVCG.2012.233
+- Mitrovic & Martin 2007 — Evaluating the effect of open student models on self-assessment. *IJAIED* 17(2). https://doi.org/10.3233/irg-2007-17(2)03
+- Long & Aleven 2017 — Enhancing learning outcomes through self-regulated learning support with an open learner model. *UMUAI* 27(1). https://doi.org/10.1007/s11257-016-9186-6
+- Kornell & Metcalfe 2006 — Study efficacy and the region of proximal learning framework. *JEP:LMC* 32(3). https://doi.org/10.1037/0278-7393.32.3.609
+- Kornell & Bjork 2007 — The promise and perils of self-regulated study. *Psychonomic Bulletin & Review* 14(2). https://doi.org/10.3758/BF03194055
+- Rohrer & Taylor 2007 — The shuffling of mathematics problems improves learning. *Instructional Science* 35(6). https://doi.org/10.1007/s11251-007-9015-8
+- Brunmair & Richter 2019 — Similarity matters: a meta-analysis of interleaved learning and its moderators. *Psychological Bulletin* 145(11). https://doi.org/10.1037/bul0000209
+- LearnHarness v0.4.1 (look and interaction studied, no code or text reused; AGPL-3.0): https://github.com/amosblomqvist/learnharness — its graph is a force-directed canvas behind Home with session-coloured clusters; its plan is a layered top-down DAG; practice ideas are picked from a checkbox list ("Chains"), not from the canvas.
 
 Standards and platform references
 - W3C, WCAG 2.2: https://www.w3.org/TR/WCAG22/ — Understanding docs used:

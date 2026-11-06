@@ -66,7 +66,7 @@ export function assistantEl(msg, { showThinking = false } = {}) {
  */
 export class LiveReply {
   constructor({ showThinking = false } = {}) {
-    this.el = el('div', 'entry tutor live');
+    this.el = el('div', 'entry tutor streaming');
     this.prose = el('div', 'prose');
     this.status = el('p', 'writing', WRITING);
     this.el.append(this.status, this.prose);
@@ -80,12 +80,14 @@ export class LiveReply {
     this.thinkingNode = null;
     this.thinkingShown = 0;
     this.frame = 0;
+    // Blocks painted before KaTeX was loaded hold raw TeX; finalize re-renders.
+    this.rawMath = false;
     // Set when the view joins a turn already in progress: its earlier deltas
     // were missed, so it shows only a status line until the message op.
     this._midway = false;
     this.slowTimer = setTimeout(() => {
       this.slowTimer = 0;
-      if (!this.text && this.status.isConnected) this.status.after(el('p', 'writing', SLOW));
+      if (!this.text && !this._midway && this.status.isConnected) this.status.after(el('p', 'writing', SLOW));
     }, SLOW_MS);
   }
 
@@ -145,6 +147,7 @@ export class LiveReply {
   paintText() {
     if (!this.text) return;
     const prose = this.prose;
+    if (!window.katex) this.rawMath = true;
     const { completed, tail, reset } = this.splitter.push(this.text);
     if (!this.tailEl || reset) {
       this.clearStatus();
@@ -174,9 +177,9 @@ export class LiveReply {
     cancelAnimationFrame(this.frame);
     this.frame = 0;
     this.clearStatus();
-    this.el.classList.remove('live');
+    this.el.classList.remove('streaming');
     const content = msg.content ?? '';
-    if (content === this.text && this.tailEl) {
+    if (content === this.text && this.tailEl && !this.rawMath) {
       this.paintText();
       const tail = this.tailText.replace(/\s+$/, '');
       if (tail) this.tailEl.insertAdjacentHTML('beforebegin', renderBlock(tail));
