@@ -1,6 +1,6 @@
 # Learning Harness UI — "Carrel"
 
-Design direction and implementable spec for reworking `src/` (HTML/CSS/JS, no bundler, no new
+Design direction and implementable spec for reworking `ui/` (HTML/CSS/JS, no bundler, no new
 dependencies). It covers every view and state the backend contract can produce. Rust and the
 backend contract stay as they are.
 
@@ -846,7 +846,7 @@ to practise is a deliberate, separate task, which is when an open learner model 
  3 selected  Clear                                   [Practise 3 ideas]   (desk)
 ```
 
-**Layout** (`src/map-layout.js`, pure, deterministic; no simulation, no stored positions):
+**Layout** (`ui/map-layout.js`, pure, deterministic; no simulation, no stored positions):
 
 - One drawing per plan. Prerequisites above, dependents below: a layered DAG, which keeps
   edge crossings (the largest readability cost) low and is the layout LearnHarness itself uses for
@@ -1139,7 +1139,7 @@ Nothing in this table scrolls, moves focus or animates.
 
 ## 11a. Implementation notes (verification, 2026-11-05)
 
-Implemented in `src/` as specified. Verified in headless Chromium 155 against
+Implemented in `ui/` as specified. Verified in headless Chromium 155 against
 `window.__TAURI__` mock (`/tmp/lh-bench/mock2.js`), at 1440×900 and 390×844 in
 light and dark, with no console errors. All §12 items pass; measured numbers:
 
@@ -1168,7 +1168,7 @@ This is not a deviation from the contract — the UI never invents state.
 
 ### Revision, 2026-11-06
 
-An audit of `src/` against this document, plus the Map page (§7.6). Verified in headless
+An audit of `ui/` against this document, plus the Map page (§7.6). Verified in headless
 Chromium 155 against the same mock with a `learning_map` handler, at 1440×900 and 390×844, light
 and dark; `learning_map` itself was checked against real op-log files in a throwaway test.
 
@@ -1199,7 +1199,7 @@ describe it in.
 
 ## 12. Acceptance checklist (verifiable with screenshots and small scripts)
 
-Use the mocked backend: serve `src/` with `index.html` patched to load a `window.__TAURI__` mock first. A mock like `/tmp/lh-bench/mock.js` provides sessions `L1` (await approval), `long` (500 messages, teach), `legacy` (read-only) and `pr` (practice), plus `__mock.emit(event)`. Screenshot each item at **1440×900** and **390×844**, in **light and dark**.
+Use the mocked backend: serve `ui/` with `index.html` patched to load a `window.__TAURI__` mock first. A mock like `/tmp/lh-bench/mock.js` provides sessions `L1` (await approval), `long` (500 messages, teach), `legacy` (read-only) and `pr` (practice), plus `__mock.emit(event)`. Screenshot each item at **1440×900** and **390×844**, in **light and dark**.
 
 **Look**
 

@@ -965,7 +965,7 @@ Webview caveat: rendering differs across WKWebView (iOS/macOS), Android WebView,
 
 **Chosen (built, owner decision):**
 - Rust for providers, storage, the agent loop and tools: `crates/providers`, `crates/harness`, `crates/research-search`.
-- `src-tauri` is a thin command layer with one command per `Harness` method.
+- `crates/app` is a thin Tauri command layer with one command per `Harness` method.
 - The UI is plain ES modules in the webview, with no bundler.
 - Prompts are Markdown files bundled with `include_str!` and overridable from the data repo, so prompt iteration needs no rebuild.
 

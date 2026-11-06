@@ -47,17 +47,20 @@ These settle what the architecture left open. Recorded before code so the choice
 
 ```
 crates/
-  providers/        wire formats (OpenAI chat, OpenAI Responses, Anthropic Messages),
-                    SSE decoding, provider catalog, WorkBuddy sign-in + catalog
+  app/              Tauri v2 shell (binary `learning-harness`): one command per Harness method,
+                    async + spawn_blocking for IO
   harness/          sessions (op logs), config + credentials, prompt composer, agent runtime:
                     agent.rs (tutor loop, gates, commands), jobs.rs (researcher, planner,
                     delivery, titles), replay.rs (derived state, messages, compaction),
-                    tools.rs (schemas, plan checks), files.rs, web.rs, plugins.rs, events.rs
+                    tools.rs (schemas, plan checks), map.rs (Map page data), files.rs, web.rs,
+                    plugins.rs, events.rs
     prompts/        bundled by build.rs; <repo>/prompts/<path> overrides. See prompts/README.md
+  providers/        wire formats (OpenAI chat, OpenAI Responses, Anthropic Messages),
+                    SSE decoding, provider catalog, WorkBuddy sign-in + catalog
   research-search/  web search for the researcher (Brave → Wikipedia)
-src-tauri/          Tauri v2 shell: one command per Harness method, async + spawn_blocking for IO
-src/                UI: app.js, cards.js, timeline.js, reply.js, stream.js, markdown.js,
+ui/                 webview UI: app.js, cards.js, timeline.js, reply.js, stream.js, markdown.js,
                     map.js + map-layout.js (Map page), settings.js, api.js, styles.css, vendor/
+docs/               architecture.md (source of truth), this plan, ui-design.md, provider notes
 ```
 
 ## What is built

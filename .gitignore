@@ -1,2 +1,17 @@
-/target
-/.direnv
+# Rust
+/target/
+
+# Nix and direnv
+/.direnv/
+/result
+/result-*
+
+# Tauri: rewritten by tauri-build on every build
+/crates/app/gen/schemas/
+
+# Editors and OS
+/.idea/
+/.vscode/
+*.swp
+*~
+.DS_Store
