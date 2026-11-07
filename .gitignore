@@ -9,6 +9,13 @@
 # Tauri: rewritten by tauri-build on every build
 /crates/app/gen/schemas/
 
+# Tauri: generated mobile projects (`cargo tauri android init`, `cargo tauri ios init`)
+/crates/app/gen/android/
+/crates/app/gen/apple/
+
+# Scratch files
+*.tmp
+
 # Editors and OS
 /.idea/
 /.vscode/

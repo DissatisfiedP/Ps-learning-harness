@@ -1,14 +1,19 @@
-// Settings dialog: per-role model choices, provider connections, and the
-// theme override. Statuses are inline (role="status") next to the control
+// Settings dialog: per-role model choices, provider connections, focus
+// mode, and the theme override. Statuses are inline (role="status") next to the control
 // that caused them and persist until the next action in that group.
 
 import { call, message } from './api.js';
 import { escapeHtml } from './markdown.js';
+import { initPluginSettings } from './pluginui.js';
+import { dndSupport, focusPref, setFocusPref } from './focus.js';
 
 const dialog = document.getElementById('settings');
 const modelForm = document.getElementById('model-form');
 const providerList = document.getElementById('provider-list');
 const themeChoice = document.getElementById('theme-choice');
+const focusChoice = document.getElementById('focus-choice');
+const startingPointChoice = document.getElementById('starting-point');
+const startingPointStatus = document.getElementById('starting-point-status');
 
 const THEME_KEY = 'lh.theme';
 
@@ -18,7 +23,9 @@ let roles = []; // RoleInfo[]
 let usage = []; // RoleUsageEntry[]
 let models = new Map(); // provider id -> ModelInfo[]
 let login = null; // { state, authUrl } while WorkBuddy sign-in is pending
-let hooks = { changed: () => {} };
+let claudeLogin = null; // { state, authUrl } while Claude sign-in awaits a pasted code
+let hooks = { changed: () => {}, pluginsChanged: () => {} };
+let pluginSettings = null;
 
 // Inline statuses that survive re-renders: key -> { text, error }.
 const roleStatus = new Map();
@@ -26,8 +33,10 @@ const providerStatus = new Map();
 
 export function initSettings(h) {
   hooks = h;
+  pluginSettings = initPluginSettings({ onChanged: () => hooks.pluginsChanged?.() });
   dialog.addEventListener('close', () => {
     if (login) cancelLogin();
+    if (claudeLogin) cancelClaudeLogin();
   });
   dialog.addEventListener('click', (e) => {
     if (e.target === dialog) dialog.close();
@@ -37,6 +46,50 @@ export function initSettings(h) {
     r.checked = r.value === saved;
     r.addEventListener('change', () => r.checked && setTheme(r.value));
   }
+  for (const box of focusChoice.querySelectorAll('input[data-focus]')) {
+    box.checked = focusPref(box.dataset.focus);
+    box.addEventListener('change', () => setFocusPref(box.dataset.focus, box.checked));
+  }
+  startingPointChoice?.addEventListener('change', (e) => {
+    if (e.target.name === 'starting-point' && e.target.checked) saveStartingPoint(e.target.value);
+  });
+  renderDndRow();
+}
+
+// ---------- learning (ui-design §7.7.7) ----------
+
+/** The stored default, or Measure me when the settings say nothing. */
+const startingPoint = () => settings.startingPoint ?? 'measure';
+
+function renderStartingPoint() {
+  const value = startingPoint();
+  for (const input of startingPointChoice?.querySelectorAll('input') ?? []) input.checked = input.value === value;
+}
+
+async function saveStartingPoint(value) {
+  startingPointStatus.classList.remove('error');
+  startingPointStatus.textContent = 'Saving…';
+  try {
+    await call('set_starting_point', { value });
+    settings.startingPoint = value;
+    startingPointStatus.textContent = 'Saved.';
+  } catch (e) {
+    startingPointStatus.textContent = message(e);
+    startingPointStatus.classList.add('error');
+    // Put the stored choice back: the radio must never claim a saved default.
+    renderStartingPoint();
+  }
+}
+
+// ---------- focus (ui-design §7.8) ----------
+
+/** The DND row shows only when a notification backend was detected; its label names it. */
+async function renderDndRow() {
+  const backend = await dndSupport();
+  document.getElementById('focus-dnd-row').hidden = !backend;
+  document.getElementById('focus-dnd-label').textContent = backend
+    ? `Silence notifications in sessions (${backend})`
+    : 'Silence notifications in sessions';
 }
 
 // ---------- appearance ----------
@@ -71,6 +124,16 @@ export async function openSettings() {
     modelForm.innerHTML = `<p class="status error" role="status">Couldn’t load settings: ${escapeHtml(message(e))}</p>`;
   }
   if (!dialog.open) dialog.showModal();
+  renderDndRow();
+  try {
+    await pluginSettings?.render();
+  } catch (e) {
+    const el = document.getElementById('plugin-status');
+    if (el) {
+      el.textContent = `Couldn’t load plugins: ${message(e)}`;
+      el.classList.add('error');
+    }
+  }
 }
 
 /** Current providers + settings, for callers outside the dialog. */
@@ -89,6 +152,7 @@ async function reload() {
   }
   renderProviders();
   renderModelForm();
+  renderStartingPoint();
   hooks.changed({ providers, settings });
 }
 
@@ -120,7 +184,7 @@ function setStatus(map, key, node, text, error = false) {
 
 async function fetchModels(providerId, force = false) {
   if (!force && models.has(providerId)) return models.get(providerId);
-  const list = await call('list_models', { provider: providerId });
+  const list = await call('list_models', { provider: providerId, refresh: force });
   models.set(providerId, list);
   return list;
 }
@@ -156,12 +220,12 @@ function roleFieldset(info, required) {
   const el = document.createElement('fieldset');
   el.className = 'role';
   el.dataset.role = role;
-
-  const legendTail = required ? ' (required)' : '';
-  const fallback = unset && !required ? ' · uses the Tutor model' : '';
+  const legendTail = required ? ' <span class="role-tag">required</span>' : '';
+  const fallback = unset && !required ? ' <span class="role-tag">uses the Tutor model</span>' : '';
   el.innerHTML = `
-    <legend>${escapeHtml(info.label)}${legendTail} · ${escapeHtml(info.weight)} · ${escapeHtml(info.phrase)}${fallback}</legend>
-    <p class="help">${escapeHtml(info.guidance)}</p>
+    <legend>${escapeHtml(info.label)}${legendTail}${fallback}</legend>
+    <p class="role-sub">${escapeHtml(info.weight)} · ${escapeHtml(info.phrase)}</p>
+    <p class="role-help">${escapeHtml(info.guidance)}</p>
     <p class="meta" id="usage-${role}"></p>
     <div class="field">
       <label for="provider-${role}">Provider</label>
@@ -185,6 +249,7 @@ function roleFieldset(info, required) {
       <button class="btn ${required ? 'primary' : 'secondary'}" type="button" data-act="save">Use this model</button>
       <button class="btn text" type="button" data-act="clear" ${unset ? 'disabled' : ''}>Clear</button>
       <button class="btn text" type="button" data-act="test">Test</button>
+      <button class="btn text" type="button" data-act="reload">Reload models</button>
     </div>`;
   const status = statusEl(roleStatus, role);
   el.append(status);
@@ -209,18 +274,22 @@ function roleFieldset(info, required) {
     warn.innerHTML = warningLines(info, modelInfo);
   };
 
-  const fill = async (pid, preferred) => {
+  const fill = async (pid, preferred, force = false) => {
     let list = [];
+    let failed = false;
     try {
-      list = await fetchModels(pid);
+      list = await fetchModels(pid, force);
     } catch (e) {
+      failed = true;
       say(`Couldn’t load models: ${message(e)}`, true);
     }
+    if (!failed && !list.length) say('This provider listed no models; type an id instead.');
     el.querySelector(`#models-${role}`).innerHTML = list
       .map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}</option>`)
       .join('');
     modelInput.value = preferred ?? list[0]?.id ?? modelInput.value;
     describe();
+    return list;
   };
 
   providerSel.addEventListener('change', () => {
@@ -268,6 +337,12 @@ function roleFieldset(info, required) {
     }
   });
 
+  el.querySelector('[data-act="reload"]').addEventListener('click', async () => {
+    say('Reloading models…');
+    const list = await fill(providerSel.value, modelInput.value.trim() || null, true);
+    if (list.length) say(`Model list refreshed (${list.length}).`);
+  });
+
   renderUsage(el.querySelector(`#usage-${role}`), usageFor(role));
   if (options.length) fill(providerSel.value, choice?.model);
   return el;
@@ -283,7 +358,7 @@ function warningLines(info, modelInfo) {
   const caps = modelInfo?.capabilities;
   const unverified = (v) => v === undefined || v === null;
   if (!modelInfo) {
-    lines.push('Capabilities unverified (model not in catalog).');
+    lines.push('Not in catalog; capabilities unverified.');
   } else {
     if (unverified(caps?.toolCalls)) lines.push('Tool calling unverified.');
     else if (caps.toolCalls === false) lines.push('This model can’t call tools.');
@@ -295,9 +370,9 @@ function warningLines(info, modelInfo) {
   const ctx = modelInfo?.contextWindow;
   if (info.minContext) {
     if (ctx === undefined || ctx === null) {
-      lines.push(`Context window of ${Math.round(info.minContext / 1000)}K or more recommended; unverified.`);
+      lines.push(`${Math.round(info.minContext / 1000)}K+ context advised; unverified.`);
     } else if (ctx < info.minContext) {
-      lines.push(`Context ${Math.round(ctx / 1000)}K is below the recommended ${Math.round(info.minContext / 1000)}K.`);
+      lines.push(`Context ${Math.round(ctx / 1000)}K; ${Math.round(info.minContext / 1000)}K+ advised.`);
     }
   }
   return lines.map((l) => `<p class="meta">Note: ${escapeHtml(l)}</p>`).join('');
@@ -322,17 +397,19 @@ function statusText(p) {
   if (!p.source) return 'Not connected';
   if (p.source === 'env') return `From ${p.envVar}`;
   if (p.account) return `Signed in as ${p.account}`;
-  return p.credential === 'workbuddy-account' ? 'Connected' : 'Key saved';
+  return p.credential === 'workbuddy-account' || p.credential === 'claude-subscription'
+    ? 'Connected'
+    : 'Key saved';
 }
 
-// Provider ids whose body is expanded. WorkBuddy starts open.
-const expanded = new Set(['workbuddy']);
+// Provider ids whose body is expanded. Subscription providers start open.
+const expanded = new Set(['workbuddy', 'claude-code']);
 
 function renderProviders() {
   const focusedId = document.activeElement?.closest?.('.provider')?.dataset.id;
   providerList.textContent = '';
-  // WorkBuddy first, then connected providers, then the rest.
-  const rank = (p) => (p.id === 'workbuddy' ? 0 : p.source ? 1 : 2);
+  // Subscription providers first, then connected providers, then the rest.
+  const rank = (p) => (p.id === 'workbuddy' || p.id === 'claude-code' ? 0 : p.source ? 1 : 2);
   const ordered = [...providers].sort((a, b) => rank(a) - rank(b));
   for (const p of ordered) providerList.append(providerRow(p));
   // Keep keyboard users on the row they were working in.
@@ -341,7 +418,7 @@ function renderProviders() {
 
 function providerRow(p) {
   const el = document.createElement('div');
-  const open = expanded.has(p.id) || (login && p.id === 'workbuddy');
+  const open = expanded.has(p.id) || (login && p.id === 'workbuddy') || (claudeLogin && p.id === 'claude-code');
   el.className = 'provider';
   el.dataset.id = p.id;
   const bodyId = `provider-body-${p.id}`;
@@ -362,6 +439,7 @@ function providerRow(p) {
   if (open) {
     const body = el.querySelector('.provider-body');
     if (p.id === 'workbuddy') workbuddyBody(p, body, say);
+    else if (p.id === 'claude-code') claudeBody(p, body, say);
     else keyBody(p, body, say);
   }
   el.append(status);
@@ -437,7 +515,7 @@ function keyBody(p, body, say) {
     if (p.credential === 'chatgpt-token') {
       const hint = document.createElement('p');
       hint.className = 'help';
-      hint.textContent = 'The access token the Codex CLI keeps in ~/.codex/auth.json.';
+      hint.textContent = 'From ~/.codex/auth.json.';
       body.append(hint);
     }
     const link = keyLink(p, say);
@@ -465,6 +543,8 @@ function baseUrlDetails(p, say) {
     say('Saving…');
     try {
       await call('set_base_url', { provider: p.id, url: input.value.trim() || null });
+      // A different server serves a different list.
+      models.delete(p.id);
       say('Base URL saved.');
       await reload();
     } catch (e) {
@@ -481,9 +561,9 @@ function workbuddyBody(p, body, say) {
   }
   if (login) {
     body.innerHTML = `
-      <p>Waiting for sign-in in your browser…</p>
+      <p>Waiting for browser sign-in…</p>
       <div class="actions">
-        <button class="btn secondary" type="button" data-act="reopen">Open sign-in page again ↗</button>
+        <button class="btn secondary" type="button" data-act="reopen">Reopen sign-in ↗</button>
         <button class="btn text" type="button" data-act="cancel">Cancel</button>
       </div>`;
     body.querySelector('[data-act="reopen"]').addEventListener('click', () => call('open_external', { url: login.authUrl }).catch((e) => say(message(e), true)));
@@ -497,7 +577,7 @@ function workbuddyBody(p, body, say) {
   signIn.addEventListener('click', () => startLogin(signIn, say));
   const hint = document.createElement('p');
   hint.className = 'help';
-  hint.textContent = 'Opens workbuddy.ai in your browser; approve there and come back. Uses your WorkBuddy credits.';
+  hint.textContent = 'Uses WorkBuddy credits.';
   const alt = document.createElement('details');
   alt.innerHTML = '<summary>Use an API key instead</summary>';
   alt.append(keyRow(p, 'WorkBuddy API key', say));
@@ -529,5 +609,80 @@ async function startLogin(button, say) {
 function cancelLogin() {
   login = null;
   call('workbuddy_login_cancel').catch(() => {});
+  renderProviders();
+}
+
+// ---------- Claude subscription sign-in (Claude Code OAuth) ----------
+
+function claudeBody(p, body, say) {
+  if (p.source === 'saved') {
+    body.append(removeButton(p, p.account ? 'Sign out' : 'Disconnect', say));
+    return;
+  }
+  if (claudeLogin) {
+    body.innerHTML = `
+      <p class="help">Paste the code from the browser.</p>
+      <div class="field">
+        <label for="claude-code-input">Authorization code</label>
+        <div class="inline-field">
+          <input class="input" id="claude-code-input" type="text" autocomplete="off" spellcheck="false" placeholder="code#state" />
+          <button class="btn secondary" type="button" data-act="submit">Submit</button>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn text" type="button" data-act="reopen">Reopen sign-in ↗</button>
+        <button class="btn text" type="button" data-act="cancel">Cancel</button>
+      </div>`;
+    const input = body.querySelector('#claude-code-input');
+    const submit = () => submitClaudeCode(input.value, say);
+    body.querySelector('[data-act="submit"]').addEventListener('click', submit);
+    input.addEventListener('keydown', (e) => e.key === 'Enter' && submit());
+    body.querySelector('[data-act="reopen"]').addEventListener('click', () =>
+      call('open_external', { url: claudeLogin.authUrl }).catch((e) => say(message(e), true)));
+    body.querySelector('[data-act="cancel"]').addEventListener('click', cancelClaudeLogin);
+    input.focus({ preventScroll: true });
+    return;
+  }
+  const signIn = document.createElement('button');
+  signIn.type = 'button';
+  signIn.className = 'btn secondary';
+  signIn.textContent = 'Sign in with Claude';
+  signIn.addEventListener('click', () => startClaudeLogin(signIn, say));
+  const hint = document.createElement('p');
+  hint.className = 'help';
+  hint.textContent = 'Uses your Claude Pro/Max plan.';
+  body.append(signIn, hint);
+}
+
+async function startClaudeLogin(button, say) {
+  button.disabled = true;
+  say('');
+  try {
+    claudeLogin = await call('claude_login_start');
+    renderProviders();
+  } catch (e) {
+    button.disabled = false;
+    say(message(e), true);
+  }
+}
+
+async function submitClaudeCode(code, say) {
+  if (!code.trim()) return;
+  say('Signing in…');
+  try {
+    const account = await call('claude_login_submit', { code });
+    claudeLogin = null;
+    await autoPick('claude-code');
+    say(account ? `Signed in as ${account}.` : 'Signed in to Claude.');
+    models.delete('claude-code');
+    await reload();
+  } catch (e) {
+    say(message(e), true);
+  }
+}
+
+function cancelClaudeLogin() {
+  claudeLogin = null;
+  call('claude_login_cancel').catch(() => {});
   renderProviders();
 }

@@ -1,177 +1,20 @@
 //! M8 end-to-end proof: a scripted fake provider drives one whole teaching
 //! session through the real runtime (commands, phase machine, gates, jobs,
 //! delivery, planner, plugins) and the test asserts on the op log and the
-//! derived `SessionState` at each step.
-//!
-//! The fake provider is a local HTTP server speaking the OpenAI chat SSE wire
-//! (DeepSeek's endpoint shape). It picks the next canned response by which
-//! agent is calling, read from the first line of the system prompt.
+//! derived `SessionState` at each step. The fake provider lives in
+//! `common/mod.rs`.
 
-use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+mod common;
+
 use std::sync::{Arc, Mutex};
 
+use common::*;
 use harness::plugins::{Plugin, PluginContext, ToolFuture, ToolOutcome};
-use harness::providers::{ProviderId, ToolSpec};
+use harness::providers::ToolSpec;
 use harness::state::Phase;
-use harness::{AgentEvent, Harness, Mode, ModelChoice, ModelRole, Op, PluginManifest};
+use harness::{AgentEvent, Harness, Mode, Op, PluginManifest};
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
-
-// ---------------------------------------------------------------------------
-// Scripted fake provider
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-enum Reply {
-    Text(&'static str),
-    Calls(&'static str, Vec<(&'static str, &'static str, Value)>),
-}
-
-#[derive(Default)]
-struct Script {
-    queues: Mutex<HashMap<&'static str, VecDeque<Reply>>>,
-    /// (agent, request body) in arrival order.
-    requests: Mutex<Vec<(String, Value)>>,
-    unexpected: Mutex<Vec<String>>,
-}
-
-impl Script {
-    fn push(&self, agent: &'static str, reply: Reply) {
-        self.queues
-            .lock()
-            .unwrap()
-            .entry(agent)
-            .or_default()
-            .push_back(reply);
-    }
-
-    fn requests_of(&self, agent: &str) -> Vec<Value> {
-        self.requests
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(a, _)| a == agent)
-            .map(|(_, b)| b.clone())
-            .collect()
-    }
-}
-
-fn agent_of(body: &Value) -> &'static str {
-    let system = body["messages"][0]["content"].as_str().unwrap_or("");
-    match system.lines().next().unwrap_or("") {
-        "## Voice" => "tutor",
-        "## Accuracy" => "planner",
-        "# Researcher" => "researcher",
-        "Session title" => "title",
-        "# Compaction turn" => "compaction",
-        _ => "practice",
-    }
-}
-
-fn sse(reply: &Reply) -> String {
-    let mut out = String::new();
-    let chunk = |delta: Value, finish: &str| {
-        format!(
-            "data: {}\n\n",
-            json!({ "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }] })
-        )
-    };
-    let (text, calls) = match reply {
-        Reply::Text(t) => (*t, Vec::new()),
-        Reply::Calls(t, c) => (*t, c.clone()),
-    };
-    if !text.is_empty() {
-        out.push_str(&chunk(json!({ "content": text }), ""));
-    }
-    for (i, (id, name, args)) in calls.iter().enumerate() {
-        out.push_str(&chunk(
-            json!({ "tool_calls": [{ "index": i, "id": id, "type": "function",
-                "function": { "name": name, "arguments": args.to_string() } }] }),
-            "",
-        ));
-    }
-    let finish = if calls.is_empty() {
-        "stop"
-    } else {
-        "tool_calls"
-    };
-    out.push_str(&chunk(json!({}), finish));
-    out.push_str("data: [DONE]\n\n");
-    out
-}
-
-/// Serve scripted replies; researcher replies wait for a `release` permit so
-/// the test controls when the scope brief arrives.
-async fn serve(script: Arc<Script>, release: Arc<Semaphore>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut sock, _)) = listener.accept().await else {
-                return;
-            };
-            let script = Arc::clone(&script);
-            let release = Arc::clone(&release);
-            tokio::spawn(async move {
-                let mut req = Vec::new();
-                let mut buf = [0u8; 8192];
-                let body = loop {
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    req.extend_from_slice(&buf[..n]);
-                    let text = String::from_utf8_lossy(&req).into_owned();
-                    if let Some(split) = text.find("\r\n\r\n") {
-                        let len = text[..split]
-                            .lines()
-                            .find_map(|l| {
-                                l.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .and_then(|v| v.trim().parse::<usize>().ok())
-                            })
-                            .unwrap_or(0);
-                        if req.len() >= split + 4 + len {
-                            break req[split + 4..split + 4 + len].to_vec();
-                        }
-                    }
-                };
-                let body: Value = serde_json::from_slice(&body).unwrap();
-                let agent = agent_of(&body);
-                if agent == "researcher" {
-                    release.acquire().await.unwrap().forget();
-                }
-                script
-                    .requests
-                    .lock()
-                    .unwrap()
-                    .push((agent.to_owned(), body));
-                let next = script
-                    .queues
-                    .lock()
-                    .unwrap()
-                    .get_mut(agent)
-                    .and_then(VecDeque::pop_front);
-                let response = match next {
-                    Some(reply) => format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{}",
-                        sse(&reply)
-                    ),
-                    None => {
-                        script.unexpected.lock().unwrap().push(agent.to_owned());
-                        "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}".to_owned()
-                    }
-                };
-                let _ = sock.write_all(response.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            });
-        }
-    });
-    base
-}
 
 // ---------------------------------------------------------------------------
 // Test-only plugins
@@ -184,18 +27,33 @@ struct EchoPlugin {
 
 impl EchoPlugin {
     fn plugin(id: &str) -> Arc<dyn Plugin> {
+        let tool = format!("{id}_echo");
         Arc::new(Self {
             manifest: PluginManifest {
                 id: id.into(),
+                version: "0.1.0".into(),
+                api: 1,
                 title: format!("Echo ({id})"),
-                tools: vec![id.into()],
+                description: "A test plugin.".into(),
+                license: "MIT".into(),
+                tools: vec![harness::plugins::manifest::ToolDecl {
+                    name: tool.clone(),
+                    description: "Echo the text back.".into(),
+                    agents: vec!["tutor".into()],
+                    input: "schemas/echo.json".into(),
+                    entry: "echo".into(),
+                    artifact: false,
+                }],
                 platforms: vec!["desktop".into(), "mobile".into()],
-                phases: vec!["teach".into()],
+                permissions: vec![],
                 use_when: "A test needs a plugin.".into(),
                 avoid_when: "Real lessons.".into(),
                 cost: "none".into(),
+                renderer: vec![],
+                view: vec![],
+                prompts: Default::default(),
             },
-            tool: id.into(),
+            tool,
         })
     }
 }
@@ -213,11 +71,11 @@ impl Plugin for EchoPlugin {
         }]
     }
 
-    fn fragment(&self) -> String {
+    fn fragment(&self, _agent: &str) -> String {
         format!("Plugin {}: call `{}` to echo.", self.manifest.id, self.tool)
     }
 
-    fn call(&self, _name: &str, args: &Value, _ctx: PluginContext) -> ToolFuture {
+    fn call(self: Arc<Self>, _name: &str, args: &Value, _ctx: PluginContext) -> ToolFuture {
         let text = args
             .get("text")
             .and_then(Value::as_str)
@@ -227,79 +85,10 @@ impl Plugin for EchoPlugin {
             ToolOutcome {
                 content: format!("echo: {text}"),
                 is_error: false,
+                artifact: None,
             }
         })
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn temp_dirs(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!("lh-e2e-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    (root.join("repo"), root.join("config"))
-}
-
-/// A harness whose only configured role is Tutor (role fallback), pointed at
-/// the fake provider.
-async fn harness(repo: &Path, config: &Path, base: &str) -> Arc<Harness> {
-    let h = Arc::new(Harness::open(repo, config).unwrap());
-    h.set_base_url(ProviderId::Deepseek, Some(base)).unwrap();
-    h.save_api_key(ProviderId::Deepseek, "sk-test-secret-key-0123456789")
-        .unwrap();
-    h.set_role_model(
-        ModelRole::Tutor,
-        Some(ModelChoice {
-            provider: ProviderId::Deepseek,
-            model: "fake-tutor".into(),
-            effort: None,
-        }),
-    )
-    .await
-    .unwrap();
-    h
-}
-
-fn ops(h: &Harness, id: &str) -> Vec<Op> {
-    h.load_session(id).unwrap().ops
-}
-
-/// Tool ops (call or result) named `name`, as JSON.
-fn tool_ops(h: &Harness, id: &str, name: &str) -> Vec<Value> {
-    ops(h, id)
-        .iter()
-        .filter_map(|o| match o {
-            Op::Tool(t) if t.name == name => serde_json::to_value(t).ok(),
-            _ => None,
-        })
-        .collect()
-}
-
-fn results(h: &Harness, id: &str, name: &str) -> Vec<(String, bool)> {
-    tool_ops(h, id, name)
-        .into_iter()
-        .filter_map(|t| {
-            let r = t.get("result")?;
-            Some((r["content"].as_str()?.to_owned(), r["isError"].as_bool()?))
-        })
-        .collect()
-}
-
-fn tool_names(body: &Value) -> Vec<String> {
-    body["tools"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn answer(text: &str) -> Value {
-    json!({ "answer": text, "thinking": "because", "confidence": 70, "dontKnow": false })
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +103,7 @@ async fn scripted_session_runs_end_to_end() {
     let (repo, config) = temp_dirs("full");
     let h = harness(&repo, &config, &base).await;
     for id in ["echo", "echo2", "echo3", "echo4"] {
-        h.register_plugin(EchoPlugin::plugin(id)).unwrap();
+        h.register_native_plugin(EchoPlugin::plugin(id)).unwrap();
     }
     let events: Arc<Mutex<Vec<AgentEvent>>> = Arc::default();
     let sink_events = Arc::clone(&events);
@@ -339,7 +128,7 @@ async fn scripted_session_runs_end_to_end() {
         ),
     );
     s.push("tutor", Reply::Calls("Some questions will go past what you know.", vec![("q1", "question_ask", json!({
-        "role": "probe", "strand": "ohm", "format": "choice", "prompt": "Two equal resistors across 12 V: voltage on one?",
+        "role": "probe", "level": "use", "strand": "ohm", "format": "choice", "prompt": "Two equal resistors across 12 V: voltage on one?",
         "options": ["3 V", "6 V", "12 V"], "answer": "6 V", "explanation": "Equal split." }))]));
     s.push("title", Reply::Text("\"Voltage dividers.\""));
 
@@ -364,7 +153,7 @@ async fn scripted_session_runs_end_to_end() {
                 "q2",
                 "question_ask",
                 json!({
-        "role": "probe", "strand": "divider", "format": "free",
+        "role": "probe", "level": "use", "strand": "divider", "format": "free",
         "prompt": "What sets the ratio of the two voltages?", "answer": "The resistance ratio" }),
             )],
         ),
@@ -455,7 +244,7 @@ async fn scripted_session_runs_end_to_end() {
     // 6. Approve → teach section 1; 7. predict (after one out-of-section
     // question refused), then section_done refused, check, verdict_record.
     s.push("tutor", Reply::Calls("", vec![("x1", "question_ask", json!({
-        "role": "check", "nodeId": "divider-rule", "format": "free", "prompt": "?", "answer": "a" }))]));
+        "role": "check", "level": "use", "nodeId": "divider-rule", "format": "free", "prompt": "?", "answer": "a" }))]));
     s.push(
         "tutor",
         Reply::Calls(
@@ -500,7 +289,7 @@ async fn scripted_session_runs_end_to_end() {
                 "q4",
                 "question_ask",
                 json!({
-        "role": "check", "nodeId": "series-current", "format": "free",
+        "role": "check", "level": "use", "nodeId": "series-current", "format": "free",
         "prompt": "Current into R1 is 2 mA. Current out of R2?", "answer": "2 mA" }),
             )],
         ),
@@ -529,7 +318,7 @@ async fn scripted_session_runs_end_to_end() {
     );
     s.push(
         "tutor",
-        Reply::Calls("", vec![("e1", "echo", json!({"text": "hi"}))]),
+        Reply::Calls("", vec![("e1", "echo_echo", json!({"text": "hi"}))]),
     );
     s.push(
         "tutor",
@@ -586,10 +375,15 @@ async fn scripted_session_runs_end_to_end() {
             )],
         ),
     );
-    // The plan_keep notice wakes the tutor: 10. session_end.
+    // The plan_keep notice wakes the tutor: 10. session_end. Closing also
+    // starts the graph builder, whose (empty here) submission ends its run.
     s.push(
         "tutor",
         Reply::Calls("Done for today.", vec![("end", "session_end", json!({}))]),
+    );
+    s.push(
+        "graph",
+        Reply::Calls("", vec![("g1", "graph_submit", json!({}))]),
     );
     h.answer(&id, "q4", answer("2 mA")).await.unwrap();
     h.wait_background(&id).await;
@@ -598,7 +392,10 @@ async fn scripted_session_runs_end_to_end() {
         results(&h, &id, "verdict_record"),
         [("Verdict recorded.".to_owned(), false)]
     );
-    assert_eq!(results(&h, &id, "echo"), [("echo: hi".to_owned(), false)]);
+    assert_eq!(
+        results(&h, &id, "echo_echo"),
+        [("echo: hi".to_owned(), false)]
+    );
     let grants = results(&h, &id, "plugin_request");
     assert!(grants.iter().all(|(_, e)| *e), "{grants:?}");
     assert!(grants[0].0.contains("limit"));
@@ -629,12 +426,12 @@ async fn scripted_session_runs_end_to_end() {
         .all(|b| !tool_names(b).contains(&"plan_write".to_owned())));
     let with_echo = tutor
         .iter()
-        .filter(|b| tool_names(b).contains(&"echo".to_owned()))
+        .filter(|b| tool_names(b).contains(&"echo_echo".to_owned()))
         .count();
     assert!(with_echo >= 3, "echo offered in section s1");
     let last = tutor.last().unwrap();
     assert!(
-        !tool_names(last).contains(&"echo".to_owned()),
+        !tool_names(last).contains(&"echo_echo".to_owned()),
         "echo gone in s2"
     );
     assert!(tool_names(&tutor[0]).contains(&"goal_set".to_owned()));
@@ -715,6 +512,197 @@ async fn a_pending_question_survives_restart_and_resumes() {
 }
 
 // ---------------------------------------------------------------------------
+// A researcher that answers in prose, not through the tool
+// ---------------------------------------------------------------------------
+
+/// A field map written out as prose: what a researcher that answers well but
+/// never calls `brief_submit` leaves behind.
+const PROSE_BRIEF: &str = "Voltage dividers rest on one current through series parts, so each \
+share of the source voltage follows its own resistance. The rule is Vout = Vin * R2 / (R1 + R2), \
+and it only holds while nothing draws current from the tap. The usual misconception is that a \
+divider splits current; it splits voltage, and the current is the same through both parts. \
+Foundations: Ohm's law, one-path series current, and the definition of a ratio. Textbook courses \
+teach ratios before the divider rule, and a few start with the potentiometer instead.";
+
+/// Drives a session to `goal_set` and leaves the scope job waiting for a
+/// researcher call. Returns the session id.
+async fn session_with_scope_job(h: &Arc<Harness>, s: &Script) -> String {
+    s.push(
+        "tutor",
+        Reply::Calls(
+            "",
+            vec![(
+                "g1",
+                "goal_set",
+                json!({ "goal": "Voltage dividers", "purpose": "curiosity",
+                    "successLooksLike": ["solve a divider"], "materials": [], "outOfScope": [],
+                    "preferences": [], "orientationFirst": false }),
+            )],
+        ),
+    );
+    s.push("tutor", Reply::Text("Let's begin."));
+    s.push("title", Reply::Text("Voltage dividers"));
+    let id = h
+        .start_teaching("I want to learn voltage dividers")
+        .await
+        .unwrap()
+        .id;
+    let st = h.session_state(&id).unwrap();
+    assert_eq!(st.phase, Phase::Measure);
+    assert_eq!(st.open_jobs.len(), 1, "the scope job is running");
+    assert!(st.brief.is_none());
+    id
+}
+
+/// The (state, error, result) of the last finished scope research job.
+fn research_job(h: &Harness, id: &str) -> (String, Option<String>, Option<Value>) {
+    let mut found = None;
+    for op in ops(h, id) {
+        if let Op::Job(j) = op {
+            if j.kind == "research" && j.state != "running" {
+                found = Some((j.state.clone(), j.error.clone(), j.result.clone()));
+            }
+        }
+    }
+    found.expect("the research job ended")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_researcher_that_answers_in_prose_still_ends_with_a_brief() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("prose-brief");
+    let h = harness(&repo, &config, &base).await;
+    let id = session_with_scope_job(&h, &script).await;
+
+    let s = &*script;
+    // Three prose replies: the two nudges are ignored, then the answer is
+    // kept instead of the run looping to its step cap.
+    for _ in 0..3 {
+        s.push("researcher", Reply::Text(PROSE_BRIEF));
+    }
+    // The brief that now exists wakes the tutor, and the probe gate opens.
+    s.push(
+        "tutor",
+        Reply::Calls(
+            "",
+            vec![(
+                "p1",
+                "probe_done",
+                json!({ "strands": [{ "name": "series current" }], "notes": "fluent" }),
+            )],
+        ),
+    );
+    s.push("tutor", Reply::Text("The plan is being built."));
+    s.push(
+        "planner",
+        Reply::Calls("", vec![("w1", "plan_write", plan_args(&[]))]),
+    );
+    release.add_permits(3);
+    h.wait_background(&id).await;
+
+    let (state, error, result) = research_job(&h, &id);
+    assert_eq!(state, "done", "{error:?}");
+    let brief = result.expect("a brief, not an error");
+    assert_eq!(brief["kind"], "scope");
+    assert_eq!(brief["summary"], PROSE_BRIEF.trim());
+    assert!(
+        brief["uncertain"][0]
+            .as_str()
+            .unwrap()
+            .contains("answered in prose"),
+        "the salvaged brief admits what is missing: {brief}"
+    );
+    let st = h.session_state(&id).unwrap();
+    assert_eq!(
+        st.brief.as_ref(),
+        Some(&brief),
+        "the brief op is the job's result"
+    );
+    assert!(
+        !results(&h, &id, "probe_done")[0].1,
+        "probe_done is accepted: {:?}",
+        results(&h, &id, "probe_done")
+    );
+    assert_eq!(st.phase, Phase::AwaitApproval);
+
+    // Two nudges, then salvage: the run is not left to spend its 16 steps.
+    let researcher = script.requests_of("researcher");
+    assert_eq!(researcher.len(), 3, "no more calls after the second nudge");
+    let said = |i: usize| {
+        researcher[i]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        said(1).contains(
+            "Finish with exactly one brief_submit (kind \"scope\"); required: summary, strands."
+        ),
+        "the first nudge: {}",
+        said(1)
+    );
+    assert!(
+        said(2).contains(
+            "Reply with the brief_submit tool call and nothing else: \
+             brief_submit { kind: \"scope\", summary, strands }"
+        ),
+        "the second nudge carries the shape, and nothing else: {}",
+        said(2)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_researcher_with_nothing_to_salvage_fails_with_a_readable_reason() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("prose-nothing");
+    let h = harness(&repo, &config, &base).await;
+    let id = session_with_scope_job(&h, &script).await;
+
+    let s = &*script;
+    for reply in [
+        "I'll search for that.",
+        "",
+        "Let me look at a few sources first.",
+    ] {
+        s.push("researcher", Reply::Text(reply));
+    }
+    // The failure is delivered to the tutor like any result.
+    s.push("tutor", Reply::Text("I'll look into that myself."));
+    release.add_permits(3);
+    h.wait_background(&id).await;
+
+    let (state, error, ..) = research_job(&h, &id);
+    assert_eq!(state, "failed");
+    let error = error.expect("a readable reason");
+    assert!(error.contains("without brief_submit"), "{error}");
+    assert!(
+        error.contains("summary, strands"),
+        "it names the fields: {error}"
+    );
+    assert!(
+        error.contains("last reply was \"Let me look at a few sources first.\""),
+        "it shows what the last reply looked like: {error}"
+    );
+    assert!(h.session_state(&id).unwrap().brief.is_none());
+    assert!(
+        ops(&h, &id).iter().any(|o| matches!(
+            o,
+            Op::Message(m)
+                if m.tag.as_deref() == Some("research-brief")
+                    && m.content.contains("the research failed")
+        )),
+        "the tutor is told the research failed, in the tagged message"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Legacy sessions and Practice
 // ---------------------------------------------------------------------------
 
@@ -763,6 +751,15 @@ async fn legacy_learn_sessions_are_read_only_and_practice_still_works() {
         .await
         .unwrap();
     assert_eq!(reply.content, "Here is a problem.");
+    // Its prompt is rendered: no template syntax and no tool it doesn't have.
+    let system = script.requests_of("practice")[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        !system.contains("{{") && !system.contains("workspace_write"),
+        "{system}"
+    );
     let practice = h
         .list_sessions()
         .unwrap()
@@ -772,6 +769,49 @@ async fn legacy_learn_sessions_are_read_only_and_practice_still_works() {
     assert!(!practice.read_only);
     // Learn turns never go through the Practice path.
     assert!(h.send(None, Mode::Learn, "x", &mut |_| {}).await.is_err());
+}
+
+/// A merged or hand-edited file whose `phase` op is not the second line is
+/// read-only everywhere: in `list`, in `load`, and on the write path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_phase_op_that_is_not_second_is_read_only_on_the_write_path_too() {
+    let script = Arc::new(Script::default());
+    let base = serve(Arc::clone(&script), Arc::new(Semaphore::new(0))).await;
+    let (repo, config) = temp_dirs("merged");
+    let h = harness(&repo, &config, &base).await;
+
+    let id = ulid_like();
+    let dir = repo.join("sessions").join(chrono_year(&id));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{id}.jsonl"));
+    let body = format!(
+        "{}\n{}\n{}\n",
+        json!({"op":"session","opId":"01J00000000000000000000000","at":"2026-01-01T00:00:00.000Z","id":id,"mode":"learn","title":"merged"}),
+        json!({"op":"message","opId":"01J00000000000000000000001","at":"2026-01-01T00:00:01.000Z","role":"user","content":"hi"}),
+        json!({"op":"phase","opId":"01J00000000000000000000002","at":"2026-01-01T00:00:02.000Z","phase":"measure"}),
+    );
+    std::fs::write(&path, &body).unwrap();
+
+    let session = h.load_session(&id).unwrap();
+    assert!(session.summary.read_only);
+    assert!(h
+        .list_sessions()
+        .unwrap()
+        .iter()
+        .any(|s| s.id == id && s.read_only));
+    // The write path applies the same rule `list` shows, not "a phase op
+    // exists somewhere".
+    let err = h
+        .send_learner_message(&id, "again")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("read-only"), "{err}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        body.as_bytes(),
+        "nothing appended"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -813,6 +853,58 @@ async fn a_long_conversation_is_compacted_before_the_next_turn() {
     let last = script.requests_of("tutor").pop().unwrap().to_string();
     assert!(!last.contains("OLDMARK"));
     assert!(last.contains("RECENTMARK") && last.contains("pasted notes"));
+}
+
+/// A course goal keeps explore off without asking, fills the depth default,
+/// and takes the learner's saved starting point (§2, §3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_course_goal_normalises_explore_depth_and_starting_point() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("goal-levels");
+    let h = harness(&repo, &config, &base).await;
+    h.set_starting_point("new").unwrap();
+
+    let s = &*script;
+    s.push(
+        "tutor",
+        Reply::Calls(
+            "",
+            vec![(
+                "g1",
+                "goal_set",
+                json!({
+                    "goal": "Pass the circuits course", "purpose": "course", "explore": "on",
+                    "successLooksLike": ["answer divider questions"], "materials": [],
+                    "outOfScope": [], "preferences": [], "orientationFirst": false }),
+            )],
+        ),
+    );
+    s.push("tutor", Reply::Text("Recorded."));
+    s.push("title", Reply::Text("Circuits course"));
+    let id = h
+        .start_teaching("I'm taking a circuits course")
+        .await
+        .unwrap()
+        .id;
+
+    let st = h.session_state(&id).unwrap();
+    let goal = st.goal.clone().unwrap();
+    assert_eq!(goal["explore"], "off", "a course goal never explores");
+    assert_eq!(goal["depth"], "solid", "the depth default is filled in");
+    assert_eq!(goal["startingPoint"], "new", "the saved default is used");
+    assert_eq!(st.starting_point(), "new");
+    let result = results(&h, &id, "goal_set");
+    assert!(
+        result[0].0.contains("explore stays off"),
+        "the result says explore was forced off: {result:?}"
+    );
+
+    // A value outside the enums is refused, not stored.
+    let bad = h.set_starting_point("sometimes").unwrap_err().to_string();
+    assert!(bad.contains("measure, quick or new"), "{bad}");
+    assert_eq!(h.settings().starting_point, "new");
 }
 
 /// A valid ULID string for a hand-written legacy file.

@@ -1,5 +1,5 @@
 {
-  description = "Learning Harness — Tauri v2 app (Rust core, plain web UI) backed by plain files";
+  description = "P's Learning Harness — Tauri v2 app (Rust core, plain web UI) backed by plain files";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -67,12 +67,34 @@
             libsoup_3
             librsvg
             glib-networking
+            # GSettings schemas GTK reads at runtime (not linked, but a devShell input).
+            gsettings-desktop-schemas
           ];
+
+          # GTK's file chooser reads `org.gtk.Settings.FileChooser` from the compiled
+          # schemas of gtk3; with no XDG desktop portal, GLib aborts the process when
+          # the schema is missing. The schema dirs are laid out NixOS-style under
+          # <pkg>/share/gsettings-schemas/<pkg.name>/glib-2.0/schemas, and GTK also
+          # reads the org.gnome.* neighbours shipped by gsettings-desktop-schemas.
+          schemaDirs = map (p: "${p}/share/gsettings-schemas/${p.name}") (
+            with pkgs;
+            [
+              gtk3
+              gsettings-desktop-schemas
+            ]
+          );
+          schemaHook = ''
+            # GSETTINGS_SCHEMA_DIR replaces GLib's default search: list every dir.
+            export GSETTINGS_SCHEMA_DIR="${pkgs.lib.concatStringsSep ":" (map (d: "${d}/glib-2.0/schemas") schemaDirs)}"
+            # Prepend the same dirs for child processes; keep the inherited value.
+            export XDG_DATA_DIRS="${pkgs.lib.concatStringsSep ":" schemaDirs}''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+          '';
 
           common = {
             buildInputs = libs;
             LANG = "C.UTF-8";
             LC_ALL = "C.UTF-8";
+            shellHook = schemaHook;
           };
 
           # Android SDK + NDK for `cargo tauri android`; no emulator image.
@@ -103,7 +125,7 @@
               ANDROID_NDK_ROOT = "${sdkRoot}/ndk-bundle";
               ANDROID_NDK_HOME = "${sdkRoot}/ndk-bundle";
               GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${sdkRoot}/build-tools/34.0.0/aapt2";
-              shellHook = ''
+              shellHook = schemaHook + ''
                 for d in "$ANDROID_HOME"/cmake/*/bin; do [ -d "$d" ] && export PATH="$d:$PATH"; done
               '';
             }

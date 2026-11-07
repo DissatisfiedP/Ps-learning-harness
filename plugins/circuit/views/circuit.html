@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Circuit</title>
+<style>
+  :root {
+    --paper: #fff; --ink: #1c1b19; --ink-2: #45423d; --rule: #e3dfd6; --accent: #2d5b4c;
+    --font-ui: system-ui, sans-serif;
+  }
+  html, body { margin: 0; padding: 0; background: var(--paper); color: var(--ink); font: 14px/1.4 var(--font-ui); }
+  #app { padding: 8px; }
+  .schematic { overflow-x: auto; }
+  .schematic svg { max-width: 100%; height: auto; color: var(--ink); }
+  .controls { display: grid; gap: 8px; margin-top: 12px; }
+  .control { display: grid; grid-template-columns: 7rem 1fr 4.5rem; gap: 8px; align-items: center; }
+  .control label { font-weight: 600; }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  output { text-align: right; font-variant-numeric: tabular-nums; }
+  table { border-collapse: collapse; margin-top: 12px; width: 100%; }
+  caption { text-align: left; font-weight: 600; padding-bottom: 4px; }
+  th, td { text-align: left; padding: 4px 8px; border-top: 1px solid var(--rule); font-variant-numeric: tabular-nums; }
+  .warnings { color: var(--ink-2); margin-top: 8px; }
+  .submit { margin-top: 12px; padding: 8px 14px; border: 0; border-radius: 4px; background: var(--accent); color: var(--paper); font: inherit; font-weight: 600; cursor: pointer; }
+  .submit:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="schematic" id="schematic" role="img" aria-label="Circuit schematic"></div>
+  <div class="controls" id="controls"></div>
+  <table id="probes" hidden>
+    <caption>Solved values</caption>
+    <thead><tr><th scope="col">Probe</th><th scope="col">Value</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <p class="warnings" id="warnings" role="status"></p>
+  <button class="submit" id="submit" type="button" hidden>Submit answer</button>
+</div>
+<script>
+(() => {
+  let artifact = null;
+  let spec = null;
+  let answerMode = false;
+  let lastResult = null;
+  const pending = new Map();
+  let nextId = 1;
+
+  const app = document.getElementById('app');
+  const schematic = document.getElementById('schematic');
+  const controls = document.getElementById('controls');
+  const probeTable = document.getElementById('probes');
+  const warnings = document.getElementById('warnings');
+  const submit = document.getElementById('submit');
+
+  const send = (message) => { message.protocol = 1; parent.postMessage(message, '*'); };
+  const request = (fn, args) => new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    send({ type: 'call', id, fn, args });
+  });
+  // The host allows one call in flight per frame, so calls queue here.
+  // `stale()` is checked when a call reaches the front: a superseded call
+  // resolves to SKIPPED without reaching the bridge.
+  const SKIPPED = Symbol('skipped');
+  let chain = Promise.resolve();
+  const call = (fn, args, stale = () => false) => {
+    const p = chain.then(() => (stale() ? SKIPPED : request(fn, args)));
+    chain = p.catch(() => {});
+    return p;
+  };
+  const resize = () => send({ type: 'resize', height: Math.ceil(document.body.scrollHeight) });
+
+  function real(v) {
+    if (typeof v === 'number') return v;
+    if (v && typeof v.re === 'number') return v.re;
+    return Number(v) || 0;
+  }
+  function complex(v) {
+    if (typeof v === 'number') return { re: v, im: 0 };
+    if (v && typeof v.re === 'number') return { re: v.re, im: v.im || 0 };
+    return { re: 0, im: 0 };
+  }
+  const UNITS = { R: 'Ω', C: 'F', L: 'H', V: 'V', I: 'A' };
+  const PREFIXES = [[1e9, 'G'], [1e6, 'M'], [1e3, 'k'], [1, ''], [1e-3, 'm'], [1e-6, 'µ'], [1e-9, 'n'], [1e-12, 'p']];
+  function eng(v, unit) {
+    const x = complex(v);
+    const mag = Math.hypot(x.re, x.im);
+    const sign = Math.abs(x.im) <= 1e-9 && x.re < 0 ? '−' : '';
+    let scale = 1;
+    let prefix = '';
+    if (mag > 0) {
+      [scale, prefix] = PREFIXES.find(([s]) => mag >= s) || PREFIXES[PREFIXES.length - 1];
+    }
+    const n = Math.round((mag / scale) * 1000) / 1000;
+    return sign + n + ' ' + prefix + unit;
+  }
+  function valueText(v) {
+    const x = complex(v);
+    if (Math.abs(x.im) > 1e-9) {
+      return eng(x, 'V') + ' ∠' + (Math.round(Math.atan2(x.im, x.re) * 180 / Math.PI)) + '°';
+    }
+    return eng(x, 'V');
+  }
+
+  function applyTheme(theme) {
+    if (!theme) return;
+    for (const [key, value] of Object.entries(theme)) {
+      document.documentElement.style.setProperty('--' + key, value);
+    }
+  }
+
+  function renderControls() {
+    controls.textContent = '';
+    for (const c of spec.components) {
+      if (!c.adjustable) continue;
+      const row = document.createElement('div');
+      row.className = 'control';
+      const unit = UNITS[c.type] || '';
+      const label = document.createElement('label');
+      label.textContent = (c.label || c.id) + (unit ? ' (' + unit + ')' : '');
+      const input = document.createElement('input');
+      input.type = 'range';
+      const min = c.adjustable.min;
+      const max = c.adjustable.max;
+      input.min = String(min);
+      input.max = String(max);
+      input.step = String(c.adjustable.step || (max - min) / 100);
+      input.value = String(c.value ?? min);
+      input.id = 'slider-' + c.id;
+      label.htmlFor = input.id;
+      const out = document.createElement('output');
+      out.htmlFor = input.id;
+      const show = () => {
+        const text = eng(Number(input.value), unit);
+        out.textContent = text;
+        input.setAttribute('aria-valuetext', text);
+      };
+      show();
+      input.addEventListener('input', () => {
+        c.value = Number(input.value);
+        show();
+        solve();
+      });
+      row.append(label, input, out);
+      controls.append(row);
+    }
+  }
+
+  function setSchematic(markup) {
+    schematic.innerHTML = markup || '';
+    const svg = schematic.querySelector('svg');
+    if (svg) svg.setAttribute('aria-hidden', 'true');
+  }
+
+  // Slider moves can outrun the bridge; only the newest solve runs and is shown.
+  let solveSeq = 0;
+  async function solve(report = true) {
+    if (!spec) return;
+    const mine = ++solveSeq;
+    const stale = () => mine !== solveSeq;
+    try {
+      const result = await call('solve', { components: spec.components, analysis: spec.analysis }, stale);
+      if (result === SKIPPED || stale()) return;
+      showResult(result, report);
+      const markup = await call('render', { components: spec.components, result }, stale);
+      if (!stale() && typeof markup === 'string') setSchematic(markup);
+    } catch (e) {
+      if (!stale()) warnings.textContent = 'The circuit could not be solved.';
+    }
+  }
+
+  // `report` is true only after the learner moved something: opening a
+  // session must not send a state line for every figure on screen.
+  function showResult(result, report) {
+    lastResult = result;
+    const rows = [];
+    for (const [name, value] of Object.entries(result.probes || {})) {
+      rows.push([name, valueText(value)]);
+    }
+    // Hidden probes are the learner's unknown: the solver never sends their value.
+    for (const c of spec.components) {
+      if (c.type === 'probe' && c.hidden) rows.push([c.label || c.id || 'probe', '?']);
+    }
+    rows.sort((a, b) => a[0].localeCompare(b[0]));
+    if (rows.length) {
+      probeTable.hidden = false;
+      const body = probeTable.querySelector('tbody');
+      body.textContent = '';
+      for (const [name, value] of rows) {
+        const tr = document.createElement('tr');
+        const th = document.createElement('th');
+        th.scope = 'row';
+        th.textContent = name;
+        const td = document.createElement('td');
+        td.textContent = value;
+        tr.append(th, td);
+        body.append(tr);
+      }
+    }
+    warnings.textContent = (result.warnings || []).join(' ');
+    if (report) {
+      const changed = spec.components
+        .filter((c) => c.adjustable)
+        .map((c) => (c.label || c.id) + ' = ' + eng(Number(c.value), UNITS[c.type] || ''));
+      const summary = changed.concat(rows.map(([name, value]) => name + ' = ' + value)).join(', ');
+      if (summary) send({ type: 'state', summary: summary.slice(0, 500) });
+    }
+    resize();
+  }
+
+  function onInit(message) {
+    artifact = message.artifact || {};
+    spec = {
+      components: JSON.parse(JSON.stringify(artifact.data?.components || [])),
+      analysis: artifact.data?.analysis || { dc: true },
+    };
+    answerMode = Boolean(message.answer);
+    applyTheme(message.theme);
+    schematic.setAttribute('aria-label', artifact.data?.title || 'Circuit schematic');
+    renderControls();
+    submit.hidden = !answerMode;
+    if (artifact.data?.result) {
+      showResult(artifact.data.result, false);
+      const mine = solveSeq;
+      call('render', { components: spec.components, result: artifact.data.result }, () => mine !== solveSeq)
+        .then((markup) => { if (mine === solveSeq && typeof markup === 'string') setSchematic(markup); }, () => {});
+    } else {
+      solve(false);
+    }
+    resize();
+  }
+
+  submit.addEventListener('click', () => {
+    send({
+      type: 'submit',
+      answer: { components: spec.components, analysis: spec.analysis },
+    });
+  });
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== parent) return;
+    const message = event.data;
+    if (!message || typeof message !== 'object' || message.protocol !== 1) return;
+    if (message.type === 'theme') return applyTheme(message.theme);
+    if (message.type === 'init') return onInit(message);
+    if (message.type === 'result') {
+      const waiter = pending.get(message.id);
+      if (!waiter) return;
+      pending.delete(message.id);
+      if (message.ok) waiter.resolve(message.value);
+      else waiter.reject(new Error(message.error || 'call failed'));
+    }
+  });
+
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(document.body);
+})();
+</script>
+</body>
+</html>

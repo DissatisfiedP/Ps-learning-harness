@@ -6,6 +6,8 @@
 
 mod anthropic;
 mod catalog;
+pub mod claude_oauth;
+pub mod models;
 mod openai_chat;
 mod openai_responses;
 mod sse;
@@ -17,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sse::{SseDecoder, SseEvent};
 
 pub use catalog::{Credential, CredentialKind, ProviderId, ProviderSpec};
+pub use models::{Catalog, CatalogModel};
 pub use reqwest::Client;
 
 // ---- Core types ---------------------------------------------------------
@@ -77,6 +80,12 @@ pub enum ContentBlock {
         content: String,
         is_error: bool,
     },
+    /// A user-supplied image, base64-encoded. Built when the request is
+    /// assembled from an attachment reference; bytes never enter the op log.
+    Image {
+        media_type: String,
+        data: String,
+    },
     /// Opaque provider block that must be replayed verbatim to the same wire.
     /// Dropped when the next request targets a different wire.
     Native {
@@ -127,6 +136,9 @@ pub struct Endpoint {
     pub wire: Wire,
     pub url: String,
     pub headers: HeaderMap,
+    /// Subscription (Claude Code) requests must prepend the "You are Claude
+    /// Code" identity to `system[0]`; API-key requests must not.
+    pub claude_code: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,7 +252,7 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    fn transport(e: reqwest::Error) -> Self {
+    pub(crate) fn transport(e: reqwest::Error) -> Self {
         Self::Transport(e.without_url().to_string())
     }
 }
@@ -277,7 +289,7 @@ pub async fn stream_chat(
             .await
         }
         Wire::AnthropicMessages => {
-            let body = anthropic::body(req);
+            let body = anthropic::body(req, endpoint.claude_code);
             drive(
                 client,
                 endpoint,
@@ -463,6 +475,60 @@ pub(crate) fn jwt_claims(token: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn image_blocks_serialize_on_every_wire() {
+        let messages = [Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::text("what is this?"),
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "QUJD".into(),
+                },
+            ],
+        }];
+        let req = ChatRequest {
+            model: "m",
+            system: "s",
+            messages: &messages,
+            max_tokens: 8,
+            effort: None,
+            tools: &[],
+            cache_key: None,
+        };
+
+        let chat = openai_chat::body(&req);
+        assert_eq!(
+            chat["messages"][1],
+            json!({ "role": "user", "content": [
+                { "type": "text", "text": "what is this?" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,QUJD" } }
+            ] })
+        );
+
+        let responses = openai_responses::body(&req);
+        assert_eq!(
+            responses["input"][0],
+            json!({ "type": "message", "role": "user", "content": [
+                { "type": "input_text", "text": "what is this?" },
+                { "type": "input_image", "image_url": "data:image/png;base64,QUJD" }
+            ] })
+        );
+
+        let anthropic = anthropic::body(&req, false);
+        assert_eq!(anthropic["system"].as_array().unwrap().len(), 1);
+        assert_eq!(anthropic["messages"][0]["content"][1]["type"], "image");
+        assert_eq!(
+            anthropic["messages"][0]["content"][1]["source"],
+            json!({ "type": "base64", "media_type": "image/png", "data": "QUJD" })
+        );
+        // Subscription requests prepend the Claude Code identity.
+        let oauth = anthropic::body(&req, true);
+        assert_eq!(oauth["system"][0]["text"], claude_oauth::CLAUDE_CODE_PREFIX);
+        assert_eq!(oauth["system"][1]["text"], "s");
+    }
 
     #[test]
     fn workbuddy_envelope_prefers_display_message() {

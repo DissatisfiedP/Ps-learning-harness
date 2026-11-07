@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "lang": {
+      "type": "string"
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "check": {
+      "type": "string",
+      "description": "expression evaluated against the learner's final REPL state, e.g. result == 42"
+    }
+  },
+  "required": [
+    "lang",
+    "prompt",
+    "check"
+  ],
+  "additionalProperties": false
+}

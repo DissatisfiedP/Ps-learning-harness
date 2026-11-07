@@ -14,7 +14,7 @@ use crate::{
     ToolSpec, Wire,
 };
 
-pub(crate) fn body(req: &ChatRequest) -> Value {
+pub(crate) fn body(req: &ChatRequest, claude_code: bool) -> Value {
     // Roles must alternate: merge consecutive same-role messages (e.g. tool
     // results followed by a delivered job message), keeping block order.
     let mut messages: Vec<Value> = Vec::with_capacity(req.messages.len());
@@ -30,11 +30,17 @@ pub(crate) fn body(req: &ChatRequest) -> Value {
             _ => messages.push(m),
         }
     }
-    let system = json!([{
+    // Subscription (Claude Code) requests must carry the CLI identity as
+    // system[0]. The agent's own system prompt follows as a second block.
+    let mut system: Vec<Value> = Vec::with_capacity(2);
+    if claude_code {
+        system.push(json!({ "type": "text", "text": crate::claude_oauth::CLAUDE_CODE_PREFIX }));
+    }
+    system.push(json!({
         "type": "text",
         "text": req.system,
         "cache_control": { "type": "ephemeral" },
-    }]);
+    }));
     let mut body = json!({
         "model": req.model,
         "max_tokens": req.max_tokens,
@@ -97,6 +103,10 @@ fn replay_message(m: &crate::Message) -> Value {
                 }
                 Some(b)
             }
+            ContentBlock::Image { media_type, data } => Some(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": media_type, "data": data },
+            })),
             ContentBlock::Native { wire, raw } if *wire == Wire::AnthropicMessages => {
                 Some(raw.clone())
             }

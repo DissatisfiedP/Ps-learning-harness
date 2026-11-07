@@ -1,4 +1,4 @@
-/* Learning Harness — "Carrel". See docs/ui-design.md for the rationale.
+/* P's Learning Harness — "Carrel". See docs/ui-design.md for the rationale.
    One column, a page set like a book, two quiet edges (running head, desk).
    Nothing loops or moves on its own; the only motion is a requested sheet. */
 
@@ -149,7 +149,15 @@ h1, h2, h3 { margin: 0; }
 }
 
 /* The shared inline axis: the measure is in `ch` of the reading face at
-   reading size, so every column sets that font; children reset to UI type. */
+   reading size, so every column sets that font; children reset to UI type.
+
+   Owner direction, 2026-11-07: the column was a fixed 56ch, which on a 1280 px
+   or 2560 px window is a narrow strip down the middle of a mostly empty page,
+   and reading the tutor's prose at that measured line on a wide screen was
+   hard work — the eye runs out of line and drops to the wrong one. The measure
+   now grows with the viewport, in this one rule, so the flow, Home, the head
+   and the desk all widen together. It stays a text column: never full bleed,
+   and the widest step is still narrower than the window it sits in. */
 .col {
   inline-size: min(calc(var(--measure) + 2 * var(--gutter)), 100%);
   margin-inline: auto;
@@ -158,6 +166,9 @@ h1, h2, h3 { margin: 0; }
   font-size: var(--fs-read);
   line-height: var(--lh-read);
 }
+@media (min-width: 1024px) { :root { --measure: 76ch; } }
+@media (min-width: 1280px) { :root { --measure: 92ch; } }
+@media (min-width: 1600px) { :root { --measure: 104ch; } }
 .head-inner > *, .desk-inner > *, .home-col > * {
   font: 400 var(--fs-ui)/1.45 var(--font-ui);
 }
@@ -250,15 +261,13 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   color: var(--ink);
   text-wrap: balance;
 }
-.modes { display: grid; gap: var(--s2); margin-block: var(--s5) var(--s4); }
+.modes { display: flex; flex-wrap: wrap; column-gap: var(--s5); margin-block: var(--s4) var(--s4); }
 .mode {
-  display: grid; grid-template-columns: auto 1fr; gap: var(--s3); align-items: start;
-  padding-block: var(--s1);
+  display: inline-flex; align-items: center; gap: var(--s2);
+  min-block-size: 24px;
   cursor: pointer;
 }
-.mode input { margin: 0.3em 0 0; }
-.mode-name { display: block; font-weight: 600; }
-.mode-desc { display: block; font-size: var(--fs-small); color: var(--ink-3); }
+.mode-name { font-weight: 600; }
 .setup-notice { margin-block-end: var(--s3); color: var(--ink-2); }
 .home .composer-slot { margin-block-start: var(--s2); }
 .unavailable { margin-block-start: var(--s9); color: var(--ink-2); }
@@ -463,6 +472,10 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 }
 .rows .row:last-child { border-block-end: var(--line); }
 .rows .row input[type="radio"] { flex: none; margin: 0; }
+/* Option text may carry math: the markdown wrapper must stay inline-ish. */
+.rows .row .row-text { min-inline-size: 0; }
+.rows .row .row-text > p { margin: 0; }
+.rows .row .row-text .katex-display { margin: 0; }
 .rows .row:has(input:checked) { background: var(--select); }
 .rows .row.other { cursor: default; flex-wrap: wrap; }
 .rows .row.other .input { flex: 1 1 12em; inline-size: auto; }
@@ -523,17 +536,25 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .turn-error-text { margin-block-start: var(--s1); color: var(--ink-2); overflow-wrap: anywhere; }
 .turn-error .actions { margin-block-start: var(--s3); }
 
-/* plan document (await approval) */
+/* plan document (await approval) — flowchart first (owner, 2026-11-07). The
+   card is the drawing: the long list of editable section blocks is gone, and
+   each box carries its own state and its "⋯". */
 .plan-slot > .plan-doc {
   margin-block-start: var(--s7);
   padding-block-start: var(--s7);
   border-block-start: var(--hair);
 }
+.plan-doc { position: relative; }
+/* The corner control: the same drawing, the whole screen (§7.2.9 overlay). */
+.plan-expand {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-end: 0;
+  padding-inline: var(--s2);
+  background: var(--paper);
+  font-size: var(--fs-small);
+}
 .plan-title { margin-block: var(--s1) var(--s3); font: 600 var(--fs-h1)/1.25 var(--font-read); color: var(--ink); text-wrap: balance; }
-.plan-sections { margin: var(--s5) 0 0; padding-inline-start: 1.6em; font: 600 var(--fs-read)/var(--lh-read) var(--font-read); }
-.plan-sections > li + li { margin-block-start: var(--s5); }
-.plan-sections > li::marker { color: var(--ink-3); }
-.plan-section-title { font: 600 var(--fs-read)/1.35 var(--font-read); color: var(--ink); }
 .plan-meta, .plan-line { margin-block-start: var(--s1); font: 400 var(--fs-small)/1.45 var(--font-ui); }
 .plan-meta { color: var(--ink-3); }
 .plan-line { color: var(--ink-2); }
@@ -543,6 +564,109 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .tool input { margin: 0; }
 @media (pointer: coarse) { .tool { min-block-size: 44px; } }
 .change-form { margin-block-start: var(--s4); }
+
+/* plan structure diagram (plan-diagram.js): the knowledge graph the plan is a
+   window on. Static — nothing flows along the arrows. */
+.plan-figure { margin: var(--s5) 0 0; }
+.plan-diagram-frame {
+  overflow: auto;
+  max-block-size: 52vh;
+  padding: var(--s3) var(--s1);
+  border-block: var(--hair);
+  background: var(--paper);
+}
+.plan-diagram { display: block; font-family: var(--font-ui); }
+/* Natural size, shrunk only when the column is narrower than the layout: the
+   text of a box never grows with the window (the layout is measured to fit in
+   cards.js, so it is normally 1:1). */
+.plan-figure-topics .plan-diagram { max-inline-size: 100%; block-size: auto; margin-inline: auto; }
+.plan-node { cursor: default; }
+.plan-node:focus { outline: none; }
+.plan-node rect { fill: var(--paper); stroke: var(--rule-strong); stroke-width: 1; }
+.plan-node text { fill: var(--ink-2); }
+.plan-node-meta { fill: var(--ink-3); font-size: 0.9em; }
+/* The section's state, in words under its title (§7.7.1): one short line, not
+   a paragraph. Colour is never the only signal — the words are always there. */
+.plan-node-badge { fill: var(--ink-3); }
+.plan-node.is-known rect { fill: var(--raised); }
+.plan-node.is-known text { fill: var(--ink-3); }
+.plan-node.is-known .plan-node-badge { fill: var(--ink-3); }
+/* The "⋯" inside the box: a quiet outlined corner control that darkens on
+   hover and focus, never a floating menu over the drawing. */
+.plan-node-action { cursor: pointer; }
+.plan-node-action-hit { fill: transparent; stroke: var(--rule-strong); stroke-width: 1; }
+.plan-node-action-mark { fill: var(--ink-3); font-size: 0.95em; pointer-events: none; }
+.plan-node-action:hover .plan-node-action-hit,
+.plan-node-action[aria-expanded="true"] .plan-node-action-hit { fill: var(--select); stroke: var(--accent); }
+.plan-node-action:hover .plan-node-action-mark,
+.plan-node-action[aria-expanded="true"] .plan-node-action-mark { fill: var(--ink); }
+.plan-node-action:focus { outline: none; }
+.plan-node-action:focus-visible .plan-node-action-hit { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 3 2; }
+.plan-node.is-done rect { fill: var(--select); stroke: var(--ink-3); }
+.plan-node.is-done text { fill: var(--ink); }
+.plan-node.is-current rect { stroke: var(--accent); stroke-width: 2; }
+.plan-node.is-current text { fill: var(--ink); font-weight: 600; }
+.plan-node.in-done-topic rect { fill: var(--raised); }
+/* The current topic's claims carry the same gold mark as the topic box, so the
+   overlay answers "where are we" before anything is read. */
+.plan-node.in-current-topic rect { stroke: #C08A2A; stroke-width: 1.8; }
+.plan-node.in-current-topic text { fill: var(--ink); }
+.plan-node.in-current-topic { filter: drop-shadow(0 0 7px rgba(224, 172, 70, 0.45)); }
+.plan-node:focus-visible rect { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 4 2; }
+.plan-edge { fill: none; stroke: var(--rule-strong); stroke-width: 1.1; opacity: 0.85; }
+.plan-edge.is-done { stroke: var(--ink-3); }
+.plan-arrow-head { fill: var(--rule-strong); }
+.plan-diagram-caption {
+  margin-block-start: var(--s2);
+  font: 400 var(--fs-meta)/1.4 var(--font-ui);
+  color: var(--ink-3);
+  max-inline-size: 64ch;
+}
+
+/* The section drawer (§7.7.1): the long description and the actions of one
+   box, pinned to the side of the window. It is not a modal — no scrim, no
+   focus trap, the plan stays readable beside it — and it is the same panel for
+   every box, refilled in place. */
+.plan-node-drawer {
+  position: fixed;
+  inset-block: 0;
+  inset-inline-end: 0;
+  inline-size: min(420px, 100vw);
+  overflow-y: auto;
+  padding: var(--s4) var(--s5) var(--s7);
+  background: var(--paper);
+  border-inline-start: var(--line);
+  box-shadow: 0 0 0 1px var(--rule);
+  z-index: 3;
+}
+.plan-node-drawer:focus { outline: none; }
+.plan-node-drawer-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4);
+  min-block-size: var(--head-h);
+  border-block-end: var(--hair);
+}
+.plan-node-drawer-title { font: 600 var(--fs-h3)/1.3 var(--font-read); color: var(--ink); text-wrap: balance; }
+.plan-node-drawer-title:focus { outline: none; }
+.plan-node-drawer-close { flex: none; }
+.plan-node-drawer-body { padding-block-start: var(--s3); }
+.plan-node-drawer-body .plan-meta { margin-block-start: 0; }
+.plan-node-drawer-body .prose { font-size: calc(var(--fs-read) * 0.9); }
+.plan-node-notes { margin-block-start: var(--s2); }
+.plan-node-drawer .plan-choice { margin-block-start: var(--s4); }
+.plan-node-drawer .row-label { display: block; }
+.plan-node-drawer .row-hint { display: block; font-size: var(--fs-meta); color: var(--ink-3); }
+.plan-node-drawer .field { margin-block-start: var(--s4); }
+@media (max-width: 599px) {
+  .plan-node-drawer {
+    inset-block: auto 0;
+    inset-inline: 0;
+    inline-size: 100%;
+    max-block-size: 76dvh;
+    border-inline-start: 0;
+    border-block-start: var(--line);
+    border-radius: var(--r) var(--r) 0 0;
+  }
+}
 
 /* desk */
 .desk { background: var(--paper); border-block-start: var(--hair); padding-block-end: env(safe-area-inset-bottom); }
@@ -572,13 +696,13 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   .desk .composer-row .btn { min-block-size: 40px; }
 }
 
-/* ---------- dialogs: plan sheet and Settings ---------- */
+/* ---------- dialogs: the plan overlay and Settings ---------- */
 dialog {
   padding: 0; border: 0;
   max-inline-size: none; max-block-size: none;
   color: var(--ink);
 }
-.sheet, .settings {
+.plan-overlay, .settings {
   opacity: 0;
   transition:
     opacity var(--dur-sheet-out) var(--ease-in),
@@ -586,13 +710,13 @@ dialog {
     overlay var(--dur-sheet-out) allow-discrete,
     display var(--dur-sheet-out) allow-discrete;
 }
-.sheet[open], .settings[open] {
+.plan-overlay[open], .settings[open] {
   opacity: 1;
   translate: 0 0;
   transition-duration: var(--dur-sheet-in);
   transition-timing-function: var(--ease-out);
 }
-.sheet::backdrop, .settings::backdrop {
+.plan-overlay::backdrop, .settings::backdrop {
   background: var(--scrim);
   opacity: 0;
   transition:
@@ -600,24 +724,96 @@ dialog {
     overlay var(--dur-sheet-out) allow-discrete,
     display var(--dur-sheet-out) allow-discrete;
 }
-.sheet[open]::backdrop, .settings[open]::backdrop { opacity: 1; transition-duration: var(--dur-sheet-in); }
+.plan-overlay[open]::backdrop, .settings[open]::backdrop { opacity: 1; transition-duration: var(--dur-sheet-in); }
 @starting-style {
-  .sheet[open] { opacity: 0; translate: var(--sheet-shift) 0; }
+  .plan-overlay[open] { opacity: 0; scale: 0.99; }
   .settings[open] { opacity: 0; translate: 0 var(--sheet-shift); }
-  .sheet[open]::backdrop, .settings[open]::backdrop { opacity: 0; }
+  .plan-overlay[open]::backdrop, .settings[open]::backdrop { opacity: 0; }
 }
 
-.sheet {
-  margin: 0 0 0 auto;
-  inline-size: min(420px, 92vw);
-  block-size: 100%;
-  background: var(--raised);
-  border-inline-start: var(--line);
-  overflow-y: auto;
+/* The plan is the page: full screen, the session blurred behind it (§7.2.9).
+   Structure: bar, stage (pan/zoom), hint, zoom controls, drawer. */
+.plan-overlay {
+  margin: 0;
+  inline-size: 100vw; block-size: 100vh; block-size: 100dvh;
+  background: color-mix(in srgb, var(--paper) 94%, transparent);
 }
-.sheet-inner { padding: var(--s4) var(--s5) var(--s7); }
-.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); min-block-size: var(--head-h); }
-.sheet-head h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
+.plan-overlay::backdrop {
+  background: color-mix(in srgb, var(--ink) 55%, transparent);
+  backdrop-filter: blur(14px) saturate(0.85);
+  -webkit-backdrop-filter: blur(14px) saturate(0.85);
+}
+.plan-overlay-inner {
+  position: relative;
+  block-size: 100%;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  padding: var(--s4) var(--s5);
+  gap: var(--s2);
+}
+.plan-bar {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4);
+  flex-wrap: wrap;
+  min-block-size: var(--head-h);
+}
+.plan-where { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; min-inline-size: 0; }
+.plan-overlay-title { font: 600 var(--fs-h2)/1.2 var(--font-read); }
+.plan-where-text { font: 400 var(--fs-small)/1.4 var(--font-ui); color: var(--ink-3); }
+.plan-bar-actions { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.plan-levels { display: inline-flex; gap: var(--s1); }
+.plan-level { border-radius: var(--r); padding-inline: var(--s3); }
+.plan-level[aria-pressed="true"] { background: var(--select); font-weight: 600; }
+
+.plan-stage {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r);
+  background:
+    radial-gradient(ellipse at 50% 30%, var(--raised), var(--paper) 70%);
+  cursor: grab;
+  touch-action: none;
+}
+.plan-stage[data-dragging] { cursor: grabbing; }
+.plan-stage:focus-visible { outline: var(--focus); outline-offset: 2px; }
+.plan-view { position: absolute; inset: 0; transform-origin: 0 0; }
+.plan-hint {
+  font: 400 var(--fs-meta)/1.3 var(--font-ui);
+  color: var(--ink-3);
+  text-align: center;
+}
+.plan-zoom {
+  position: absolute;
+  inset-block-end: calc(var(--s7) + var(--s4));
+  inset-inline-end: var(--s5);
+  display: inline-flex;
+  gap: var(--s1);
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+  border: var(--hair);
+  border-radius: var(--r);
+  padding: var(--s1);
+}
+.plan-zoom-btn { min-inline-size: 36px; min-block-size: 36px; justify-content: center; }
+.plan-drawer {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  inline-size: min(420px, 92vw);
+  overflow-y: auto;
+  padding: var(--s4) var(--s5) var(--s7);
+  background: var(--paper);
+  border-inline-start: var(--line);
+  box-shadow: var(--shadow-sheet, 0 0 0 1px var(--rule));
+}
+.plan-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); min-block-size: var(--head-h); }
+.plan-drawer-title { font: 600 var(--fs-h3)/1.3 var(--font-read); }
+
+/* The current section (or claim) carries the gold mark: warm, static, and the
+   only saturated colour on the surface, so "where we are" is the first thing
+   the eye finds (§2.1 — it does not move, so it cannot interrupt). */
+.plan-node.is-current rect { stroke: #C08A2A; stroke-width: 2; }
+.plan-node.is-current text { fill: var(--ink); font-weight: 600; }
+.plan-node.is-current { filter: drop-shadow(0 0 9px rgba(224, 172, 70, 0.55)); }
+
 .sheet-goal { margin-block-start: var(--s3); font: 400 var(--fs-read)/var(--lh-read) var(--font-read); }
 .sheet-sections { margin: var(--s5) 0 0; padding-inline-start: 1.4em; }
 .sheet-sections > li + li { margin-block-start: var(--s4); }
@@ -628,21 +824,20 @@ dialog {
 .sheet-nodes { margin: var(--s1) 0 0; padding-inline-start: 1.2em; font-size: var(--fs-small); color: var(--ink-2); }
 .sheet-nodes li.last { font-weight: 600; color: var(--ink); }
 .sheet-tools { margin-block-start: var(--s5); font-size: var(--fs-small); color: var(--ink-2); }
-.sheet .change { margin-block-start: var(--s5); }
-.sheet .input { background: var(--paper); }
+.plan-drawer .change { margin-block-start: var(--s5); }
+.plan-drawer .input { background: var(--paper); }
 @media (max-width: 599px) {
-  .sheet {
-    margin: auto 0 0;
+  .plan-overlay-inner { padding: var(--s3) var(--s3); }
+  .plan-drawer {
+    inset-block: auto 0;
+    inset-inline: 0;
     inline-size: 100%;
-    block-size: auto;
-    max-block-size: 85dvh;
+    max-block-size: 72dvh;
     border-inline-start: 0;
     border-block-start: var(--line);
     border-radius: var(--r) var(--r) 0 0;
   }
-  @starting-style {
-    .sheet[open] { translate: 0 var(--sheet-shift); }
-  }
+  .plan-zoom { inset-block-end: calc(var(--s8) + var(--s4)); inset-inline-end: var(--s3); }
 }
 
 .settings {
@@ -665,6 +860,23 @@ dialog {
 .meta { margin-block-start: var(--s1); font-size: var(--fs-meta); color: var(--ink-3); }
 .role { margin-block-start: var(--s6); }
 .role > legend { font: 600 var(--fs-ui)/1.45 var(--font-ui); color: var(--ink); }
+.role-tag {
+  font: 400 var(--fs-meta)/1 var(--font-ui);
+  color: var(--ink-3);
+  margin-inline-start: var(--s2);
+}
+.role-sub {
+  margin-block-start: var(--s1);
+  font-size: var(--fs-small);
+  color: var(--ink-2);
+}
+.role-help {
+  margin-block-start: var(--s1);
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
+  max-inline-size: 64ch;
+}
+.role > .field { margin-block-start: var(--s3); }
 .roles-optional { margin-block-start: var(--s6); }
 .roles-optional > summary, .provider details > summary, .provider-body details > summary {
   cursor: pointer; color: var(--ink-2); min-block-size: 24px;
@@ -685,52 +897,92 @@ dialog {
 .theme-choice label { display: inline-flex; align-items: center; gap: var(--s2); min-block-size: 24px; cursor: pointer; }
 @media (pointer: coarse) { .theme-choice label, .mode { min-block-size: 44px; } }
 
-/* ---------- Map (§7.6) ---------- */
-.map-page > * { font: 400 var(--fs-ui)/1.45 var(--font-ui); }
-.map-intro { font-size: var(--fs-small); color: var(--ink-2); }
-.map-agenda { margin-block-start: var(--s2); font-size: var(--fs-small); color: var(--ink-3); }
-.map-agenda .btn.text { font-size: var(--fs-small); }
-.map-status { color: var(--ink-3); }
-.map-status.danger { color: var(--danger); }
-/* Closed and off-screen plans skip layout and paint. */
-.map-group {
-  margin-block-start: var(--s6); padding-block-start: var(--s5);
-  border-block-start: var(--hair);
-  content-visibility: auto; contain-intrinsic-block-size: auto 320px;
+/* ---------- Map (§7.6): a dark stage the whole width of the window ---------- */
+.map-stage {
+  position: relative; overflow: hidden; min-block-size: 0;
+  background: #0a0f0d; color: #F0ECE4;
+  font: 400 var(--fs-ui)/1.45 var(--font-ui);
+  touch-action: none;
 }
-.map-goal { cursor: pointer; min-block-size: 24px; font: 600 var(--fs-read)/1.35 var(--font-read); color: var(--ink); }
-.map-meta { margin-block-start: var(--s1); font-size: var(--fs-small); color: var(--ink-3); }
-.map-all {
-  display: inline-flex; align-items: center; gap: var(--s2);
-  margin-block-start: var(--s3); min-block-size: 24px;
-  font-size: var(--fs-small); color: var(--ink-2); cursor: pointer;
+.map-canvas { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; display: block; cursor: grab; }
+.map-canvas:active { cursor: grabbing; }
+.map-hud {
+  position: absolute; inset-block-start: var(--s4); inset-inline-start: var(--s5);
+  max-inline-size: calc(100% - 120px); pointer-events: none;
 }
-/* A drawing wider than the column scrolls inside its own box; the padding
-   leaves room for focus rings. */
-.map-scroll { margin-block-start: var(--s4); padding: 4px; overflow-x: auto; }
-.map-graph { position: relative; margin-inline: auto; }
-.map-edges { position: absolute; inset: 0; overflow: visible; color: var(--rule-strong); }
-.map-edges > path { fill: none; stroke: currentColor; stroke-width: 1.25; }
-/* Fixed size (map-layout.js BOX): the layout never measures text. */
-.map-node {
-  position: absolute; inline-size: 144px; block-size: 56px;
-  display: flex; align-items: flex-start; gap: var(--s2);
-  padding: 8px 10px;
-  border: 1px dashed var(--rule-strong); border-radius: var(--r);
-  background: var(--paper);
-  font-size: var(--fs-small); line-height: 1.3; color: var(--ink-2);
-  cursor: pointer;
+.map-hud > * { pointer-events: auto; }
+.map-stats { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s3); margin: 0; font-size: var(--fs-small); color: rgba(240 236 228 / 0.72); }
+.map-stat { display: inline-flex; align-items: baseline; gap: 6px; }
+.map-num { font: 600 1.75rem/1 var(--font-read); color: #F0ECE4; font-variant-numeric: tabular-nums; }
+.map-stat-sep { color: rgba(240 236 228 / 0.35); }
+.map-stage .btn.text { color: #F0ECE4; font-size: var(--fs-small); }
+.map-stage .btn:focus-visible { outline-color: #A6D4C1; }
+.map-fit { position: absolute; inset-block-start: var(--s3); inset-inline-end: var(--s5); }
+/* Proposed links: the extractor's review list sits next to Fit, quiet until
+   there is something to decide. */
+.map-proposals {
+  position: absolute; inset-block-start: var(--s3); inset-inline-end: calc(var(--s5) + 56px);
+  color: rgba(240 236 228 / 0.85); background: rgba(16 24 21 / 0.7);
+  border: 1px solid rgba(140 196 174 / 0.35); border-radius: var(--r);
+  padding: var(--s1) var(--s3);
 }
-.map-node.is-checked, .map-node.is-missed { border-style: solid; color: var(--ink); }
-.map-node:has(input:checked) { padding: 7px 9px; border: 2px solid var(--accent); background: var(--select); }
-.map-node input { flex: none; margin: 0.15em 0 0; }
-.map-node-text {
-  flex: 1; min-inline-size: 0;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
-  overflow: hidden; overflow-wrap: anywhere;
+.map-proposals[hidden] { display: none; }
+dialog.proposals {
+  inline-size: min(720px, 92vw); max-block-size: 82dvh;
+  margin: auto; padding: var(--s4) var(--s5) var(--s6);
+  background: var(--paper); color: var(--ink); border: var(--line); border-radius: var(--r);
+  overflow-y: auto;
 }
-.map-glyph { flex: none; }
-.map-detail { margin-block-start: var(--s3); min-block-size: 1.45em; font-size: var(--fs-small); color: var(--ink-2); }
+dialog.proposals::backdrop { background: var(--scrim); }
+.proposals-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); }
+dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
+.proposals-intro { margin-block-start: var(--s3); font: 400 var(--fs-small)/1.5 var(--font-ui); color: var(--ink-2); max-inline-size: 64ch; }
+.proposals-list { margin: var(--s4) 0 0; padding: 0; list-style: none; }
+.proposal { padding-block: var(--s3); border-block-start: var(--hair); }
+.proposal:last-child { border-block-end: var(--hair); }
+.proposal.is-accepted { background: var(--select); }
+.proposal-edge { font: 600 var(--fs-ui)/1.35 var(--font-read); color: var(--ink); }
+.proposal-relation { font: 400 var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-3); }
+.proposal-why { margin-block-start: var(--s1); font: 400 var(--fs-small)/1.5 var(--font-ui); color: var(--ink-2); }
+.proposal-actions { margin-block-start: var(--s2); display: flex; gap: var(--s3); align-items: center; }
+.proposal-state { font: 400 var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-3); }
+.proposals-foot { margin-block-start: var(--s4); display: flex; gap: var(--s4); align-items: center; }
+.proposals-status { font: 400 var(--fs-small)/1.4 var(--font-ui); color: var(--ink-3); }
+.map-card {
+  position: absolute; inset-block-start: 0; inset-inline-start: 0; inline-size: 260px;
+  padding: var(--s3) var(--s4); pointer-events: auto;
+  background: rgba(16 24 21 / 0.92); border: 1px solid rgba(140 196 174 / 0.45); border-radius: var(--r);
+  font-size: var(--fs-small); color: rgba(240 236 228 / 0.8);
+}
+.map-card p { margin: 0; }
+.map-card-title { font: 600 1.05rem/1.3 var(--font-read); color: #F0ECE4; margin-block-end: 2px !important; }
+.map-card-meta { color: #8CC4AE; margin-block-end: var(--s1) !important; }
+.map-card .map-card-statement { margin-block: var(--s1); line-height: 1.45; max-block-size: 42vh; overflow-y: auto; }
+/* A contrast is a remark, not a link: quieter than "Depends on"/"Leads to". */
+.map-card .map-card-contrast { margin-block-start: var(--s1); font-style: italic; color: rgba(240 236 228 / 0.62); }
+.map-card .map-card-links { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s2); margin-block-start: var(--s2); }
+.map-card-link {
+  padding: 0; border: 0; background: none; font: inherit; font-weight: 600; cursor: help;
+  color: #A6D4C1; text-decoration: underline dotted; text-underline-offset: 2px;
+}
+.map-card-link:hover { color: #F0ECE4; }
+.map-card-link[data-empty] { color: rgba(240 236 228 / 0.45); cursor: default; text-decoration: none; }
+.map-card-link:focus-visible { outline: 2px solid #A6D4C1; outline-offset: 2px; }
+.map-card-sep { color: rgba(240 236 228 / 0.35); }
+.map-flyout {
+  position: absolute; inset-block-start: 0; inset-inline-start: 0; inline-size: 240px;
+  max-block-size: 60vh; overflow-y: auto; padding: var(--s3) var(--s4);
+  background: rgba(16 24 21 / 0.96); border: 1px solid rgba(166 212 193 / 0.45); border-radius: var(--r);
+  font-size: var(--fs-small); color: rgba(240 236 228 / 0.86);
+}
+.map-flyout-title { margin: 0 0 var(--s1); font-weight: 600; color: #A6D4C1; }
+.map-flyout-list { margin: 0; padding: 0; list-style: none; }
+.map-flyout-list li { padding-block: 2px; line-height: 1.4; overflow-wrap: anywhere; }
+.map-a11y { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.map-status { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.map-status:empty { display: none; }
+.map-status-text { max-inline-size: 36ch; margin: 0; padding: var(--s4); text-align: center; color: rgba(240 236 228 / 0.72); pointer-events: auto; }
+.map-status-text.danger { color: #F0A08C; }
 .map-desk { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); }
 .map-count { flex: 1; color: var(--ink-2); }
 
@@ -750,12 +1002,327 @@ dialog {
   .desk-note { flex-direction: column; align-items: stretch; }
 }
 
+/* ---------- composer attachments and @ mentions ---------- */
+.composer { position: relative; }
+.composer-row .attach {
+  inline-size: 44px; min-inline-size: 44px;
+  padding: 0; border: var(--line); border-radius: var(--r);
+  font-size: 1.35rem; line-height: 1; color: var(--ink-2);
+}
+.composer-row .attach:hover:not(:disabled) { background: var(--raised); }
+.composer.dropping { outline: 2px dashed var(--accent); outline-offset: 4px; border-radius: var(--r); }
+.composer-attach { margin-block-end: var(--s2); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
+.chip {
+  display: inline-flex; align-items: center; gap: var(--s2);
+  max-inline-size: 100%; padding: 4px 6px 4px 8px;
+  border: var(--line); border-radius: var(--r); background: var(--raised);
+  font: 400 var(--fs-small)/1.3 var(--font-ui); color: var(--ink);
+}
+.chip-thumb { display: block; inline-size: 28px; block-size: 28px; object-fit: cover; border-radius: 2px; }
+.chip-text { display: flex; flex-direction: column; min-inline-size: 0; }
+.chip-name { max-inline-size: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-kind { font-size: var(--fs-meta); color: var(--ink-3); }
+.chip-remove {
+  inline-size: 24px; block-size: 24px; padding: 0;
+  border: 0; border-radius: var(--r); background: none;
+  color: var(--ink-2); font-size: 1.1rem; line-height: 1;
+}
+.chip-remove:hover { background: var(--paper); }
+.chip-action { font-size: var(--fs-meta); }
+.message-chips { margin-block-start: var(--s2); }
+@media (pointer: coarse) {
+  .chip-remove, .composer-row .attach { min-inline-size: 44px; min-block-size: 44px; }
+}
+.mention-pop {
+  position: absolute; inset-inline: 0; inset-block-end: 100%;
+  z-index: 6; margin-block-end: var(--s1);
+  max-block-size: min(50dvh, 320px); overflow-y: auto;
+  background: var(--paper); border: var(--line); border-radius: var(--r);
+}
+.mention-list { margin: 0; padding: var(--s1); list-style: none; }
+.mention-option {
+  display: grid; grid-template-columns: 1fr auto; gap: 0 var(--s3);
+  padding: var(--s2); border-radius: var(--r); cursor: pointer;
+  font: 400 var(--fs-small)/1.35 var(--font-ui);
+}
+.mention-option[aria-selected="true"] { background: var(--select); }
+.mention-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.mention-kind { font-size: var(--fs-meta); color: var(--ink-3); }
+.mention-path {
+  grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-meta); color: var(--ink-3);
+}
+.mention-empty { padding: var(--s2); font-size: var(--fs-small); color: var(--ink-3); }
+
+/* ---------- running head: workspace and menu ---------- */
+.workspace-chip {
+  flex: none; display: inline-flex; align-items: center;
+  max-inline-size: 24ch; padding: 2px var(--s2);
+  border: var(--line); border-radius: var(--r);
+  font-size: var(--fs-small); color: var(--ink-2);
+}
+.workspace-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.head-menu-wrap { position: relative; flex: none; }
+.menu {
+  position: absolute; inset-inline-end: 0; inset-block-start: calc(100% + 4px);
+  z-index: 10; display: flex; flex-direction: column;
+  min-inline-size: 210px; padding: var(--s1);
+  background: var(--paper); border: var(--line); border-radius: var(--r);
+}
+.menu-item {
+  padding: var(--s2) var(--s3); border: 0; border-radius: var(--r);
+  background: none; color: var(--ink); text-align: start;
+  font: 400 var(--fs-small)/1.45 var(--font-ui);
+}
+.menu-item:hover, .menu-item:focus-visible { background: var(--raised); }
+.head-workspace-status:not(:empty) { padding-block-end: var(--s2); }
+.head-workspace-status.danger { color: var(--danger); }
+
+/* ---------- syntax highlighting (Prism tokens) ---------- */
+.prose pre code[class*="language-"] { color: var(--ink); }
+.prose pre .token.comment,
+.prose pre .token.prolog,
+.prose pre .token.doctype,
+.prose pre .token.cdata { color: var(--ink-3); font-style: italic; }
+.prose pre .token.punctuation,
+.prose pre .token.operator { color: var(--ink-2); }
+.prose pre .token.keyword,
+.prose pre .token.selector,
+.prose pre .token.tag,
+.prose pre .token.atrule,
+.prose pre .token.important,
+.prose pre .token.function { color: var(--accent); }
+.prose pre .token.keyword { font-weight: 600; }
+.prose pre .token.string,
+.prose pre .token.char,
+.prose pre .token.attr-value,
+.prose pre .token.regex { color: var(--ink-2); }
+.prose pre .token.number,
+.prose pre .token.boolean,
+.prose pre .token.constant,
+.prose pre .token.symbol,
+.prose pre .token.property { color: var(--ink); font-weight: 600; }
+.prose pre .token.deleted { color: var(--danger); }
+.prose pre .token.inserted { color: var(--accent); }
+.prose pre .token.bold { font-weight: 600; }
+.prose pre .token.italic { font-style: italic; }
+
+/* ---------- diagrams and artifact figures ---------- */
+.diagram { margin: var(--s4) 0; text-align: center; }
+.diagram svg { max-inline-size: 100%; block-size: auto; }
+.diagram-error { margin-block: calc(-1 * var(--s2)) var(--s4); font-size: var(--fs-small); color: var(--danger); }
+.artifact-figure {
+  margin: var(--s4) 0; padding: var(--s2);
+  border: var(--hair); border-radius: var(--r); background: var(--paper);
+}
+.artifact-figure svg { max-inline-size: 100%; block-size: auto; }
+.artifact-figure.missing { border-style: dashed; color: var(--ink-3); font-size: var(--fs-small); }
+.artifact-figure.interactive { padding: 0; }
+.entry.artifacts { display: grid; gap: var(--s4); }
+.view-host { inline-size: 100%; }
+.view-frame { display: block; inline-size: 100%; border: 0; background: var(--paper); }
+.view-task { margin-block-start: var(--s2); font-size: var(--fs-small); color: var(--ink-2); }
+.view-status { margin-block-start: var(--s2); font-size: var(--fs-small); color: var(--ink-2); }
+.view-status.error { color: var(--danger); }
+.view-answer-figure { margin-block-start: var(--s3); }
+.tool.missing { color: var(--ink-2); }
+.install-chip { font-size: var(--fs-small); color: var(--accent); }
+
+/* ---------- Settings: plugins, registries, consent ---------- */
+.plugin { padding-block: var(--s4); border-block-end: var(--hair); }
+.plugin:first-child { border-block-start: var(--hair); }
+.plugin-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--s2) var(--s4); }
+.plugin-title { font: 600 var(--fs-small)/1.45 var(--font-ui); color: var(--ink); }
+.plugin-version { font-size: var(--fs-meta); color: var(--ink-3); }
+.plugin-desc { margin-block-start: var(--s1); font-size: var(--fs-small); color: var(--ink-2); }
+.plugin .actions { margin-block-start: var(--s2); }
+.lock-list {
+  margin-block-end: var(--s4); padding: var(--s3);
+  border: var(--line); border-radius: var(--r);
+}
+.lock-note { font-size: var(--fs-small); color: var(--ink); }
+.lock-items { margin: var(--s2) 0 0; padding-inline-start: 1.1em; font-size: var(--fs-small); }
+.lock-name { font-weight: 600; }
+.registry { padding-block: var(--s3); border-block-end: var(--hair); }
+.registry:first-child { margin-block-start: var(--s3); border-block-start: var(--hair); }
+.registry-name { font-weight: 600; color: var(--ink); }
+.registry-form { margin-block-start: var(--s5); }
+.confirm, .consent {
+  margin: auto;
+  inline-size: min(520px, calc(100vw - 2 * var(--gutter)));
+  max-block-size: min(85dvh, 720px); overflow-y: auto;
+  background: var(--paper); border: var(--line); border-radius: var(--r);
+  color: var(--ink);
+}
+.confirm::backdrop, .consent::backdrop { background: var(--scrim); }
+.confirm-body, .consent-body { padding: var(--s5); }
+.confirm h2, .consent h2 { font: 600 var(--fs-h2)/1.3 var(--font-ui); }
+.confirm-text, .consent-desc { margin-block-start: var(--s2); color: var(--ink-2); }
+.consent-meta { display: grid; gap: var(--s2); margin: var(--s4) 0 0; }
+.consent-meta > div { display: grid; grid-template-columns: 6em 1fr; gap: var(--s2); }
+.consent-meta dt { font: 600 var(--fs-small)/1.45 var(--font-ui); color: var(--ink-2); }
+.consent-meta dd { margin: 0; font-size: var(--fs-small); color: var(--ink); overflow-wrap: anywhere; }
+
 /* ---------- forced colors ---------- */
 @media (forced-colors: active) {
-  .btn, .btn.primary, .btn.secondary, .input, .exercise.pending, .seg, .rows .row, .sheet, .entry.user, .you, .map-node {
+  .btn, .btn.primary, .btn.secondary, .input, .exercise.pending, .seg, .rows .row, .sheet, .entry.user, .you {
     border-color: ButtonBorder;
   }
   .btn.primary { border: 1px solid ButtonBorder; }
   :focus-visible { outline-color: Highlight; }
   .seg:has(input:checked), .rows .row:has(input:checked) { outline: 2px solid Highlight; }
+  /* Highlighting is decoration: system colours only. */
+  .prose pre .token,
+  .prose pre .token.comment,
+  .prose pre .token.keyword,
+  .prose pre .token.string,
+  .prose pre .token.number {
+    color: inherit !important;
+    background: none !important;
+    font-style: normal;
+    font-weight: inherit;
+  }
+  .chip, .composer-row .attach, .mention-pop, .menu, .artifact-figure,
+  .workspace-chip, .confirm, .consent, .lock-list { border-color: ButtonBorder; }
+  .mention-option[aria-selected="true"] { outline: 2px solid Highlight; background: none; }
 }
+
+/* ── Copy/momentum (§6.2, §7.1, §7.9) ── */
+/* Home: one-click resumption of the newest unfinished session. Secondary, so Start stays the one primary. */
+.home-col .start > .resume {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--s4); align-items: baseline;
+  inline-size: 100%; min-block-size: 64px; padding: var(--s3) var(--s4);
+  margin-block-end: var(--s6);
+  text-align: start;
+}
+.resume > .small-caps { grid-column: 1 / -1; color: var(--ink-3); }
+.resume-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume-place { font-size: var(--fs-small); color: var(--ink-2); white-space: nowrap; }
+/* Running head: title first. fitHead() sets .compact when the full phase list would truncate the title or wrap the head. */
+.phase.compact li:not(.current) {
+  position: absolute; inline-size: 1px; block-size: 1px; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.phase.compact li + li::before { content: none; }
+
+/* ── Focus mode (§7.8) ── */
+.focus-choice { display: flex; flex-direction: column; gap: var(--s2); }
+.focus-choice label { display: inline-flex; align-items: center; gap: var(--s2); min-block-size: 24px; cursor: pointer; }
+@media (pointer: coarse) { .focus-choice label { min-block-size: 44px; } }
+.nudge { font-size: var(--fs-small); color: var(--ink-3); }
+.timeline > .nudge { margin-block: var(--s6); }
+
+/* ── Learning-system surfaces (docs/ui-design.md §7.7) ── */
+
+/* Plan card: the title row (plan options "⋯" on the right). The sections are
+   boxes in the drawing now; their actions live in the side drawer. */
+.plan-row { display: flex; align-items: flex-start; gap: var(--s2) var(--s4); }
+.plan-row > .plan-title { flex: 1; min-inline-size: 0; padding-inline-end: 5em; }
+.plan-options-toggle { font: 400 var(--fs-read)/1 var(--font-ui); padding-inline: var(--s1); }
+.plan-options-panel {
+  margin-block-start: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-inline-start: 2px solid var(--rule);
+}
+.plan-choice { margin-block-start: 0; }
+.plan-choice + .plan-choice, .plan-options-panel > .field,
+.plan-options-panel > .tools { margin-block-start: var(--s4); }
+.plan-options-panel legend { font: 600 var(--fs-small)/1.4 var(--font-ui); color: var(--ink-2); }
+.plan-options-panel .row-label { display: block; }
+.plan-options-panel .row-hint { display: block; font-size: var(--fs-meta); color: var(--ink-3); }
+.plan-minutes .input { inline-size: 8em; }
+.sheet-sections > li.known .sheet-section-title,
+.sheet-sections > li.known .sheet-nodes { color: var(--ink-3); }
+.sheet-sections > li.refuted .sheet-section-title { color: var(--ink); }
+
+/* Hunt card: the same container as a pending question. */
+.hunt {
+  padding: var(--s4) var(--s5);
+  background: var(--raised);
+  border: var(--line);
+  border-radius: var(--r);
+}
+.hunt-kicker { margin-block-end: var(--s2); }
+.hunt-head { margin-block-start: var(--s4); font: 600 var(--fs-small)/1.4 var(--font-ui); color: var(--ink-2); }
+.hunt-list { margin-block-start: var(--s1); padding-inline-start: 1.2em; font: 400 var(--fs-small)/1.5 var(--font-ui); color: var(--ink); }
+.hunt-list > li + li { margin-block-start: var(--s1); }
+.hunt-kind { color: var(--ink-2); }
+.hunt-venue { color: var(--ink); }
+.hunt-why { color: var(--ink-2); }
+.hunt-note { margin-block-start: var(--s3); font: 400 var(--fs-small)/1.45 var(--font-ui); color: var(--ink-3); }
+.hunt-form { margin-block-start: var(--s4); }
+.hunt-link-list { display: flex; flex-direction: column; gap: var(--s2); }
+.hunt-confirm { margin-block-start: var(--s3); }
+.hunt-confirm-text { font-size: var(--fs-small); color: var(--ink-2); }
+.hunt-files-input { font: 400 var(--fs-small)/1.4 var(--font-ui); max-inline-size: 100%; }
+.hunt .you { margin-block-start: var(--s4); }
+
+/* Close: field guide, confidence and what's parked. Reference, not reading. */
+.close-extras { font: 400 var(--fs-small)/1.5 var(--font-ui); color: var(--ink-2); }
+.field-guide-title, .calibration-title {
+  cursor: pointer;
+  font: 600 var(--fs-small)/1.4 var(--font-ui);
+  color: var(--ink);
+}
+.field-guide-body, .calibration-body { margin-block-start: var(--s2); }
+.field-guide-head { margin-block-start: var(--s3); font: 600 var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-3); }
+.venue-list { margin-block-start: var(--s1); padding-inline-start: 1.2em; }
+.venue-group + .venue-group { margin-block-start: var(--s2); }
+.venue-head { margin-block-start: var(--s2); font: 600 var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-3); }
+.venue-name { color: var(--ink); }
+.venue-kind { color: var(--ink-3); }
+.venue-kind::before { content: ' · '; }
+.venue-note, .venue-unlock { color: var(--ink-2); }
+.calibration-line + .calibration-line, .calibration-note { margin-block-start: var(--s1); }
+.saved-line { margin-block-start: var(--s4); }
+.saved-actions { margin-block-start: var(--s1); }
+
+/* Map page: the newest plan's confidence line and frontier, and the guide,
+   which now comes from the graph's topics rather than a session (ui-design
+   §7.6, §7.7.6). */
+.map-learning { margin-block-start: var(--s3); font-size: var(--fs-small); color: rgba(240 236 228 / 0.78); }
+.map-learning .map-frontier-title { color: #F0ECE4; }
+.map-learning .calibration-note { color: rgba(240 236 228 / 0.66); }
+.map-calibration { margin-block-start: var(--s2); color: rgba(240 236 228 / 0.72); }
+.map-frontier { margin-block-start: var(--s2); }
+.map-frontier-list { margin-block-start: var(--s1); padding-inline-start: 1.2em; }
+.map-frontier-topic { color: #F0ECE4; }
+.map-frontier-why { color: rgba(240 236 228 / 0.62); }
+.map-frontier-start { margin-inline-start: var(--s2); }
+.map-card-level { color: rgba(240 236 228 / 0.72) !important; margin-block-end: var(--s1) !important; }
+
+/* Where the field lives on the Map: a collapsible list of the topics that have
+   a venue, under the counts; a row centres that topic's cluster. */
+.map-guide { margin-block-start: var(--s3); max-inline-size: min(420px, 100%); font-size: var(--fs-small); }
+.map-guide[hidden] { display: none; }
+.map-guide-title { cursor: pointer; color: #F0ECE4; font-weight: 600; }
+.map-guide-list { margin: var(--s1) 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.map-guide-row { display: flex; align-items: baseline; gap: var(--s2); }
+.map-guide-topic {
+  padding: 0; border: 0; background: none; font: inherit; cursor: pointer; text-align: start;
+  color: #A6D4C1; text-decoration: underline dotted; text-underline-offset: 2px;
+}
+.map-guide-topic:hover { color: #F0ECE4; }
+.map-guide-topic:focus-visible { outline: 2px solid #A6D4C1; outline-offset: 2px; }
+.map-guide-count { color: rgba(240 236 228 / 0.5); font-variant-numeric: tabular-nums; }
+
+/* The topic's guide on an idea's card: reference material, so it sits last and
+   scrolls instead of growing the card past the stage. */
+.map-card-venues {
+  margin-block-start: var(--s2); padding-block-start: var(--s2);
+  border-block-start: 1px solid rgba(140 196 174 / 0.22);
+  max-block-size: 32vh; overflow-y: auto;
+}
+.map-card .map-card-venues-title { font: 600 var(--fs-meta)/1.4 var(--font-ui); color: #8CC4AE; }
+.map-card-venues .venue-head, .map-card-venues .venue-kind { color: rgba(240 236 228 / 0.5); }
+.map-card-venues .venue-name { color: #A6D4C1; }
+.map-card-venues .venue-note, .map-card-venues .venue-unlock { color: rgba(240 236 228 / 0.66); }
+
+/* Settings: starting point for new sessions. */
+.starting-point { margin-block-start: var(--s3); display: flex; flex-direction: column; gap: var(--s3); }
+.starting-point > legend { font: 600 var(--fs-ui)/1.45 var(--font-ui); }
+.starting-point label { display: block; cursor: pointer; }
+.starting-point-row { display: inline-flex; align-items: center; gap: var(--s2); min-block-size: 24px; color: var(--ink); }
+.starting-point .help { margin-block-start: 0; margin-inline-start: calc(24px + var(--s2)); }
+@media (pointer: coarse) { .starting-point-row { min-block-size: 44px; } }

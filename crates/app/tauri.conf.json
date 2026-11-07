@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Learning Harness",
+  "productName": "P's Learning Harness",
   "version": "0.1.0",
-  "identifier": "com.learning-harness.app",
+  "identifier": "com.pslearningharness.app",
   "build": {
     "frontendDist": "../../ui"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Learning Harness",
+        "title": "P's Learning Harness",
         "width": 1280,
         "height": 820,
         "minWidth": 360,
@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src ipc: http://ipc.localhost; frame-src pluginview: http://pluginview.localhost"
     }
   },
   "bundle": {

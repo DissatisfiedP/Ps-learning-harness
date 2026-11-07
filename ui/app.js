@@ -1,4 +1,4 @@
-// Learning Harness UI ("Carrel"): Home (start + session list) and the
+// P's Learning Harness UI ("Carrel"): Home (start + session list) and the
 // session view (running head, page, desk).
 //
 // Learn sessions run on the agent runtime: one global event subscription
@@ -10,26 +10,35 @@
 // open (resumption cue), and the learner's own actions.
 
 import { available, call, channel, message } from './api.js';
+import { initComposer } from './composer.js';
+import { artifactsEl } from './content.js';
+import { ensurePrism } from './highlight.js';
 import { ensureKatex, plainText } from './markdown.js';
+import { enterSession, initFocus, leaveSession, NUDGE_TEXT, nudgeEl, refreshFullscreen, takeNudge, toggleFullscreen } from './focus.js';
 import { initSettings, loadConfig, openSettings } from './settings.js';
 import { LiveReply, assistantEl, userEl } from './reply.js';
-import { affectsState, applyOp, createTimeline, isPending } from './timeline.js';
+import { affectsState, applyHuntStates, applyOp, createTimeline, isPending } from './timeline.js';
 import { createSessionList } from './sessions.js';
 import { createMap } from './map.js';
+import { installCandidate, loadCatalog, pluginLabel } from './pluginui.js';
+import { getPlugin, loadPlugins, pluginIds } from './pluginstore.js';
 import {
   choiceCard,
+  closeExtras,
   dividerEl,
+  huntCard,
   jobChip,
+  newPlanEdits,
   noticeEl,
   planCard,
-  planSheet,
+  planOverlay,
   questionCard,
-  removedPluginList,
   renderPhase as renderPhaseNav,
   sectionOpener,
   sectionPosition,
   sectionTitle,
   verdictText,
+  placeText,
 } from './cards.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -45,12 +54,24 @@ const els = {
   sessionList: $('#session-list'),
   sessionsError: $('#sessions-error'),
   sessionsErrorText: $('#sessions-error-text'),
+  resumeSession: $('#resume-session'),
+  resumeTitle: $('#resume-title'),
+  resumePlace: $('#resume-place'),
   conversation: $('#conversation'),
   back: $('#back'),
   title: $('#session-title'),
   phase: $('#phase'),
   headWord: $('#head-word'),
   headStatus: $('#head-status'),
+  headWorkspace: $('#head-workspace'),
+  headWorkspaceName: $('#head-workspace-name'),
+  sessionMenuWrap: $('#session-menu-wrap'),
+  sessionMenu: $('#session-menu'),
+  sessionMenuList: $('#session-menu-list'),
+  workspaceAttach: $('#workspace-attach'),
+  workspaceDetach: $('#workspace-detach'),
+  fullscreenToggle: $('#fullscreen-toggle'),
+  workspaceStatus: $('#workspace-status'),
   planToggle: $('#plan-toggle'),
   messages: $('#messages'),
   timeline: $('#timeline'),
@@ -82,15 +103,15 @@ const els = {
 const COPY = {
   learn: {
     hero: 'What do you want to learn?',
-    placeholder: 'Describe a topic or a goal…',
+    placeholder: 'A topic or goal…',
   },
   practice: {
     hero: 'What do you want to practise?',
-    placeholder: 'Name a topic, or paste a problem set…',
+    placeholder: 'A topic or problem set…',
   },
 };
 
-const READ_ONLY_NOTE = 'This session was made with an earlier version of the tutor and can’t continue.';
+const READ_ONLY_NOTE = 'Made with an older tutor. Read-only.';
 const GUARD = 'Wait for the reply to finish, or stop it.';
 
 /** Items mounted when a session opens; older ones are prepended on scroll. */
@@ -109,7 +130,7 @@ const state = {
   homeScroll: 0,
   lastAnnounce: 0,
   lastAnnounceKind: '', // 'exercise' for a question/choice announcement
-  mapLoad: 0, // increments per Map visit; stale learning_map results are dropped
+  mapLoad: 0, // increments per Map visit; stale knowledge_map results are dropped
 };
 
 function newView(summary) {
@@ -129,13 +150,18 @@ function newView(summary) {
     stTimer: 0,
     planKey: '',
     planVersion: null,
-    removed: new Set(), // tools unchecked on the plan document
+    panelLevel: 'ideas', // the plan overlay opens on the claims; Topics is the overview
+    panelDrawer: false, // the overlay's section drawer
+    panelFromCard: false, // opened from the plan card's corner while awaiting approval
+    planEdits: newPlanEdits(), // unsent plan-control edits (cards.js)
+    planEditsRev: 0, // bumps when pending edits are discarded
     planDraft: '',
     planFormOpen: false,
     panelKey: '',
     panelDraft: '',
     panelFormOpen: false,
     planFailed: false,
+    planEditing: false, // a plan-change request is in flight
     composerShown: true,
     turnStartedAt: 0,
     openersVersion: null, // plan version section openers were last refreshed for
@@ -145,12 +171,18 @@ function newView(summary) {
   };
 }
 
+let composer = null;
+
 const sessions = createSessionList(els.sessionList, {
   onOpen: (id) => openSession(id),
   onDelete: (id) => deleteSession(id),
 });
 
-const map = createMap(els.mapPage, { onChange: renderMapDesk });
+const map = createMap(els.mapPage, {
+  onChange: renderMapDesk,
+  onReviewDecided: () => showMap(),
+  onStartFrontier: (itemId, button) => startFromFrontier(itemId, button),
+});
 
 // ---------- utilities ----------
 
@@ -272,6 +304,7 @@ function modelReady() {
 function applyConfig(config) {
   state.config = config;
   els.notice.hidden = modelReady();
+  refreshVision();
 }
 
 // ---------- Home ----------
@@ -282,6 +315,7 @@ function setMode(mode) {
   const copy = COPY[mode];
   els.hero.textContent = copy.hero;
   if (!state.current) els.prompt.placeholder = copy.placeholder;
+  composer?.setMode(mode);
 }
 
 async function loadSessions() {
@@ -293,6 +327,32 @@ async function loadSessions() {
     els.sessionsError.hidden = false;
     sessions.render();
   }
+  renderResume();
+}
+
+/**
+ * Home's resumption cue (§7.9): the newest session, if it can go on, one
+ * click away. Learn sessions need `session_state` to know whether they ended.
+ */
+async function renderResume() {
+  const latest = sessions.newest();
+  const ask = (state.resumeAsk = {});
+  let place = null;
+  if (latest && !latest.readOnly) {
+    if (latest.mode === 'practice') place = 'Practice';
+    else {
+      const st = await call('session_state', { sessionId: latest.id }).catch(() => null);
+      if (st && !st.ended) place = placeText(st);
+    }
+  }
+  if (state.resumeAsk !== ask) return;
+  els.resumeSession.hidden = !place;
+  if (!place) return;
+  const title = latest.title || 'Untitled';
+  els.resumeSession.dataset.id = latest.id;
+  els.resumeTitle.textContent = title;
+  els.resumePlace.textContent = place;
+  els.resumeSession.setAttribute('aria-label', `Continue ${title}, ${place}`);
 }
 
 async function deleteSession(id) {
@@ -300,6 +360,7 @@ async function deleteSession(id) {
   state.turns.delete(id);
   const next = sessions.remove(id);
   focusQuiet(next ?? els.prompt);
+  renderResume();
 }
 
 // ---------- views ----------
@@ -319,10 +380,15 @@ function setComposerContext(home) {
     els.homeSlot.append(els.composer);
     els.prompt.setAttribute('aria-labelledby', 'hero');
     els.prompt.placeholder = COPY[state.mode].placeholder;
+    composer?.setSession(null);
+    composer?.setMode(state.mode);
   } else {
     els.dockSlot.append(els.composer);
     els.prompt.setAttribute('aria-labelledby', 'prompt-label');
     els.prompt.placeholder = 'Reply to the tutor';
+    composer?.setSession(state.current?.id ?? null);
+    // Practice sessions take images only (ui-design §7.3).
+    composer?.setMode(state.current && !state.current.learn ? 'practice' : 'learn');
   }
   els.composer.hidden = false;
   setPromptError('');
@@ -331,6 +397,7 @@ function setComposerContext(home) {
 /** Shows Home. `focusId`: the session just left (its row gets focus); `focus`: an element to focus instead. */
 function showHome({ focusId = null, focus = null } = {}) {
   closeCurrent();
+  leaveSession();
   state.loading = null;
   els.conversation.hidden = true;
   els.mapView.hidden = true;
@@ -340,6 +407,7 @@ function showHome({ focusId = null, focus = null } = {}) {
   syncBusy();
   els.home.scrollTop = state.homeScroll;
   focusQuiet(focus ?? ((focusId && sessions.openButton(focusId)) || els.prompt));
+  renderResume();
 }
 
 function showConversation() {
@@ -348,6 +416,7 @@ function showConversation() {
   els.home.hidden = true;
   els.mapView.hidden = true;
   els.conversation.hidden = false;
+  enterSession();
   els.title.textContent = s.title;
   const learnLive = s.learn && !s.readOnly;
   els.phase.hidden = !learnLive;
@@ -356,6 +425,8 @@ function showConversation() {
   els.headWord.textContent = s.readOnly ? 'Read-only' : 'Practice';
   els.planToggle.hidden = true;
   headStatus('');
+  workspaceStatus('');
+  renderWorkspace(s);
   setComposerContext(false);
   s.composerShown = true;
   renderDesk({ quiet: true });
@@ -373,23 +444,35 @@ function setTitle(s, title) {
 function renderItem(item) {
   const s = state.current;
   const onAnswer = (callId, payload) => cmd('answer', { sessionId: s.id, callId, payload });
+  const ctx = { artifacts: s.tl.artifacts, sessionId: s.id };
   switch (item.kind) {
     case 'user':
-      return userEl(item.msg.content);
+      return userEl(item.msg.content, item.msg.attachments);
     case 'assistant':
-      return assistantEl(item.msg, { showThinking: !s.learn });
+      return assistantEl(item.msg, { showThinking: !s.learn, artifacts: item.artifacts ?? [], ctx });
+    case 'artifacts':
+      return artifactsEl(item.ops, ctx);
     case 'notice':
       return noticeEl(item);
     case 'divider':
       return dividerEl(item.text);
+    case 'nudge':
+      return nudgeEl(item.text);
     case 'section':
       return sectionOpener(item, s.st?.plan);
     case 'job':
       return jobChip(item, { onCancel: s.readOnly ? null : (jobId) => cmd('cancel_job', { sessionId: s.id, jobId }) });
     case 'question':
-      return questionCard(item, { readOnly: s.readOnly, onAnswer });
+      return questionCard(item, { readOnly: s.readOnly, onAnswer, ctx });
     case 'choice':
       return choiceCard(item, { readOnly: s.readOnly, onAnswer });
+    case 'hunt':
+      return huntCard(item, {
+        readOnly: s.readOnly,
+        current: s.st?.currentSection ?? null,
+        onReturn: (huntId, payload) => cmd('hunt_return', { sessionId: s.id, huntId, payload }),
+        onSkip: (huntId) => cmd('hunt_skip', { sessionId: s.id, huntId }),
+      });
     default:
       return document.createElement('div');
   }
@@ -542,7 +625,10 @@ function continueReading() {
 function beginLive(s, { align = false } = {}) {
   const atEnd = align && (s.atEnd || nearBottom());
   s.atEnd = false;
-  s.live = new LiveReply({ showThinking: !s.learn });
+  s.live = new LiveReply({
+    showThinking: !s.learn,
+    ctx: () => ({ artifacts: s.tl.artifacts, sessionId: s.id }),
+  });
   els.timeline.append(s.live.el);
   clearError();
   if (atEnd) {
@@ -669,6 +755,7 @@ function onSessionSummary(summary) {
     s.id = summary.id;
     sessions.upsert(summary);
     setTitle(s, summary.title);
+    composer?.setSession(summary.id);
     syncBusy();
     return;
   }
@@ -687,13 +774,18 @@ function sessionEvent(s, ev) {
       }
       renderPhase();
       renderDesk();
+      if (ev.agent !== 'tutor') renderPlanCard({ free: false });
       syncBusy();
       break;
     case 'turnEnd':
       if (ev.agent === 'tutor') endLive(s, ev.error);
-      else if (ev.error) plannerFailed(s, ev.error);
+      else {
+        s.planEditing = false;
+        if (ev.error) plannerFailed(s, ev.error);
+      }
       renderPhase();
       renderDesk();
+      if (ev.agent !== 'tutor') renderPlanCard({ free: false });
       syncBusy();
       break;
     case 'text': {
@@ -720,7 +812,20 @@ function endLive(s, error) {
   dropLive(s);
   releaseReserve();
   if (error) showTurnError(error);
-  else if (!(state.lastAnnounceKind === 'exercise' && state.lastAnnounce >= s.turnStartedAt)) announce('Reply finished.');
+  else {
+    if (!(state.lastAnnounceKind === 'exercise' && state.lastAnnounce >= s.turnStartedAt)) announce('Reply finished.');
+    maybeNudge(s);
+  }
+}
+
+/** Break nudge (ui-design §7.8): a UI-only line at a turn boundary, ahead of `before` when given. */
+function maybeNudge(s, before = null) {
+  if (state.current !== s || !takeNudge()) return;
+  const item = { kind: 'nudge', key: `nudge:${performance.now()}`, text: NUDGE_TEXT };
+  const at = before ? s.tl.items.indexOf(before) : -1;
+  if (at >= 0) s.tl.items.splice(at, 0, item);
+  else s.tl.items.push(item);
+  appendItem(item);
 }
 
 function plannerFailed(s, error) {
@@ -736,10 +841,11 @@ function onOp(s, op) {
   const free = notEngaged();
   const change = applyOp(s.tl, op);
   if (change?.added) {
+    for (const extra of change.extras ?? []) appendItem(extra);
     const item = change.added;
     if (item.kind === 'assistant') {
       if (s.live) {
-        item.el = s.live.finalize(item.msg);
+        item.el = s.live.finalize(item.msg, item.artifacts ?? []);
         s.live = null;
       }
       appendItem(item);
@@ -752,6 +858,7 @@ function onOp(s, op) {
       // An exercise ends the streamed segment; drop an empty "Writing…".
       if ((item.kind === 'question' || item.kind === 'choice') && s.live && !s.live.hasContent) dropLive(s);
       if (item.kind === 'user') s.atEnd = nearBottom();
+      if (item.kind === 'section') maybeNudge(s, item);
       appendItem(item);
       if (item.kind === 'user') item.el.scrollIntoView({ block: 'nearest', behavior: 'instant' });
       else if (item.kind === 'section') announce(`New section: ${sectionTitle(item, s.st?.plan)}`);
@@ -804,11 +911,19 @@ async function refreshState(s) {
 
 function applyState(s, { initial = false } = {}) {
   const free = notEngaged();
+  renderWorkspace(s);
   renderPhase();
   renderPlanCard({ free, initial });
   renderPanel();
   renderDesk({ quiet: initial, free });
   if (!s.st) return;
+  // Every hunt card's lifecycle (out / returned / skipped / debriefed) is
+  // `session_state`'s, resolved per card by hunt id: the card itself came from
+  // the `hunt_send` op, and an earlier section's card must not read as live.
+  for (const item of applyHuntStates(s.tl, s.st.hunts)) {
+    if (item.el) rerenderItem(item);
+  }
+  renderCloseExtras(s).catch(() => {});
   // Section openers seen before any `plan` op take their title from the
   // state: refresh them once per plan version, not on every state refresh.
   if (s.st.plan && s.openersVersion !== s.st.planVersion) {
@@ -818,6 +933,66 @@ function applyState(s, { initial = false } = {}) {
   if (!s.checkedUnanswered) {
     s.checkedUnanswered = true;
     offerReplyIfUnanswered(s);
+  }
+}
+
+/**
+ * The close's reference material below the close text (ui-design §7.7.5):
+ * where the field lives, how confidence matched results, and what this session
+ * parked. Only once the session has ended; harmless when every part is absent.
+ */
+async function renderCloseExtras(s) {
+  const st = s.st;
+  if (!st?.ended) {
+    s.closeExtras?.remove();
+    s.closeExtras = null;
+    return;
+  }
+  if (!s.frontierLoaded) {
+    s.frontierLoaded = true;
+    try {
+      const all = await call('frontier');
+      s.frontier = [...(all ?? [])].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    } catch {
+      s.frontier = []; // the frontier is optional; the close still shows its guide
+    }
+    if (state.current !== s) return;
+  }
+  const node = closeExtras({
+    venues: st.brief?.venues ?? [],
+    depth: st.plan?.depth ?? '',
+    calibration: st.calibration ?? null,
+    frontier: (s.frontier ?? []).filter((f) => f.sessionId === s.id),
+    onStartFrontier: (itemId, button) => startFromFrontier(itemId, button),
+  });
+  if (!node) {
+    s.closeExtras?.remove();
+    s.closeExtras = null;
+    return;
+  }
+  if (s.closeExtras?.isConnected) s.closeExtras.replaceWith(node);
+  else els.timeline.append(node);
+  s.closeExtras = node;
+}
+
+/** Starts a fresh Learn session from a parked frontier item (Map or close). */
+async function startFromFrontier(itemId, button) {
+  if (button) button.disabled = true;
+  if (!modelReady()) {
+    headStatus('');
+    openSettings();
+    if (button) button.disabled = false;
+    return;
+  }
+  try {
+    const created = await cmd('start_from_frontier', { itemId });
+    const id = typeof created === 'string' ? created : created?.id ?? created?.sessionId ?? null;
+    await loadSessions();
+    const target = id ?? sessions.newest()?.id ?? null;
+    if (target) openSession(target);
+  } catch (e) {
+    if (button) button.disabled = false;
+    headStatus(`Couldn’t start the session: ${message(e)}`);
   }
 }
 
@@ -841,31 +1016,287 @@ function renderPhase() {
   });
 }
 
+/**
+ * Title first (§6.2): when the title would truncate or the head would wrap,
+ * the phase list shows only the current step (the others stay for screen
+ * readers). Runs from a ResizeObserver on the head, its title and the list.
+ */
+function fitHead() {
+  const nav = els.phase;
+  if (nav.hidden || els.conversation.hidden) return;
+  nav.classList.remove('compact');
+  const t = els.title;
+  const top = t.offsetTop;
+  const wraps = [...t.parentElement.children].some(
+    (c) => !c.hidden && !c.classList.contains('head-status') && c.offsetTop > top + t.offsetHeight / 2,
+  );
+  if (wraps || t.scrollWidth > t.clientWidth + 1) nav.classList.add('compact');
+}
+
+// ---------- plugins (plan chip, Settings changes) ----------
+
+async function installPlanPlugin(s, plugin, chip) {
+  if (chip) chip.disabled = true;
+  try {
+    const info = await installCandidate(plugin);
+    if (!info) {
+      if (chip) chip.disabled = false;
+      return;
+    }
+    await loadPlugins(true);
+    await loadCatalog(true);
+    announce(`${info.title || plugin} installed.`);
+    renderPlanCard({ free: false });
+  } catch (e) {
+    const status = els.planSlot.querySelector('.form-status');
+    if (status) {
+      status.textContent = message(e);
+      status.classList.add('error');
+    }
+    if (chip) chip.disabled = false;
+  }
+}
+
+async function onPluginsChanged() {
+  await loadPlugins(true);
+  await loadCatalog(true);
+  const s = state.current;
+  if (s?.learn) {
+    renderPlanCard({ free: false });
+  }
+}
+
+function refreshVision() {
+  call('vision_capabilities')
+    .then((v) => composer?.setVision(v))
+    .catch(() => {});
+}
+
+// ---------- workspace (session folder) ----------
+
+function workspaceStatus(text, error = false) {
+  els.workspaceStatus.textContent = text;
+  els.workspaceStatus.classList.toggle('danger', Boolean(error));
+}
+
+function renderWorkspace(s) {
+  const availableHere = Boolean(s?.learn && !s.readOnly);
+  // More is in every session view (full screen); workspace items only where a workspace can attach.
+  els.sessionMenuWrap.hidden = false;
+  els.workspaceAttach.hidden = !availableHere;
+  els.workspaceDetach.hidden = true;
+  if (!availableHere) {
+    els.headWorkspace.hidden = true;
+    return;
+  }
+  // The name comes from the op log (every device); the path is device-local.
+  const name = s.st?.workspace ?? null;
+  els.headWorkspace.hidden = !name;
+  els.headWorkspaceName.textContent = name ?? '';
+  els.headWorkspace.title = name ? `Workspace: ${name}` : '';
+  els.workspaceAttach.textContent = name ? 'Attach a different folder…' : 'Attach folder…';
+  els.workspaceDetach.hidden = !name;
+  if (!name) return;
+  call('workspace_path', { sessionId: s.id })
+    .then((path) => {
+      if (state.current !== s || s.st?.workspace !== name || path) return;
+      // Attached on another device: say so, and offer to point at a folder here.
+      els.headWorkspaceName.textContent = `${name} (not on this device)`;
+      els.headWorkspace.title = `On another device. More → Attach folder… to pick it here.`;
+      els.workspaceAttach.textContent = 'Attach folder…';
+    })
+    .catch(() => {});
+}
+
+function closeSessionMenu({ restoreFocus = false } = {}) {
+  if (els.sessionMenuList.hidden) return;
+  els.sessionMenuList.hidden = true;
+  els.sessionMenu.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) els.sessionMenu.focus({ preventScroll: true });
+}
+
+function openSessionMenu({ focusFirst = false } = {}) {
+  els.sessionMenuList.hidden = false;
+  els.sessionMenu.setAttribute('aria-expanded', 'true');
+  refreshFullscreen();
+  if (focusFirst) {
+    const first = [...els.sessionMenuList.querySelectorAll('[role="menuitem"]')].find((b) => !b.hidden);
+    first?.focus({ preventScroll: true });
+  }
+}
+
+async function attachWorkspaceFlow() {
+  const s = state.current;
+  if (!s?.id) return;
+  // Focus is on the menu item being hidden; give it back to the menu button.
+  closeSessionMenu({ restoreFocus: true });
+  workspaceStatus('Choosing a folder…');
+  let path;
+  try {
+    path = await call('pick_folder');
+  } catch (e) {
+    if (/no folder chosen/i.test(message(e))) {
+      workspaceStatus('');
+      return;
+    }
+    workspaceStatus(`Couldn’t open the folder picker: ${message(e)}`, true);
+    return;
+  }
+  workspaceStatus('Attaching…');
+  try {
+    const name = await call('attach_workspace', { sessionId: s.id, path });
+    await refreshState(s);
+    workspaceStatus('');
+    announce(`Workspace attached: ${name}.`);
+    if (!s.composerShown) els.deskNoteButton.focus({ preventScroll: true });
+  } catch (e) {
+    workspaceStatus(`Couldn’t attach the folder: ${message(e)}`, true);
+  }
+}
+
+async function detachWorkspaceFlow() {
+  const s = state.current;
+  if (!s?.id) return;
+  closeSessionMenu({ restoreFocus: true });
+  workspaceStatus('Detaching…');
+  try {
+    await call('detach_workspace', { sessionId: s.id });
+    await refreshState(s);
+    workspaceStatus('');
+    announce('Workspace detached.');
+  } catch (e) {
+    workspaceStatus(`Couldn’t detach the workspace: ${message(e)}`, true);
+  }
+}
+
+async function useMentionedWorkspace({ path }) {
+  const s = state.current;
+  if (!s?.id) return;
+  workspaceStatus('Attaching…');
+  try {
+    const name = await call('attach_workspace', { sessionId: s.id, path });
+    await refreshState(s);
+    workspaceStatus('');
+    announce(`Workspace attached: ${name}.`);
+  } catch (e) {
+    workspaceStatus(`Couldn’t attach the workspace: ${message(e)}`, true);
+  }
+}
+
+function wireSessionMenu() {
+  els.sessionMenu.addEventListener('click', () => {
+    if (els.sessionMenuList.hidden) openSessionMenu();
+    else closeSessionMenu();
+  });
+  els.sessionMenu.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openSessionMenu({ focusFirst: true });
+    } else if (e.key === 'Escape') {
+      closeSessionMenu();
+    }
+  });
+  els.sessionMenuList.addEventListener('keydown', (e) => {
+    const items = [...els.sessionMenuList.querySelectorAll('[role="menuitem"]')].filter((b) => !b.hidden);
+    const index = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next = e.key === 'ArrowDown' ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+      items[next]?.focus({ preventScroll: true });
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      items[e.key === 'Home' ? 0 : items.length - 1]?.focus({ preventScroll: true });
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSessionMenu({ restoreFocus: true });
+    } else if (e.key === 'Tab') {
+      closeSessionMenu();
+    }
+  });
+  els.workspaceAttach.addEventListener('click', attachWorkspaceFlow);
+  els.workspaceDetach.addEventListener('click', detachWorkspaceFlow);
+  els.fullscreenToggle.addEventListener('click', () => {
+    closeSessionMenu({ restoreFocus: true });
+    toggleFullscreen();
+  });
+  document.addEventListener('click', (e) => {
+    if (!els.sessionMenuWrap.contains(e.target)) closeSessionMenu();
+  });
+}
+
 function renderPlanCard({ free = false, initial = false } = {}) {
   const s = state.current;
   const st = s.st;
   const show = st?.phase === 'awaitApproval' && st.plan;
-  const key = show ? `v${st.planVersion}` : '';
+  const busy = Boolean(show && (s.planEditing || running(s.id, 'planner')));
+  const installed = pluginIds();
+  const question = st?.pendingPlanQuestion ?? null;
+  // Installing a plugin from the card re-renders it without re-announcing;
+  // so does discarding pending plan edits.
+  const key = show
+    ? `v${st.planVersion}|${busy ? 1 : 0}|${[...installed].sort().join(',')}|${question?.callId ?? ''}|e${s.planEditsRev}|r${(st.knownRefuted ?? []).join(',')}`
+    : '';
   if (key === s.planKey) return;
   const fresh = !s.planKey;
   s.planKey = key;
   if (s.planVersion !== st?.planVersion) {
     s.planVersion = st?.planVersion;
-    s.removed.clear();
+    s.planEdits = newPlanEdits();
+    s.planEditing = false;
   }
   const wasInside = els.planSlot.contains(document.activeElement);
   if (!show) {
     els.planSlot.textContent = '';
     return;
   }
+  const planPlugins = st.plan.sections.flatMap((sec) => sec.plugins ?? []);
+  const labels = new Map(planPlugins.map((id) => [id, getPlugin(id)?.title || pluginLabel(id)]));
   const doc = planCard(st.plan, {
-    removed: s.removed,
+    edits: s.planEdits,
+    onSendEdits: async (edits, comment) => {
+      s.planEditing = true;
+      try {
+        await cmd('edit_plan', { sessionId: s.id, edits, comment });
+      } catch (e) {
+        s.planEditing = false;
+        throw e;
+      }
+    },
+    onDiscard: () => {
+      s.planEdits = newPlanEdits();
+      s.planEditsRev += 1;
+      renderPlanCard({ free: false });
+    },
+    onHuntToggle: (sectionId, enabled) => cmd('set_hunt', { sessionId: s.id, sectionId, enabled }).then(() => scheduleState()),
+    question,
+    onAnswerQuestion: async (answer) => {
+      await cmd('answer_plan_question', { sessionId: s.id, answer });
+    },
+    knownRefuted: st.knownRefuted ?? [],
     draft: s.planDraft,
     formOpen: s.planFormOpen,
     onDraft: (text) => (s.planDraft = text),
     onFormOpen: (open) => (s.planFormOpen = open),
-    onApprove: () => cmd('approve', { sessionId: s.id, removedPlugins: removedPluginList(s.removed) }),
-    onRequest: (text) => cmd('request_plan_change', { sessionId: s.id, text }),
+    // The card's corner button opens the whole-screen plan (the same drawing).
+    onExpand: () => openPlanSheet({ fromCard: true }),
+    // Tools are edited through the boxes' "⋯" now, so approval removes nothing
+    // by itself.
+    onApprove: () => cmd('approve', { sessionId: s.id, removedPlugins: [] }),
+    onRequest: async (text) => {
+      s.planEditing = true;
+      try {
+        await cmd('request_plan_change', { sessionId: s.id, text });
+      } catch (e) {
+        s.planEditing = false;
+        throw e;
+      }
+      renderPlanCard({ free: false });
+    },
+    installed,
+    labels,
+    busy,
+    onInstall: (plugin, chip) => installPlanPlugin(s, plugin, chip),
+    state: st,
   });
   els.planSlot.replaceChildren(doc);
   if (initial) return;
@@ -876,7 +1307,21 @@ function renderPlanCard({ free = false, initial = false } = {}) {
   } else if (wasInside) focusQuiet(heading);
 }
 
+/**
+ * Whether the whole-screen plan is reachable. Teaching, closing and finished
+ * sessions reach it from the head's "Plan" button; a plan awaiting approval
+ * reaches it from the card's corner "Expand" (owner direction, 2026-11-07), so
+ * the head button stays hidden there — the plan is already on the page.
+ */
 function panelAvailable(s) {
+  const st = s?.st;
+  if (!s?.learn || s.readOnly || !st?.plan) return false;
+  if (st.phase === 'awaitApproval') return Boolean(s.panelFromCard);
+  return st.phase === 'teach' || st.phase === 'close' || st.ended;
+}
+
+/** The head's "Plan" button only exists once the plan is approved. */
+function planButtonShown(s) {
   const st = s?.st;
   return Boolean(s?.learn && !s.readOnly && st?.plan && (st.phase === 'teach' || st.phase === 'close' || st.ended));
 }
@@ -889,42 +1334,53 @@ function planButtonName(st) {
 
 function renderPanel() {
   const s = state.current;
+  els.planToggle.hidden = !planButtonShown(s);
   if (!panelAvailable(s)) {
-    els.planToggle.hidden = true;
     if (els.planPanel.open) els.planPanel.close();
     if (s) s.panelKey = '';
     return;
   }
   const st = s.st;
-  els.planToggle.hidden = false;
-  els.planToggle.setAttribute('aria-label', planButtonName(st));
+  if (!els.planToggle.hidden) els.planToggle.setAttribute('aria-label', planButtonName(st));
   let checks = 0;
   for (const list of Object.values(st.checks ?? {})) checks += list.length;
   const key = [st.planVersion, st.currentSection, st.completedSections.length, st.lastNodeId, checks, st.activePlugins.join(','), st.ended].join('|');
   if (key === s.panelKey) return;
   s.panelKey = key;
   const hadFocus = els.planPanel.contains(document.activeElement);
-  const inner = document.createElement('div');
-  inner.className = 'sheet-inner';
-  inner.append(
-    planSheet(st, {
+  els.planPanel.replaceChildren(
+    planOverlay(st, {
       headingId: 'plan-sheet-heading',
+      level: s.panelLevel,
+      drawerOpen: s.panelDrawer,
       formOpen: s.panelFormOpen,
       draft: s.panelDraft,
       onDraft: (text) => (s.panelDraft = text),
       onFormOpen: (open) => (s.panelFormOpen = open),
       onRequest: (text) => cmd('request_plan_change', { sessionId: s.id, text }),
       onClose: () => els.planPanel.close(),
+      onLevel: (level) => (s.panelLevel = level),
+      onDrawer: (open) => (s.panelDrawer = open),
     }),
   );
-  els.planPanel.replaceChildren(inner);
   if (hadFocus) focusQuiet($('#plan-sheet-heading'));
 }
 
-function openPlanSheet() {
+/** Opens the whole-screen plan, from the head's button or the card's corner. */
+function openPlanSheet({ fromCard = false } = {}) {
+  const s = state.current;
+  if (!s || els.planPanel.open) return;
+  if (fromCard) {
+    // "Expand" shows the drawing the card is showing, not the claims view.
+    s.panelFromCard = true;
+    s.panelLevel = 'topics';
+  } else if (els.planToggle.hidden) {
+    return;
+  }
   renderPanel();
-  if (els.planToggle.hidden || els.planPanel.open) return;
+  if (!els.planPanel.querySelector('.plan-overlay-inner')) return;
   els.planPanel.showModal();
+  els.planPanel.querySelector('.plan-overlay-inner')?.show?.();
   focusQuiet($('#plan-sheet-heading'));
 }
 
@@ -940,15 +1396,43 @@ function pendingItem(s) {
 function deskState(s) {
   if (s.readOnly) return { note: READ_ONLY_NOTE, button: 'Start a new session', act: 'new', primary: true };
   if (!s.learn) return { composer: true };
-  if (pendingItem(s)) return { note: 'Answer the question to continue.', button: 'Go to question', act: 'question' };
+  if (pendingItem(s)) return { note: 'Question waiting.', button: 'Go to question', act: 'question' };
+  // Ended: the next step is retrieval practice on what was just taught (§7.9).
+  if (s.st?.ended) {
+    return planIdeas(s).length
+      ? { note: 'Session complete.', button: 'Practise these ideas', act: 'practise', primary: true }
+      : { note: 'Session complete.', button: 'Start a new session', act: 'new', primary: true };
+  }
   const phase = s.st?.phase;
-  if (phase === 'awaitApproval') return { note: 'Review the plan to continue.', button: 'Go to plan', act: 'plan' };
+  if (phase === 'awaitApproval') return { note: 'Plan ready.', button: 'Go to plan', act: 'plan' };
   if (phase === 'plan') {
     if (s.planFailed && !running(s.id, 'planner')) return { note: 'Planning failed.' };
-    return { note: 'The planner is drafting your plan. You can keep reading.' };
+    return { note: 'Drafting your plan…' };
   }
-  if (s.planFailed) return { composer: true, note: 'Planning failed. You can describe what you want and try again.' };
+  if (s.planFailed) return { composer: true, note: 'Planning failed. Describe your goal again.' };
   return { composer: true };
+}
+
+/** The ended session's plan nodes, in the Map selection's shape. */
+function planIdeas(s) {
+  const plan = s.st?.plan;
+  const sections = plan?.sections ?? [];
+  const topicOf = (id) => sections.find((sec) => (sec.nodeIds ?? []).includes(id))?.title ?? null;
+  return (plan?.nodes ?? []).map((n) => ({
+    title: n.title ?? n.id,
+    topic: topicOf(n.id) ?? plan?.goal ?? 'this plan',
+  }));
+}
+
+function practiseEnded(s) {
+  if (!modelReady()) {
+    els.deskNoteText.textContent = 'Choose a model first.';
+    openSettings();
+    return;
+  }
+  const text = practiseText(planIdeas(s));
+  closeCurrent();
+  runPractice(text);
 }
 
 function renderDesk({ quiet = false, free = notEngaged() } = {}) {
@@ -978,6 +1462,10 @@ function onDeskNoteButton() {
   if (act === 'new') {
     state.mode = 'learn';
     showHome();
+    return;
+  }
+  if (act === 'practise') {
+    practiseEnded(s);
     return;
   }
   let target = null;
@@ -1071,7 +1559,7 @@ function resume(s) {
 
 // ---------- sending ----------
 
-async function startLearn(text) {
+async function startLearn(text, attachments = []) {
   closeCurrent();
   const s = newView({ id: null, mode: 'learn', title: text });
   state.current = s;
@@ -1084,7 +1572,7 @@ async function startLearn(text) {
   focusQuiet(els.prompt);
   ensureKatex().catch(() => {});
   try {
-    const summary = await call('start_teaching', { text });
+    const summary = await call('start_teaching', { text, attachments });
     if (state.current === s && !s.id && summary?.id) onSessionSummary(summary);
   } catch (e) {
     if (state.current === s && !s.id) {
@@ -1092,6 +1580,7 @@ async function startLearn(text) {
       state.starting = false;
       showHome();
       els.prompt.value = text;
+      composer?.restore(attachments);
       autoGrow();
       updateSendState();
       setPromptError(message(e));
@@ -1104,11 +1593,11 @@ async function startLearn(text) {
   }
 }
 
-async function sendLearner(text) {
+async function sendLearner(text, attachments = []) {
   const s = state.current;
   const before = s.userCount;
   try {
-    await call('send_learner_message', { sessionId: s.id, text });
+    await call('send_learner_message', { sessionId: s.id, text, attachments });
   } catch (e) {
     if (state.current !== s) return;
     if (s.userCount === before) {
@@ -1118,6 +1607,7 @@ async function sendLearner(text) {
         autoGrow();
         updateSendState();
       }
+      composer?.restore(attachments);
       setPromptError(message(e));
     } else if (!s.errorEl && !running(s.id, 'tutor')) {
       showTurnError(message(e));
@@ -1129,7 +1619,7 @@ async function sendLearner(text) {
  * Practice: runs one tutor turn over the per-call channel. `text` is the
  * learner's new message, or null to retry the last unanswered one.
  */
-async function runPractice(text) {
+async function runPractice(text, attachments = []) {
   const isNew = !state.current;
   if (isNew) {
     state.current = newView({ id: null, mode: 'practice', title: text });
@@ -1140,8 +1630,8 @@ async function runPractice(text) {
   }
   const s = state.current;
   if (text !== null) {
-    s.messages.push({ role: 'user', content: text });
-    const item = { kind: 'user', key: `m${s.messages.length - 1}`, msg: { role: 'user', content: text } };
+    s.messages.push({ role: 'user', content: text, attachments });
+    const item = { kind: 'user', key: `m${s.messages.length - 1}`, msg: { role: 'user', content: text, attachments } };
     s.tl.items.push(item);
     s.atEnd = !isNew && nearBottom();
     appendItem(item);
@@ -1153,7 +1643,10 @@ async function runPractice(text) {
 
   const onEvent = channel((ev) => {
     if (ev.kind === 'session') {
-      if (!s.id) s.id = ev.session.id;
+      if (!s.id) {
+        s.id = ev.session.id;
+        composer?.setSession(s.id);
+      }
       sessions.upsert(ev.session);
       setTitle(s, ev.session.title);
       updateSendState();
@@ -1167,7 +1660,7 @@ async function runPractice(text) {
   try {
     const stored = text === null
       ? await call('retry_reply', { sessionId: s.id, onEvent })
-      : await call('send_message', { sessionId: isNew ? null : s.id, mode: 'practice', text, onEvent });
+      : await call('send_message', { sessionId: isNew ? null : s.id, mode: 'practice', text, attachments, onEvent });
     s.messages.push(stored);
     const item = { kind: 'assistant', key: `m${s.messages.length - 1}`, msg: stored };
     item.el = live.finalize(stored);
@@ -1182,6 +1675,7 @@ async function runPractice(text) {
       state.practiceBusy = false;
       showHome();
       els.prompt.value = text;
+      composer?.restore(attachments);
       autoGrow();
       setPromptError(message(e));
     } else if (state.current === s) {
@@ -1193,7 +1687,10 @@ async function runPractice(text) {
     syncBusy();
     if (s.id) sessions.bump(s.id);
   }
-  if (ok && state.current === s) announce('Reply finished.');
+  if (ok && state.current === s) {
+    announce('Reply finished.');
+    maybeNudge(s);
+  }
 }
 
 function stop() {
@@ -1201,7 +1698,7 @@ function stop() {
   if (s?.id) call('cancel_reply', { sessionId: s.id }).catch((e) => setPromptError(message(e)));
 }
 
-function submit(event) {
+async function submit(event) {
   event.preventDefault();
   if (isStreaming()) {
     stop();
@@ -1214,16 +1711,19 @@ function submit(event) {
     openSettings();
     return;
   }
+  // With a model that can't see images this asks once; null = keep editing.
+  const attachments = composer ? await composer.takeForSend() : [];
+  if (attachments === null) return;
   els.prompt.value = '';
   autoGrow();
   setPromptError('');
   updateSendState();
   const s = state.current;
   if (!s) {
-    if (state.mode === 'learn') startLearn(text);
-    else runPractice(text);
-  } else if (s.learn) sendLearner(text);
-  else runPractice(text);
+    if (state.mode === 'learn') startLearn(text, attachments);
+    else runPractice(text, attachments);
+  } else if (s.learn) sendLearner(text, attachments);
+  else runPractice(text, attachments);
 }
 
 function goHome() {
@@ -1236,6 +1736,44 @@ function goHome() {
 
 // ---------- Map ----------
 
+/**
+ * The Map's learning context (ui-design §7.7.6): level text per graph idea, the
+ * confidence line and the frontier, all from the newest Learn session's state
+ * plus `frontier`. Venues are not here: where the field lives belongs to
+ * topics in the graph, so `knowledge_map.topicVenues` carries it. Null when
+ * there is nothing to add, so a Map over a graph with no sessions looks
+ * exactly as before.
+ */
+async function mapLearning() {
+  const newest = sessions.newestLearn();
+  const [st, frontier] = await Promise.all([
+    newest ? call('session_state', { sessionId: newest.id }).catch(() => null) : null,
+    call('frontier').catch(() => []),
+  ]);
+  const plan = st?.plan ?? null;
+  const aimOf = new Map();
+  for (const section of plan?.sections ?? []) {
+    if (!section.targetLevel) continue;
+    for (const id of section.nodeIds ?? []) aimOf.set(id, section.targetLevel);
+  }
+  const levels = {};
+  for (const node of plan?.nodes ?? []) {
+    const key = node.graphNode;
+    if (!key) continue;
+    const reached = st?.nodeLevels?.[node.id] ?? null;
+    const aim = aimOf.get(node.id) ?? null;
+    if (reached || aim) levels[key] = { reached, aim };
+  }
+  const items = [...(frontier ?? [])].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const learning = {
+    levels,
+    calibration: st?.calibration ?? null,
+    frontier: items,
+  };
+  const empty = !Object.keys(levels).length && !learning.calibration && !items.length;
+  return empty ? null : learning;
+}
+
 async function showMap() {
   if (!els.home.hidden) state.homeScroll = els.home.scrollTop;
   els.home.hidden = true;
@@ -1245,8 +1783,8 @@ async function showMap() {
   const visit = ++state.mapLoad;
   map.loading();
   try {
-    const plans = await call('learning_map');
-    if (visit === state.mapLoad && !els.mapView.hidden) map.render(plans);
+    const [graph, review, learning] = await Promise.all([call('knowledge_map'), call('edge_proposals'), mapLearning()]);
+    if (visit === state.mapLoad && !els.mapView.hidden) map.render(graph, review, learning);
   } catch (e) {
     if (visit === state.mapLoad && !els.mapView.hidden) map.failed(message(e), showMap);
   }
@@ -1269,22 +1807,34 @@ function practiseSelection() {
     openSettings();
     return;
   }
-  // The first line doubles as the session title until the generated one arrives.
-  const lines = picked.map(({ title, goal }) => `- ${title} (from “${goal}”)`);
-  const text = [
-    `Practise: ${picked.map((p) => p.title).join(', ')}`,
-    '',
-    'Mix them together rather than one at a time. From my Learn sessions:',
-    ...lines,
-  ].join('\n');
+  const text = practiseText(picked);
   map.clear();
   runPractice(text);
+}
+
+/**
+ * First message of a mixed Practice session on `picked` ([{ title, topic }],
+ * both from the knowledge map). The first line doubles as the session title
+ * until the generated one arrives.
+ */
+function practiseText(picked) {
+  const lines = picked.map(({ title, topic }) => `- ${title} (in “${topic}”)`);
+  return [
+    `Practise: ${picked.map((p) => p.title).join(', ')}`,
+    '',
+    'Mix them together rather than one at a time.',
+    ...lines,
+  ].join('\n');
 }
 
 // ---------- wiring ----------
 
 function wire() {
   els.page = $('#page');
+  const headFit = new ResizeObserver(fitHead);
+  for (const el of [els.title.parentElement, els.title, els.phase]) headFit.observe(el);
+  composer = initComposer({ onUseWorkspace: useMentionedWorkspace });
+  wireSessionMenu();
   els.composer.addEventListener('submit', submit);
   els.prompt.addEventListener('input', () => {
     autoGrow();
@@ -1292,6 +1842,7 @@ function wire() {
     if (els.promptError.textContent) setPromptError('');
   });
   els.prompt.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented) return;
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.isComposing) {
       e.preventDefault();
       if (!isStreaming()) els.composer.requestSubmit();
@@ -1313,9 +1864,24 @@ function wire() {
       call('open_external', { url }).catch((err) => headStatus(`Couldn’t open the link: ${message(err)}`));
     }
   });
-  els.planToggle.addEventListener('click', openPlanSheet);
+  els.planToggle.addEventListener('click', () => openPlanSheet());
   els.planPanel.addEventListener('close', () => {
+    const s = state.current;
+    const fromCard = Boolean(s?.panelFromCard);
+    if (s) s.panelFromCard = false;
+    if (fromCard) {
+      // Back to the corner button the learner expanded from — unless the plan
+      // was approved while it was open, in which case the card is gone and the
+      // head's "Plan" button is the way back.
+      const expand = els.planSlot.querySelector('.plan-expand');
+      if (expand) {
+        focusQuiet(expand);
+        renderPanel();
+        return;
+      }
+    }
     if (!els.planToggle.hidden) focusQuiet(els.planToggle);
+    renderPanel();
   });
   els.planPanel.addEventListener('click', (e) => {
     if (e.target === els.planPanel) els.planPanel.close();
@@ -1324,13 +1890,15 @@ function wire() {
   $('#setup-button').addEventListener('click', openSettings);
   $('#sessions-retry').addEventListener('click', loadSessions);
   els.openMap.addEventListener('click', showMap);
+  els.resumeSession.addEventListener('click', () => openSession(els.resumeSession.dataset.id));
   els.mapBack.addEventListener('click', () => showHome({ focus: els.openMap }));
   els.mapClear.addEventListener('click', () => {
     map.clear();
     focusQuiet(els.mapPractise.disabled ? els.mapHeading : els.mapPractise);
   });
   els.mapPractise.addEventListener('click', practiseSelection);
-  initSettings({ changed: applyConfig });
+  initSettings({ changed: applyConfig, pluginsChanged: onPluginsChanged });
+  initFocus({ onFullscreen: (on) => (els.fullscreenToggle.textContent = on ? 'Exit full screen' : 'Full screen') });
 }
 
 async function start() {
@@ -1344,11 +1912,21 @@ async function start() {
     return;
   }
   subscribe();
-  const [config] = await Promise.all([loadConfig().catch((e) => ({ error: message(e) })), loadSessions()]);
+  const [config] = await Promise.all([
+    loadConfig().catch((e) => ({ error: message(e) })),
+    loadSessions(),
+    loadPlugins(true),
+    loadCatalog(),
+  ]);
   if (config.error) setPromptError(`Couldn’t load your settings: ${config.error}`);
   else applyConfig(config);
-  // Warm KaTeX once the window is idle, not on the startup path.
-  (window.requestIdleCallback ?? ((f) => setTimeout(f, 1500)))(() => ensureKatex().catch(() => {}));
+  refreshVision();
+  // Warm KaTeX and Prism core once the window is idle, not on the startup
+  // path; Prism grammars still load only when a reply uses them.
+  (window.requestIdleCallback ?? ((f) => setTimeout(f, 1500)))(() => {
+    ensureKatex().catch(() => {});
+    ensurePrism().catch(() => {});
+  });
 }
 
 start();

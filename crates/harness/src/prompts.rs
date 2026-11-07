@@ -40,34 +40,16 @@ impl TemplateValues {
     }
 }
 
-/// A plugin manifest, parsed from the frontmatter of `plugins/<id>.md`.
+/// A venue read out of the scope brief's `venues` (docs/learning-system.md
+/// §6). Parsed defensively: briefs are model output.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginManifest {
-    pub id: String,
-    pub title: String,
-    pub tools: Vec<String>,
-    pub platforms: Vec<String>,
-    pub phases: Vec<String>,
-    pub use_when: String,
-    pub avoid_when: String,
-    pub cost: String,
-}
-
-impl PluginManifest {
-    /// The one-line catalog entry the planner sees (architecture §4.20).
-    pub fn catalog_line(&self) -> String {
-        format!(
-            "- **{}** (`{}`): tools [{}]; platforms [{}]; phases [{}]. Use when: {} Avoid when: {} Cost: {}",
-            self.title,
-            self.id,
-            self.tools.join(", "),
-            self.platforms.join(", "),
-            self.phases.join(", "),
-            self.use_when,
-            self.avoid_when,
-            self.cost,
-        )
-    }
+pub struct Venue {
+    /// ask | discussion | reference
+    pub kind: String,
+    pub name: String,
+    /// What the learner must hold for it to be useful; empty when the brief
+    /// didn't say.
+    pub entry_level: String,
 }
 
 pub struct Composer {
@@ -79,6 +61,33 @@ impl Composer {
         Self {
             repo: repo.to_owned(),
         }
+    }
+
+    /// The brief's venues, in the order the brief listed them. Unknown fields
+    /// are ignored and an entry without a kind or a name is dropped, so a
+    /// malformed brief yields fewer lines rather than a failure.
+    pub fn brief_venues(brief: Option<&serde_json::Value>) -> Vec<Venue> {
+        let Some(list) = brief
+            .and_then(|b| b.get("venues"))
+            .and_then(|v| v.as_array())
+        else {
+            return Vec::new();
+        };
+        list.iter()
+            .filter_map(|v| {
+                let field = |key: &str| {
+                    v.get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                };
+                Some(Venue {
+                    kind: field("kind")?.to_owned(),
+                    name: field("name")?.to_owned(),
+                    entry_level: field("entryLevel").unwrap_or("").to_owned(),
+                })
+            })
+            .collect()
     }
 
     /// Bundled text for a prompt path, or `None` when the path isn't bundled.
@@ -104,31 +113,17 @@ impl Composer {
             .ok_or_else(|| Error::Prompt(format!("no bundled prompt for {path}")))
     }
 
-    /// Parse a plugin file into its manifest and body fragment.
-    pub fn plugin(&self, path: &str) -> Result<(PluginManifest, String), Error> {
-        let text = self.load(path)?;
-        parse_frontmatter(&text)
-    }
-
-    /// All registered plugin manifests bundled in `plugins/*.md`, parsed.
-    pub fn plugin_manifests(&self) -> Result<Vec<PluginManifest>, Error> {
-        let mut out = Vec::new();
-        for (path, _) in PROMPTS {
-            if path.starts_with("plugins/") && path.ends_with(".md") {
-                let (m, _) = self.plugin(path)?;
-                out.push(m);
-            }
-        }
-        Ok(out)
-    }
-
     /// Catalog text for the planner/researcher, filtered by platform. With
     /// nothing registered the catalog empty (callers render "none available").
-    pub fn plugin_catalog(&self, platform: &str, manifests: &[PluginManifest]) -> String {
+    pub fn plugin_catalog(
+        &self,
+        platform: &str,
+        manifests: &[crate::plugins::PluginManifest],
+    ) -> String {
         let lines: Vec<String> = manifests
             .iter()
             .filter(|m| m.platforms.iter().any(|p| p == platform))
-            .map(PluginManifest::catalog_line)
+            .map(crate::plugins::PluginManifest::catalog_line)
             .collect();
         if lines.is_empty() {
             "none available".to_owned()
@@ -150,7 +145,7 @@ impl Composer {
         phase_values: &TemplateValues,
         flags: &HashSet<String>,
     ) -> Result<String, Error> {
-        let shared = [
+        let mut shared = vec![
             "shared/voice.md",
             "shared/accuracy.md",
             "shared/learner-signals.md",
@@ -158,6 +153,9 @@ impl Composer {
             "shared/formatting.md",
             "shared/learner-files.md",
         ];
+        if flags.contains("workspace") {
+            shared.push("shared/workspace.md");
+        }
         let mut parts = Vec::with_capacity(shared.len() + 1);
         for p in shared {
             parts.push(self.load(p)?);
@@ -221,12 +219,38 @@ impl Composer {
         render(&self.load("compaction.md")?, values, flags)
     }
 
+    /// The Practice system prompt. Practice has no tools, so no flag is set
+    /// (its `{{#workspace}}` line is for when `workspace_write` reaches it).
+    pub fn compose_practice(&self) -> Result<String, Error> {
+        render(
+            &self.load("practice.md")?,
+            &TemplateValues::new(),
+            &HashSet::new(),
+        )
+    }
+
     /// Compact Markdown view of the pinned session state (architecture §4.15).
     /// Kept small; full detail lives in the transcript.
     pub fn session_state(state: &SessionState) -> String {
+        Self::session_state_with(state, None)
+    }
+
+    /// As [`Self::session_state`], showing the device's saved starting point
+    /// (§3) until a goal record exists: the measure-phase tutor needs it to
+    /// decide whether to ask, and once `goal_set` runs the goal JSON carries
+    /// it. `None` renders exactly what an older session rendered.
+    pub fn session_state_with(
+        state: &SessionState,
+        starting_point_default: Option<&str>,
+    ) -> String {
         let mut out = String::new();
         out.push_str("## Goal\n");
-        out.push_str(&compact_value(state.goal.as_ref()));
+        match (state.goal.as_ref(), starting_point_default) {
+            (None, Some(point)) => {
+                out.push_str(&format!("(none yet) · saved starting point: {point}"))
+            }
+            _ => out.push_str(&compact_value(state.goal.as_ref())),
+        }
         out.push_str("\n\n## Field brief\n");
         out.push_str(&compact_value(state.brief.as_ref()));
         out.push_str("\n\n## Probe map\n");
@@ -246,6 +270,27 @@ impl Composer {
                 out.push_str(&format!(" (v{})\n", plan.version));
                 out.push_str(&truncate(&plan.approach, 400));
                 out.push('\n');
+                // The learner's plan-level settings (§4), on one line so the
+                // planner can re-derive defaults without overriding an
+                // explicit choice. Empty in an older session: the line is
+                // dropped whole, so its text is unchanged.
+                let mut settings = Vec::new();
+                if !plan.depth.is_empty() {
+                    settings.push(format!("depth: {}", plan.depth));
+                }
+                if !plan.explore.is_empty() {
+                    settings.push(format!("explore: {}", plan.explore));
+                }
+                if let Some(minutes) = plan.minutes_per_sitting {
+                    settings.push(format!("sitting: {minutes} min"));
+                }
+                if !plan.style.is_empty() {
+                    settings.push(format!("style: {}", plan.style));
+                }
+                if !settings.is_empty() {
+                    out.push_str(&settings.join(" · "));
+                    out.push('\n');
+                }
                 for s in &plan.sections {
                     let mark = if state.current_section.as_deref() == Some(s.id.as_str()) {
                         "▶ "
@@ -253,13 +298,60 @@ impl Composer {
                         ""
                     };
                     out.push_str(&format!(
-                        "- {}{} [{}] nodes: {}\n",
+                        "- {}{} [{}] nodes: {}",
                         mark,
                         s.id,
                         s.mode.as_str(),
                         s.node_ids.join(", ")
                     ));
+                    // How far the section goes (§2) and that the learner
+                    // claims the material (§4).
+                    if let Some(level) = s.target_level {
+                        out.push_str(&format!(" · aim: {}", level.as_str()));
+                    }
+                    if s.assumed_known && !state.known_refuted.contains(&s.id) {
+                        out.push_str(" · known");
+                    }
+                    // The hunt's lifecycle (§5): `ready` until the tutor sends
+                    // it, then `out`, `returned` or `skipped`. Only the
+                    // current section has one, and only while it is live.
+                    if state.current_section.as_deref() == Some(s.id.as_str()) {
+                        let hunt = state.hunt_state();
+                        if !hunt.is_empty() {
+                            out.push_str(&format!(" · hunt: {hunt}"));
+                        }
+                    }
+                    out.push('\n');
                 }
+            }
+        }
+        // Where the field lives (§6). Only `ask` venues survive a `pass`
+        // depth: the learner wants to finish, not to read around.
+        let depth = state.plan.as_ref().map_or("", |p| p.depth.as_str());
+        let venues: Vec<Venue> = Composer::brief_venues(state.brief.as_ref())
+            .into_iter()
+            .filter(|v| depth != "pass" || v.kind == "ask")
+            .collect();
+        if !venues.is_empty() {
+            out.push_str("\n## Field guide\n");
+            for v in &venues {
+                if v.kind == "ask" {
+                    out.push_str(&format!("- ask  {} — useful now", v.name));
+                    if !v.entry_level.is_empty() {
+                        out.push_str(&format!("; entry: {}", v.entry_level));
+                    }
+                } else if v.entry_level.is_empty() {
+                    out.push_str(&format!(
+                        "- {}  {} — useful once you hold the basics",
+                        v.kind, v.name
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "- {}  {} — useful once you hold: {}",
+                        v.kind, v.name, v.entry_level
+                    ));
+                }
+                out.push('\n');
             }
         }
         out.push_str("\n## Platform\n");
@@ -275,6 +367,24 @@ impl Composer {
             &state.learner_state
         });
         out.push('\n');
+        // How well confidence matched results (§7). Present only when the
+        // thresholds are met; the prompter uses these lines verbatim.
+        if let Some(c) = &state.calibration {
+            out.push_str("\n## Calibration\n");
+            for b in &c.buckets {
+                out.push_str(&format!(
+                    "- {}: {}/{} correct ({}%)\n",
+                    b.label,
+                    b.correct,
+                    b.total,
+                    b.percent()
+                ));
+            }
+            for note in &c.notes {
+                out.push_str(note);
+                out.push('\n');
+            }
+        }
         out
     }
 }
@@ -328,59 +438,6 @@ pub fn render(
     Ok(out)
 }
 
-/// Split `---` frontmatter from the body of a plugin file.
-fn parse_frontmatter(text: &str) -> Result<(PluginManifest, String), Error> {
-    let trimmed = text.trim_start_matches('\u{feff}');
-    if !trimmed.starts_with("---") {
-        return Err(Error::Prompt("plugin file has no frontmatter".into()));
-    }
-    let after_first = &trimmed[3..];
-    let Some(body_start) = after_first.find("\n---") else {
-        return Err(Error::Prompt("plugin frontmatter is not closed".into()));
-    };
-    let front = &after_first[..body_start];
-    let body = after_first[body_start + 4..].trim_start_matches('\n');
-
-    let mut fields: HashMap<String, String> = HashMap::new();
-    for line in front.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once(':') else {
-            continue;
-        };
-        fields.insert(k.trim().to_owned(), v.trim().to_owned());
-    }
-    let get = |k: &str| fields.get(k).cloned().unwrap_or_default();
-    let list = |k: &str| -> Vec<String> {
-        let v = get(k);
-        let v = v.trim();
-        if v.starts_with('[') && v.ends_with(']') {
-            v[1..v.len() - 1]
-                .split(',')
-                .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').to_owned())
-                .filter(|s| !s.is_empty())
-                .collect()
-        } else if v.is_empty() {
-            Vec::new()
-        } else {
-            vec![v.to_owned()]
-        }
-    };
-    let manifest = PluginManifest {
-        id: get("id"),
-        title: get("title"),
-        tools: list("tools"),
-        platforms: list("platforms"),
-        phases: list("phases"),
-        use_when: get("use_when"),
-        avoid_when: get("avoid_when"),
-        cost: get("cost"),
-    };
-    Ok((manifest, body.to_owned()))
-}
-
 fn compact_value(v: Option<&serde_json::Value>) -> String {
     match v {
         None => "(none yet)".to_owned(),
@@ -398,10 +455,31 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Kind, Plan, Section};
+    use crate::state::{Kind, Level, Plan, Section};
 
     fn flags() -> HashSet<String> {
         HashSet::new()
+    }
+
+    /// A section with every field at its default: what an older plan has.
+    fn blank_section(id: &str, title: &str, nodes: &[&str]) -> Section {
+        Section {
+            id: id.into(),
+            title: title.into(),
+            node_ids: nodes.iter().map(|n| (*n).to_owned()).collect(),
+            mode: Kind::Mechanism,
+            style: "socratic".into(),
+            plugins: vec![],
+            notes: String::new(),
+            exit: String::new(),
+            desktop_only: false,
+            needs_install: vec![],
+            target_level: None,
+            assumed_known: false,
+            known_note: String::new(),
+            learner_note: String::new(),
+            hunt: None,
+        }
     }
     #[test]
     fn render_supplies_values_and_flags() {
@@ -436,18 +514,6 @@ mod tests {
     }
 
     #[test]
-    fn plugin_frontmatter_parses_manifest_and_body() {
-        let text = "---\nid: cas\ntitle: CAS\ntools: [cas_check, foo]\nplatforms: [desktop, mobile]\nphases: [measure, teach]\nuse_when: Math\navoid_when: No math\ncost: low\n---\n## Body\nUse `cas_check`.\n";
-        let (m, body) = parse_frontmatter(text).unwrap();
-        assert_eq!(m.id, "cas");
-        assert_eq!(m.tools, ["cas_check", "foo"]);
-        assert_eq!(m.platforms, ["desktop", "mobile"]);
-        assert_eq!(m.phases, ["measure", "teach"]);
-        assert!(body.starts_with("## Body"));
-        assert!(m.catalog_line().contains("cas_check"));
-    }
-
-    #[test]
     fn bundled_prompts_include_the_target_set() {
         for p in [
             "tutor/base.md",
@@ -458,7 +524,7 @@ mod tests {
             "jobs/researcher.md",
             "compaction.md",
             "shared/voice.md",
-            "plugins/cas.md",
+            "shared/workspace.md",
         ] {
             assert!(Composer::bundled(p).is_some(), "missing bundle for {p}");
         }
@@ -470,17 +536,15 @@ mod tests {
             version: 2,
             goal: "Learn X".into(),
             approach: "Do the steps in order.".into(),
+            depth: String::new(),
+            explore: String::new(),
+            minutes_per_sitting: None,
+            style: String::new(),
             nodes: vec![],
             sections: vec![Section {
-                id: "s1".into(),
-                title: "First".into(),
-                node_ids: vec!["n1".into()],
-                mode: crate::state::Kind::Mechanism,
-                style: "socratic".into(),
-                plugins: vec![],
                 notes: "notes".into(),
                 exit: "exit".into(),
-                desktop_only: false,
+                ..blank_section("s1", "First", &["n1"])
             }],
         };
         let mut state = SessionState {
@@ -501,17 +565,20 @@ mod tests {
             version: 1,
             goal: "Analyze DC circuits".into(),
             approach: "Start from Ohm's law, then dividers.".into(),
+            depth: "solid".into(),
+            explore: "off".into(),
+            minutes_per_sitting: None,
+            style: "socratic".into(),
             nodes: vec![],
             sections: vec![Section {
-                id: "sec-dividers".into(),
-                title: "Series circuits and voltage dividers".into(),
-                node_ids: vec!["series-current".into(), "divider-rule".into()],
-                mode: Kind::Mechanism,
-                style: "socratic".into(),
-                plugins: vec![],
                 notes: "Root: one path implies one current.".into(),
                 exit: "Find an unknown resistor in a divider.".into(),
-                desktop_only: false,
+                target_level: Some(Level::Use),
+                ..blank_section(
+                    "sec-dividers",
+                    "Series circuits and voltage dividers",
+                    &["series-current", "divider-rule"],
+                )
             }],
         };
         SessionState {
@@ -538,83 +605,259 @@ mod tests {
         v
     }
 
-    /// The composition test keeps prompts and code in agreement: every
-    /// agent × phase × mode composition must render with no leftover `{{`.
-    #[test]
-    fn compose_every_agent_phase_and_mode_without_leftovers() {
+    /// The eight learning-system flags (`docs/learning-system.md` §1).
+    fn learning_flags() -> HashSet<String> {
+        [
+            "levels",
+            "starting_point",
+            "plan_controls",
+            "known_section",
+            "hunts",
+            "hunt_active",
+            "field_guide",
+            "calibration",
+        ]
+        .iter()
+        .map(|f| (*f).to_owned())
+        .collect()
+    }
+
+    /// Every live composition: the tutor in measure, teach (each mode) and
+    /// close; the planner initial and exam; the researcher job; compaction;
+    /// practice. The values are the ones `agent.rs` sets for the same inputs,
+    /// so a composition that needs one has it, and a value a dropped block
+    /// holds is never read.
+    fn compose_matrix(f: &HashSet<String>) -> Vec<(String, String)> {
         let c = Composer::new(Path::new("/nonexistent"));
         let state = representative_state();
-        let f = flags();
+        let base = tutor_base_values(&state);
+        let mut out = Vec::new();
 
-        // Tutor: measure + each teach mode.
+        // `tutor/hunt.md`, pre-rendered as `agent.rs` does before handing it
+        // to `teach.md` as `{{hunt}}`.
+        let mut hv = TemplateValues::new();
+        hv.set("hunt.state", "out");
+        let hunt = render(&c.load("tutor/hunt.md").unwrap(), &hv, &HashSet::new()).unwrap();
+
         let mut measure = TemplateValues::new();
         measure.set("active_plugins", "");
-        let m = c
-            .compose_tutor(
-                "tutor/phases/measure.md",
-                "measure",
-                &tutor_base_values(&state),
-                &measure,
-                &f,
-            )
-            .unwrap();
-        assert!(!m.contains("{{"), "measure left a placeholder");
-        assert!(m.contains("Measure"));
+        measure.set("hunt.state", "out");
+        measure.set("hunt", hunt.clone());
+        out.push((
+            "tutor/measure".to_owned(),
+            c.compose_tutor("tutor/phases/measure.md", "measure", &base, &measure, f)
+                .unwrap(),
+        ));
 
         let section = state.current_section().unwrap();
-        for mode in ["mechanism", "fact", "procedure", "perceptual", "argument"] {
-            let mut pv = TemplateValues::new();
-            pv.set("section.title", section.title.clone());
-            pv.set("section.id", section.id.clone());
-            pv.set("section.nodes", section.node_ids.join(", "));
-            pv.set("section.style", section.style.clone());
-            pv.set("section.exit", section.exit.clone());
-            pv.set("section.notes", section.notes.clone());
-            pv.set("section.carryOver", "(none)");
-            pv.set("mode", c.load(&format!("tutor/modes/{mode}.md")).unwrap());
-            pv.set("active_plugins", "");
-            let out = c
-                .compose_tutor(
-                    "tutor/phases/teach.md",
-                    "teach",
-                    &tutor_base_values(&state),
-                    &pv,
-                    &f,
-                )
-                .unwrap();
-            assert!(!out.contains("{{"), "teach/{mode} left a placeholder");
-            assert!(out.contains("Teach"));
+        for (file, label, modes) in [
+            (
+                "tutor/phases/teach.md",
+                "teach",
+                &["mechanism", "fact", "procedure", "perceptual", "argument"][..],
+            ),
+            ("tutor/phases/teach.md", "close", &[][..]),
+        ] {
+            for mode in if modes.is_empty() {
+                &["mechanism"][..]
+            } else {
+                modes
+            } {
+                let mut pv = TemplateValues::new();
+                pv.set("section.title", section.title.clone());
+                pv.set("section.id", section.id.clone());
+                pv.set("section.nodes", section.node_ids.join(", "));
+                pv.set("section.style", section.style.clone());
+                pv.set("section.exit", section.exit.clone());
+                pv.set("section.notes", section.notes.clone());
+                pv.set("section.carryOver", "(none)");
+                // The learning-system section keys, always set by `agent.rs`.
+                pv.set("section.targetLevel", "use");
+                pv.set("section.knownNote", "I already know KVL.");
+                pv.set("section.learnerNote", "Keep it short.");
+                pv.set("mode", c.load(&format!("tutor/modes/{mode}.md")).unwrap());
+                pv.set("active_plugins", "");
+                pv.set("hunt.state", "out");
+                pv.set("hunt", hunt.clone());
+                out.push((
+                    format!("{file}/{label}/{mode}"),
+                    c.compose_tutor(file, label, &base, &pv, f).unwrap(),
+                ));
+            }
         }
 
-        // Planner: initial and exam mode.
         let mut pv = TemplateValues::new();
         pv.set("session_state", Composer::session_state(&state));
         pv.set("plugin_catalog", c.plugin_catalog("desktop", &[]));
-        let out = c.compose_planner(&pv, None, &f).unwrap();
-        assert!(!out.contains("{{"), "planner initial left a placeholder");
-        assert!(out.contains("Planner"));
-
+        pv.set("hunt.state", "out");
+        pv.set("hunt", hunt.clone());
+        pv.set("section.targetLevel", "use");
+        pv.set("section.knownNote", "");
+        pv.set("section.learnerNote", "");
+        out.push((
+            "planner/initial".to_owned(),
+            c.compose_planner(&pv, None, f).unwrap(),
+        ));
         let mut exam = pv.clone();
         exam.set("exam", "EE101 finals");
         exam.set("days_left", "14");
         exam.set("sittings_left", "5");
-        let out = c.compose_planner(&exam, Some("exam"), &f).unwrap();
-        assert!(!out.contains("{{"), "planner exam left a placeholder");
-        assert!(out.contains("Exam mode"));
+        out.push((
+            "planner/exam".to_owned(),
+            c.compose_planner(&exam, Some("exam"), f).unwrap(),
+        ));
 
-        // Researcher job.
         let mut jv = TemplateValues::new();
         jv.set("task", "scope: map the field for DC circuits");
         jv.set("plugin_catalog", c.plugin_catalog("desktop", &[]));
-        let out = c.compose_job("jobs/researcher.md", &jv, &f).unwrap();
-        assert!(!out.contains("{{"), "researcher left a placeholder");
+        out.push((
+            "jobs/researcher".to_owned(),
+            c.compose_job("jobs/researcher.md", &jv, f).unwrap(),
+        ));
 
-        // Compaction turn.
         let mut cv = TemplateValues::new();
         cv.set("turns_to_summarize", "(earlier turns)");
         cv.set("previous_summary", "(none)");
-        let out = c.compose_compaction(&cv, &f).unwrap();
-        assert!(!out.contains("{{"), "compaction left a placeholder");
+        out.push((
+            "compaction".to_owned(),
+            c.compose_compaction(&cv, f).unwrap(),
+        ));
+        out.push(("practice".to_owned(), c.compose_practice().unwrap()));
+        out
+    }
+
+    /// The composition test keeps prompts and code in agreement: every
+    /// agent × phase × mode composition renders with every learning-system
+    /// flag off, and none of the feature text appears (docs/learning-system.md
+    /// §9: with all flags off the prompts compose as they did before the
+    /// features, apart from one unflagged wording fix in `teach.md` — a check
+    /// is shown after the explanation, not hidden behind a button).
+    #[test]
+    fn compose_every_agent_phase_and_mode_with_every_flag_off() {
+        let out = compose_matrix(&flags());
+        for (label, text) in &out {
+            assert!(!text.contains("{{"), "{label} left a placeholder");
+        }
+        let text = |label: &str| {
+            out.iter()
+                .find(|(l, _)| l == label)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| panic!("no composition {label}"))
+        };
+
+        let measure = text("tutor/measure");
+        assert!(measure.contains("Measure"));
+        for marker in [
+            "A **course** the learner is taking",
+            "For `course` and `exam` purposes, set `off` and don't ask",
+            "the session state shows the learner's saved default",
+            "Each strand also gets `levelReached`",
+        ] {
+            assert!(!measure.contains(marker), "levels/hunts off: {marker}");
+        }
+
+        let teach = text("tutor/phases/teach.md/teach/mechanism");
+        assert!(teach.contains("Teach"));
+        assert!(
+            !teach.contains("behind a \"Check your understanding\" button")
+                && teach.contains("shown after your explanation"),
+            "the one unflagged wording fix: a check is shown after the explanation"
+        );
+        for marker in [
+            "Target level:",
+            "Learner's note on this section",
+            "This section is marked",
+            "This section starts with a hunt",
+            "Teaching to the target level",
+            "includes a calibration block",
+            "Field guide block",
+            "learner started as",
+        ] {
+            assert!(!teach.contains(marker), "learning flags off: {marker}");
+        }
+
+        let planner = text("planner/initial");
+        assert!(planner.contains("Planner"));
+        for marker in [
+            "Never override an explicit section setting",
+            "the goal's `explore` is `suggest` or `on`",
+        ] {
+            assert!(!planner.contains(marker), "plan flags off: {marker}");
+        }
+        let exam = text("planner/exam");
+        assert!(exam.contains("Exam mode"));
+        assert!(!exam.contains("target level"), "levels off: exam mode");
+        assert!(text("jobs/researcher").contains("Research"));
+        assert!(!text("jobs/researcher").contains("Where the field lives"));
+        assert!(text("compaction").contains("earlier turns"));
+        assert!(text("practice").contains("practice coach"));
+    }
+
+    /// The other half of §9: with every learning-system flag on, nothing is
+    /// left unresolved and every feature's instructions reach the agent.
+    #[test]
+    fn compose_every_agent_phase_and_mode_with_every_flag_on() {
+        let out = compose_matrix(&learning_flags());
+        for (label, text) in &out {
+            assert!(!text.contains("{{"), "{label} left a placeholder");
+        }
+        let text = |label: &str| {
+            out.iter()
+                .find(|(l, _)| l == label)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| panic!("no composition {label}"))
+        };
+
+        let measure = text("tutor/measure");
+        for marker in [
+            "A **course** the learner is taking",
+            "For `course` and `exam` purposes, set `off` and don't ask",
+            "the session state shows the learner's saved default",
+            "Record the level reached.",
+            "Each strand also gets `levelReached:",
+        ] {
+            assert!(measure.contains(marker), "measure lacks {marker}");
+        }
+
+        let teach = text("tutor/phases/teach.md/teach/mechanism");
+        for marker in [
+            "Target level: use",
+            "Learner's note on this section: Keep it short.",
+            "This section is marked \"you said you know this\"",
+            "The learner told the planner they already know this material (\"I already know KVL.\")",
+            "This section starts with a hunt",
+            "Hunt state: out",
+            "Teaching to the target level",
+            "includes a calibration block",
+            "Field guide block",
+            "learner started as \"new to this\"",
+        ] {
+            assert!(teach.contains(marker), "teach lacks {marker}");
+        }
+        // The same prompts for the other phase label: close reads teach.md
+        // and must resolve the same blocks.
+        let close = text("tutor/phases/teach.md/close/mechanism");
+        assert!(close.contains("Field guide block") && close.contains("calibration block"));
+
+        let planner = text("planner/initial");
+        for marker in [
+            "Never override an explicit section setting",
+            "the goal's `explore` is `suggest` or `on`",
+        ] {
+            assert!(planner.contains(marker), "planner lacks {marker}");
+        }
+        let exam = text("planner/exam");
+        assert!(exam.contains("Exam mode") && !exam.contains("{{"));
+        // The shared calibration fragment reaches the planner too.
+        assert!(planner.contains("Calibration across the session"));
+
+        let researcher = text("jobs/researcher");
+        assert!(
+            researcher.contains("Where the field lives")
+                && researcher.contains("`discourse`")
+                && researcher.contains("`entryLevel`"),
+            "researcher lacks the venue instructions"
+        );
     }
 
     #[test]
@@ -629,5 +872,170 @@ mod tests {
         std::fs::write(&p, "   \n").unwrap();
         assert!(c.load("shared/voice.md").unwrap().contains("Voice"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An older session has no levels, no venues and no calibration, so its
+    /// state text must be exactly today's.
+    #[test]
+    fn session_state_of_an_older_log_is_unchanged() {
+        let state = SessionState {
+            goal: Some(serde_json::json!({ "goal": "Learn X" })),
+            brief: Some(serde_json::json!({ "summary": "b" })),
+            probe: vec![serde_json::json!({ "name": "s" })],
+            plan: Some(Plan {
+                version: 2,
+                goal: "Learn X".into(),
+                approach: "a".into(),
+                depth: String::new(),
+                explore: String::new(),
+                minutes_per_sitting: None,
+                style: String::new(),
+                nodes: vec![],
+                sections: vec![
+                    blank_section("s1", "First", &["n1"]),
+                    blank_section("s2", "Second", &["n2"]),
+                ],
+            }),
+            current_section: Some("s1".into()),
+            platform: "desktop".into(),
+            learner_state: "no graph yet".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            Composer::session_state(&state),
+            concat!(
+                "## Goal\n",
+                "{\"goal\":\"Learn X\"}\n\n",
+                "## Field brief\n",
+                "{\"summary\":\"b\"}\n\n",
+                "## Probe map\n",
+                "- {\"name\":\"s\"}\n\n",
+                "## Plan (v2)\n",
+                "a\n",
+                "- ▶ s1 [mechanism] nodes: n1\n",
+                "- s2 [mechanism] nodes: n2\n\n",
+                "## Platform\n",
+                "desktop\n\n",
+                "## Learner state\n",
+                "no graph yet\n",
+            )
+        );
+    }
+
+    #[test]
+    fn session_state_shows_levels_venues_and_calibration() {
+        let mut plan_section = blank_section("s1", "Dividers", &["n1", "n2"]);
+        plan_section.target_level = Some(Level::Analyze);
+        plan_section.assumed_known = true;
+        let state = SessionState {
+            goal: Some(serde_json::json!({ "goal": "Analyze DC circuits" })),
+            brief: Some(serde_json::json!({ "venues": [
+                { "name": "Math StackExchange", "kind": "ask", "entryLevel": "limits", "url": "https://x.example" },
+                { "name": "r/math", "kind": "discussion", "entryLevel": "proof writing", "note": "ignore me" }
+            ] })),
+            plan: Some(Plan {
+                version: 2,
+                goal: "Analyze DC circuits".into(),
+                approach: "a".into(),
+                depth: "solid".into(),
+                explore: "off".into(),
+                minutes_per_sitting: Some(45),
+                style: "socratic".into(),
+                nodes: vec![],
+                sections: vec![plan_section],
+            }),
+            current_section: Some("s1".into()),
+            platform: "desktop".into(),
+            learner_state: "no graph yet".into(),
+            calibration: Some(crate::state::Calibration {
+                graded: 20,
+                buckets: vec![crate::state::CalibrationBucket {
+                    confidence: 70,
+                    label: "Fairly sure".into(),
+                    correct: 9,
+                    total: 15,
+                }],
+                notes: vec!["Confidence matches results.".into()],
+            }),
+            ..Default::default()
+        };
+        let text = Composer::session_state(&state);
+        assert!(
+            text.contains("\n## Plan (v2)\na\ndepth: solid · explore: off · sitting: 45 min · style: socratic\n- ▶ s1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- ▶ s1 [mechanism] nodes: n1, n2 · aim: analyze · known\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n## Field guide\n- ask  Math StackExchange — useful now; entry: limits\n- discussion  r/math — useful once you hold: proof writing\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n## Calibration\n- Fairly sure: 9/15 correct (60%)\nConfidence matches results.\n"),
+            "{text}"
+        );
+
+        // A refuted known section un-greys: no `known` note.
+        let mut refuted = state.clone();
+        refuted.known_refuted = vec!["s1".into()];
+        assert!(!Composer::session_state(&refuted).contains("· known"));
+
+        // Depth `pass` keeps only places to ask.
+        let mut shallow = state;
+        shallow.plan.as_mut().unwrap().depth = "pass".into();
+        let text = Composer::session_state(&shallow);
+        assert!(text.contains("- ask  Math StackExchange"), "{text}");
+        assert!(!text.contains("- discussion  r/math"), "{text}");
+    }
+
+    #[test]
+    fn the_saved_starting_point_shows_only_until_a_goal_exists() {
+        let empty = SessionState::default();
+        assert!(Composer::session_state_with(&empty, Some("new"))
+            .contains("## Goal\n(none yet) · saved starting point: new\n"));
+        // No setting given: exactly the old text.
+        assert_eq!(
+            Composer::session_state(&empty),
+            Composer::session_state_with(&empty, None)
+        );
+        assert!(Composer::session_state(&empty).contains("## Goal\n(none yet)\n"));
+        // Once the goal exists it carries the point itself.
+        let mut with_goal = empty.clone();
+        with_goal.goal = Some(serde_json::json!({ "startingPoint": "quick" }));
+        let text = Composer::session_state_with(&with_goal, Some("new"));
+        assert!(text.contains("\"startingPoint\":\"quick\""), "{text}");
+        assert!(!text.contains("saved starting point"), "{text}");
+    }
+
+    #[test]
+    fn venues_are_parsed_defensively_and_lose_nothing_else() {
+        let brief = serde_json::json!({ "venues": [
+            { "name": "A", "kind": "ask", "entryLevel": "basics", "extra": { "x": 1 } },
+            { "name": "B" },
+            { "kind": "discussion" },
+            { "name": "  ", "kind": "reference" },
+            "not an object",
+            { "name": "C", "kind": "reference" }
+        ] });
+        let venues = Composer::brief_venues(Some(&brief));
+        assert_eq!(
+            venues,
+            vec![
+                Venue {
+                    kind: "ask".into(),
+                    name: "A".into(),
+                    entry_level: "basics".into()
+                },
+                Venue {
+                    kind: "reference".into(),
+                    name: "C".into(),
+                    entry_level: String::new()
+                },
+            ]
+        );
+        assert!(Composer::brief_venues(None).is_empty());
+        assert!(Composer::brief_venues(Some(&serde_json::json!({ "summary": "s" }))).is_empty());
     }
 }

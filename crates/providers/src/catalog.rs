@@ -3,12 +3,13 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
-use crate::{jwt_claims, workbuddy, Endpoint, ModelInfo, ProviderError, Wire};
+use crate::{claude_oauth, jwt_claims, workbuddy, Endpoint, ProviderError, Wire};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderId {
     Anthropic,
+    ClaudeCode,
     Openai,
     OpenaiCodex,
     Openrouter,
@@ -26,6 +27,8 @@ pub enum CredentialKind {
     ChatgptToken,
     /// Browser sign-in, or an API key from the account's key page.
     WorkbuddyAccount,
+    /// Claude Pro/Max subscription sign-in (Claude Code OAuth).
+    ClaudeSubscription,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +36,7 @@ pub enum CredentialKind {
 pub enum Credential {
     ApiKey { key: String },
     Workbuddy(workbuddy::Session),
+    ClaudeCode(claude_oauth::Session),
 }
 
 #[derive(Debug, Serialize)]
@@ -46,11 +50,11 @@ pub struct ProviderSpec {
     pub env_var: &'static str,
     pub credential: CredentialKind,
     pub key_url: Option<&'static str>,
-    /// Suggested model ids; any id the provider serves can be typed in.
-    pub models: &'static [&'static str],
 }
 
-const SPECS: [ProviderSpec; 7] = [
+/// Every provider serves its models from a listing endpoint; nothing is
+/// hardcoded here. `crate::models` fetches the list (see `docs/models.md`).
+const SPECS: [ProviderSpec; 8] = [
     ProviderSpec {
         id: ProviderId::Anthropic,
         name: "Anthropic",
@@ -59,7 +63,15 @@ const SPECS: [ProviderSpec; 7] = [
         env_var: "ANTHROPIC_API_KEY",
         credential: CredentialKind::ApiKey,
         key_url: Some("https://console.anthropic.com/settings/keys"),
-        models: &["claude-sonnet-4-5", "claude-opus-4-5"],
+    },
+    ProviderSpec {
+        id: ProviderId::ClaudeCode,
+        name: "Claude (subscription)",
+        wire: Wire::AnthropicMessages,
+        default_base_url: claude_oauth::BASE_URL,
+        env_var: "ANTHROPIC_OAUTH_TOKEN",
+        credential: CredentialKind::ClaudeSubscription,
+        key_url: None,
     },
     ProviderSpec {
         id: ProviderId::Openai,
@@ -69,7 +81,6 @@ const SPECS: [ProviderSpec; 7] = [
         env_var: "OPENAI_API_KEY",
         credential: CredentialKind::ApiKey,
         key_url: Some("https://platform.openai.com/api-keys"),
-        models: &["gpt-5.5", "gpt-5"],
     },
     ProviderSpec {
         id: ProviderId::OpenaiCodex,
@@ -79,7 +90,6 @@ const SPECS: [ProviderSpec; 7] = [
         env_var: "OPENAI_CODEX_OAUTH_TOKEN",
         credential: CredentialKind::ChatgptToken,
         key_url: None,
-        models: &["gpt-5.5"],
     },
     ProviderSpec {
         id: ProviderId::Openrouter,
@@ -89,7 +99,6 @@ const SPECS: [ProviderSpec; 7] = [
         env_var: "OPENROUTER_API_KEY",
         credential: CredentialKind::ApiKey,
         key_url: Some("https://openrouter.ai/settings/keys"),
-        models: &["deepseek/deepseek-chat", "anthropic/claude-sonnet-4.5"],
     },
     ProviderSpec {
         id: ProviderId::Deepseek,
@@ -99,7 +108,6 @@ const SPECS: [ProviderSpec; 7] = [
         env_var: "DEEPSEEK_API_KEY",
         credential: CredentialKind::ApiKey,
         key_url: Some("https://platform.deepseek.com/api_keys"),
-        models: &["deepseek-chat", "deepseek-reasoner"],
     },
     ProviderSpec {
         id: ProviderId::Zai,
@@ -109,7 +117,6 @@ const SPECS: [ProviderSpec; 7] = [
         env_var: "ZAI_API_KEY",
         credential: CredentialKind::ApiKey,
         key_url: Some("https://z.ai/manage-apikey/apikey-list"),
-        models: &["glm-4.6"],
     },
     ProviderSpec {
         id: ProviderId::Workbuddy,
@@ -119,14 +126,13 @@ const SPECS: [ProviderSpec; 7] = [
         env_var: "WORKBUDDY_API_KEY",
         credential: CredentialKind::WorkbuddyAccount,
         key_url: Some(workbuddy::KEYS_URL),
-        // Catalog is per-account; fetched live by `workbuddy::list_models`.
-        models: &[],
     },
 ];
 
 impl ProviderId {
-    pub const ALL: [ProviderId; 7] = [
+    pub const ALL: [ProviderId; 8] = [
         ProviderId::Anthropic,
+        ProviderId::ClaudeCode,
         ProviderId::Openai,
         ProviderId::OpenaiCodex,
         ProviderId::Openrouter,
@@ -141,51 +147,63 @@ impl ProviderId {
 
     pub fn credential_from_env(self) -> Option<Credential> {
         let key = std::env::var(self.spec().env_var).ok()?;
-        let key = key.trim();
-        (!key.is_empty()).then(|| Credential::ApiKey {
-            key: key.to_owned(),
-        })
+        let key = key.trim().to_owned();
+        if key.is_empty() {
+            return None;
+        }
+        // ANTHROPIC_OAUTH_TOKEN is a subscription bearer, not an API key.
+        // It has no refresh token, so give it a long, non-refreshing expiry.
+        if self == ProviderId::ClaudeCode {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            return Some(Credential::ClaudeCode(claude_oauth::Session {
+                access_token: key,
+                refresh_token: String::new(),
+                expires_at: now + 30 * 24 * 3600,
+                account: None,
+            }));
+        }
+        Some(Credential::ApiKey { key })
     }
 
-    /// Static model suggestions (WorkBuddy's come from its live catalog).
-    pub fn suggested_models(self) -> Vec<ModelInfo> {
-        self.spec()
-            .models
-            .iter()
-            .map(|id| ModelInfo::named(id))
-            .collect()
-    }
-
-    pub fn endpoint(
-        self,
-        credential: &Credential,
-        base_url: Option<&str>,
-        conversation_id: &str,
-    ) -> Result<Endpoint, ProviderError> {
-        let spec = self.spec();
-        let base = base_url
+    /// The base URL in use: the learner's override, else the provider's.
+    pub fn base_url(self, override_url: Option<&str>) -> String {
+        override_url
             .map(str::trim)
             .filter(|b| !b.is_empty())
-            .unwrap_or(spec.default_base_url)
-            .trim_end_matches('/');
-        if self == ProviderId::Workbuddy {
-            return workbuddy::endpoint(credential, base, conversation_id);
+            .unwrap_or(self.spec().default_base_url)
+            .trim_end_matches('/')
+            .to_owned()
+    }
+
+    /// The models.dev provider key that describes this provider's models
+    /// (public metadata for context window, vision, efforts). `None` when no
+    /// public catalog covers it.
+    pub fn catalog_key(self) -> Option<&'static str> {
+        match self {
+            ProviderId::Anthropic | ProviderId::ClaudeCode => Some("anthropic"),
+            ProviderId::Openai | ProviderId::OpenaiCodex => Some("openai"),
+            ProviderId::Openrouter => Some("openrouter"),
+            ProviderId::Deepseek => Some("deepseek"),
+            ProviderId::Zai => Some("zai"),
+            ProviderId::Workbuddy => None,
         }
+    }
+
+    /// Auth headers for a keyed provider, without wire specifics (no
+    /// `Accept`, no path). WorkBuddy and the Claude subscription have their
+    /// own header sets in their modules.
+    pub fn auth_headers(self, credential: &Credential) -> Result<HeaderMap, ProviderError> {
+        let spec = self.spec();
         let Credential::ApiKey { key } = credential else {
             return Err(ProviderError::Config(format!(
                 "{} needs an API key",
                 spec.name
             )));
         };
-
         let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let path = match spec.wire {
-            Wire::OpenaiChat => "/chat/completions",
-            Wire::OpenaiResponses => "/responses",
-            Wire::AnthropicMessages => "/messages",
-        };
         match self {
             ProviderId::Anthropic => {
                 insert(&mut headers, "x-api-key", key)?;
@@ -217,7 +235,7 @@ impl ProviderId {
                     AUTHORIZATION.as_str(),
                     &format!("Bearer {key}"),
                 )?;
-                insert(&mut headers, "X-Title", "Learning Harness")?;
+                insert(&mut headers, "X-Title", "P's Learning Harness")?;
             }
             _ => insert(
                 &mut headers,
@@ -225,10 +243,36 @@ impl ProviderId {
                 &format!("Bearer {key}"),
             )?,
         }
+        Ok(headers)
+    }
+
+    pub fn endpoint(
+        self,
+        credential: &Credential,
+        base_url: Option<&str>,
+        conversation_id: &str,
+    ) -> Result<Endpoint, ProviderError> {
+        let spec = self.spec();
+        let base = self.base_url(base_url);
+        if self == ProviderId::Workbuddy {
+            return workbuddy::endpoint(credential, &base, conversation_id);
+        }
+        if self == ProviderId::ClaudeCode {
+            return claude_oauth::endpoint(credential, &base, conversation_id);
+        }
+        let mut headers = self.auth_headers(credential)?;
+        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let path = match spec.wire {
+            Wire::OpenaiChat => "/chat/completions",
+            Wire::OpenaiResponses => "/responses",
+            Wire::AnthropicMessages => "/messages",
+        };
         Ok(Endpoint {
             wire: spec.wire,
             url: format!("{base}{path}"),
             headers,
+            claude_code: false,
         })
     }
 }

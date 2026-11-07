@@ -76,6 +76,12 @@ fn replay_message(m: &crate::Message) -> Vec<Value> {
                     "output": content,
                 }));
             }
+            ContentBlock::Image { media_type, data } => {
+                text_parts.push(json!({
+                    "type": "input_image",
+                    "image_url": format!("data:{media_type};base64,{data}"),
+                }));
+            }
             ContentBlock::Native { wire, raw } if *wire == Wire::OpenaiResponses => {
                 // Replay the whole reasoning/output item verbatim.
                 out.push(raw.clone());

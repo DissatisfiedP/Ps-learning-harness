@@ -1,0 +1,30 @@
+# Catalogue entry, not built (docs/plugins.md §11). Nothing loads this
+# directory: it is not a folder plugin, not in a registry and not used by any
+# test. Native plugin: it needs the `exec` permission, which no Luau api 1
+# package may declare (docs/plugins.md §8.4), so it will be an in-tree Rust
+# type implementing `plugins::Plugin` (§12) with this manifest. Tool `entry`
+# names the Rust method; there is no src/main.luau.
+id = "cas"
+version = "0.0.0"
+api = 1
+title = "Computer algebra check"
+description = "Runs a short SymPy program so the tutor can check its own derivations and numbers."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = ["exec"]
+use_when = "Math-heavy sections (algebra, calculus, linear algebra, circuit equations, physics formulas) where a wrong sign or factor in your own working would mislead the learner."
+avoid_when = "Sections with little symbolic or numeric work."
+cost = "Runs SymPy in Pyodide; first use downloads the runtime."
+
+# The old brief ran in measure, teach and practice.
+
+[[tool]]
+name = "cas_check"
+description = "Run a short SymPy program and return its printed output. For checking your own working; never shown to the learner in place of reasoning."
+agents = ["tutor", "practice"]
+input = "schemas/cas_check.json"
+entry = "check"
+artifact = false
+
+[prompts]
+tutor = "prompts/tutor.md"

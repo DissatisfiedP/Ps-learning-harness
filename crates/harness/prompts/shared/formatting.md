@@ -8,4 +8,5 @@ Everything you write renders as Markdown. The learner reads documents, not chat 
 {{#mermaid}}
 - Diagrams: a fenced `mermaid` block renders as a diagram. Use one when structure, flow or relationships are the point. Quote node labels that contain spaces or symbols: `A["x = v t"]`.
 {{/mermaid}}
+- Figures from tools come back as an **artifact handle**. Place each artifact once, with `![short description](artifact:<id>)`, next to the sentence that refers to it (not in a list of figures at the end). The alt text is the figure's accessible name, so describe what it shows. Refer to its parts by their labels ("move $R_2$"), not by position. If you don't reference an artifact, the app shows it after your message; don't duplicate it.
 - Keep it readable on a phone screen: short paragraphs, no wide tables when a list works.

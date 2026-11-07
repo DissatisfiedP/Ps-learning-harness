@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IPC escape probe</title>
+<style>
+  body { margin: 0; padding: 8px; font: 13px/1.4 system-ui, sans-serif; color: var(--ink, #1c1b19); background: var(--paper, #fff); }
+  li.escaped { color: var(--danger, #b00020); font-weight: 600; }
+  li.sent { color: var(--ink-2, #45423d); }
+</style>
+</head>
+<body>
+<p id="summary">Probing…</p>
+<ol id="list"></ol>
+<script>
+// Every way out of a plugin view that we know of. Each attempt ends as
+// - "blocked": it threw, was refused, timed out or found nothing;
+// - "escaped": it reached something it must not (a bridge, the parent's
+//   document, a network response, a new window);
+// - "sent": fire-and-forget, so only the receiving side can tell. The
+//   headless runner checks its server for the `/leak/<name>` request; in a
+//   manual run, watch the Web Inspector's Network panel.
+// Every URL carries a `/leak/` marker. The destructive `remove_plugin`
+// command is the payload of every IPC attempt, so a success is unmistakable.
+(async () => {
+  const APP = ['tauri://localhost', 'http://tauri.localhost'];
+  const IPC = ['ipc://localhost/remove_plugin', 'http://ipc.localhost/remove_plugin'];
+  const SELF = 'http://pluginview.localhost';
+  const NAV_TARGET = 'http://tauri.localhost/leak/';
+  const results = [];
+  const record = (name, outcome, detail) => results.push({ name, outcome, detail: String(detail ?? '').slice(0, 120) });
+  const why = (e) => (e && (e.name || e.message)) || String(e);
+  const timeout = (p, ms = 1500) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+
+  // A value that must not exist (or must not be reachable).
+  const absent = (name, get) => {
+    try {
+      const v = get();
+      if (v === undefined || v === null) record(name, 'blocked', 'undefined');
+      else record(name, 'escaped', typeof v);
+    } catch (e) {
+      record(name, 'blocked', why(e));
+    }
+  };
+  // An operation that must fail: a throw, a rejection or a timeout.
+  const fails = async (name, run) => {
+    try {
+      const v = await timeout(Promise.resolve().then(run));
+      record(name, 'escaped', v);
+    } catch (e) {
+      record(name, 'blocked', why(e));
+    }
+  };
+  // Fire-and-forget: blocked only if it throws; otherwise the receiver judges.
+  const quiet = (name, run) => {
+    try {
+      const v = run();
+      record(name, v === false || v === null ? 'blocked' : 'sent', v);
+    } catch (e) {
+      record(name, 'blocked', why(e));
+    }
+  };
+  // A bridge function: escaped if it exists and accepts a call.
+  const bridge = (name, get, args) => {
+    let fn;
+    try {
+      fn = get();
+    } catch (e) {
+      return record(name, 'blocked', why(e));
+    }
+    if (typeof fn !== 'function') return record(name, 'blocked', 'not reachable');
+    try {
+      fn(...args);
+      record(name, 'escaped', 'call accepted');
+    } catch (e) {
+      record(name, 'blocked', why(e));
+    }
+  };
+
+  // 1. The Tauri bridge in this frame (every platform's name for it).
+  absent('window.__TAURI__', () => window.__TAURI__);
+  absent('window.__TAURI_INTERNALS__', () => window.__TAURI_INTERNALS__);
+  absent('window.__TAURI_IPC__', () => window.__TAURI_IPC__);
+  absent('window.__TAURI_POST_MESSAGE__', () => window.__TAURI_POST_MESSAGE__);
+  absent('window.isTauri', () => window.isTauri);
+  bridge('window.ipc.postMessage', () => window.ipc.postMessage.bind(window.ipc), ['{"cmd":"remove_plugin"}']);
+  bridge('window.webkit.messageHandlers.ipc.postMessage', () => {
+    const h = window.webkit.messageHandlers.ipc;
+    return h.postMessage.bind(h);
+  }, ['{"cmd":"remove_plugin"}']);
+  bridge('window.chrome.webview.postMessage', () => {
+    const w = window.chrome.webview;
+    return w.postMessage.bind(w);
+  }, ['{"cmd":"remove_plugin"}']);
+
+  // 2. The parent (the app page).
+  await fails('parent.__TAURI__.core.invoke', () => window.parent.__TAURI__.core.invoke('remove_plugin', { id: 'circuit' }));
+  await fails('parent.__TAURI_INTERNALS__.invoke', () => window.parent.__TAURI_INTERNALS__.invoke('remove_plugin', { id: 'circuit' }));
+  bridge('parent.ipc.postMessage', () => window.parent.ipc.postMessage.bind(window.parent.ipc), ['{"cmd":"remove_plugin"}']);
+  bridge('parent.webkit.messageHandlers.ipc.postMessage', () => {
+    const h = window.parent.webkit.messageHandlers.ipc;
+    return h.postMessage.bind(h);
+  }, ['{"cmd":"remove_plugin"}']);
+  absent('parent.document', () => window.parent.document.title);
+  absent('parent.localStorage', () => window.parent.localStorage);
+  absent('parent.location.href', () => window.parent.location.href);
+  absent('top.location.href', () => window.top.location.href);
+  absent('frameElement', () => window.frameElement);
+  // A message shaped like Tauri's own IPC payload: the host must ignore it.
+  quiet('forged IPC message to parent', () => window.parent.postMessage({ cmd: 'remove_plugin', callback: 1, error: 2, payload: { id: 'circuit' } }, '*'));
+
+  // 3. The view bridge itself: names outside `calls` are refused.
+  const bridgeCall = (fn) => new Promise((resolve, reject) => {
+    const id = 'probe-' + fn;
+    const onResult = (event) => {
+      const m = event.data;
+      if (event.source !== window.parent || !m || m.type !== 'result' || m.id !== id) return;
+      window.removeEventListener('message', onResult);
+      m.ok ? resolve(m.value) : reject(new Error(m.error));
+    };
+    window.addEventListener('message', onResult);
+    window.parent.postMessage({ protocol: 1, type: 'call', id, fn, args: { id: 'circuit' } }, '*');
+  });
+  await fails('bridge call remove_plugin', () => bridgeCall('remove_plugin'));
+  await fails('bridge call __proto__', () => bridgeCall('__proto__'));
+
+  // 4. Storage of this (opaque) origin.
+  absent('localStorage', () => window.localStorage);
+  absent('sessionStorage', () => window.sessionStorage);
+  absent('document.cookie', () => ((document.cookie = 'probe=1'), document.cookie || null));
+  await fails('indexedDB.open', () => new Promise((ok, no) => {
+    const r = indexedDB.open('probe');
+    r.onsuccess = () => ok('opened');
+    r.onerror = () => no(r.error);
+  }));
+  await fails('caches.open', () => caches.open('probe').then(() => 'opened'));
+
+  // 5. Network.
+  const net = [];
+  for (const origin of APP) net.push(fails(`fetch ${origin}`, () => fetch(`${origin}/leak/fetch`).then((r) => r.status)));
+  for (const url of IPC) net.push(fails(`fetch ${url}`, () => fetch(url, { method: 'POST', body: '{"id":"circuit"}' }).then((r) => r.status)));
+  net.push(fails('fetch own origin', () => fetch(`${SELF}/leak/self`).then((r) => r.status)));
+  net.push(fails('fetch https', () => fetch('https://example.com/').then((r) => r.status)));
+  net.push(fails('XMLHttpRequest', () => new Promise((ok, no) => {
+    const x = new XMLHttpRequest();
+    x.open('GET', 'http://tauri.localhost/leak/xhr');
+    x.onload = () => ok(x.status);
+    x.onerror = () => no(new Error('xhr error'));
+    x.send();
+  })));
+  net.push(fails('WebSocket', () => new Promise((ok, no) => {
+    const w = new WebSocket('ws://tauri.localhost/leak/ws');
+    w.onopen = () => ok('open');
+    w.onerror = () => no(new Error('ws error'));
+  })));
+  net.push(fails('EventSource', () => new Promise((ok, no) => {
+    const s = new EventSource('http://tauri.localhost/leak/sse');
+    s.onopen = () => ok('open');
+    s.onerror = () => { s.close(); no(new Error('sse error')); };
+  })));
+  net.push(fails('image load', () => new Promise((ok, no) => {
+    const i = new Image();
+    i.onload = () => ok('loaded');
+    i.onerror = () => no(new Error('img error'));
+    i.src = 'http://tauri.localhost/leak/img';
+  })));
+  net.push(fails('script element', () => new Promise((ok, no) => {
+    const s = document.createElement('script');
+    s.onload = () => ok('loaded');
+    s.onerror = () => no(new Error('script error'));
+    s.src = 'http://tauri.localhost/leak/script.js';
+    document.head.append(s);
+  })));
+  net.push(fails('dynamic import', () => import('http://tauri.localhost/leak/import.js').then(() => 'imported')));
+  net.push(fails('Worker', () => new Promise((ok, no) => {
+    const w = new Worker('data:text/javascript,postMessage(1)');
+    w.onmessage = () => ok('ran');
+    w.onerror = () => no(new Error('worker error'));
+  })));
+  await Promise.all(net);
+  quiet('sendBeacon', () => navigator.sendBeacon('http://tauri.localhost/leak/beacon', 'leak'));
+  quiet('CSS background url', () => {
+    const d = document.createElement('div');
+    d.style.backgroundImage = 'url(http://tauri.localhost/leak/css)';
+    d.style.width = d.style.height = '1px';
+    document.body.append(d);
+    return true;
+  });
+  quiet('link prefetch', () => {
+    const l = document.createElement('link');
+    l.rel = 'prefetch';
+    l.href = 'http://tauri.localhost/leak/prefetch';
+    document.head.append(l);
+    return true;
+  });
+  quiet('nested iframe', () => {
+    const f = document.createElement('iframe');
+    f.src = 'http://tauri.localhost/leak/frame';
+    document.body.append(f);
+    return true;
+  });
+
+  // 6. Code from strings (the view CSP has no 'unsafe-eval').
+  await fails('eval', () => eval('"evaluated"'));
+  await fails('new Function', () => new Function('return "evaluated"')());
+  await fails('setTimeout(string)', () => new Promise((ok, no) => {
+    window.__probeTimer = null;
+    try {
+      setTimeout('window.__probeTimer = "evaluated"', 0);
+    } catch (e) {
+      return no(e);
+    }
+    setTimeout(() => (window.__probeTimer ? ok(window.__probeTimer) : no(new Error('not run'))), 100);
+  }));
+
+  // 7. Navigation away from the frame.
+  quiet('window.open', () => window.open(`${NAV_TARGET}open`));
+  quiet('top navigation', () => { window.top.location.href = `${NAV_TARGET}top`; return true; });
+  quiet('link target=_top', () => {
+    const a = document.createElement('a');
+    a.href = `${NAV_TARGET}anchor`;
+    a.target = '_top';
+    document.body.append(a);
+    a.click();
+    return true;
+  });
+  quiet('form post', () => {
+    const f = document.createElement('form');
+    f.method = 'post';
+    f.action = `${NAV_TARGET}form`;
+    f.target = '_blank';
+    document.body.append(f);
+    f.submit();
+    return true;
+  });
+
+  // Report: to the page as a `probe` message (the headless runner reads it;
+  // the view host ignores unknown types), as a `state` line (lands in the
+  // session log in a manual run), and on screen.
+  const escaped = results.filter((r) => r.outcome === 'escaped');
+  const summary = `ipc-probe: ${results.length} attempts, ${escaped.length} escaped` + (escaped.length ? `: ${escaped.map((r) => r.name).join(', ')}` : '');
+  window.parent.postMessage({ protocol: 1, type: 'probe', results }, '*');
+  window.parent.postMessage({ protocol: 1, type: 'state', summary: summary.slice(0, 500) }, '*');
+  document.getElementById('summary').textContent = summary + '. "sent" rows need the receiving side checked.';
+  const list = document.getElementById('list');
+  for (const r of results) {
+    const li = document.createElement('li');
+    li.className = r.outcome;
+    li.textContent = `${r.outcome}: ${r.name}${r.detail ? ` (${r.detail})` : ''}`;
+    list.append(li);
+  }
+  window.parent.postMessage({ protocol: 1, type: 'resize', height: document.body.scrollHeight + 16 }, '*');
+
+  // Last, because success replaces this document: navigate the frame itself
+  // to the app origin. The app CSP's frame-src must refuse it.
+  setTimeout(() => { location.href = `${NAV_TARGET}self`; }, 200);
+})();
+</script>
+</body>
+</html>

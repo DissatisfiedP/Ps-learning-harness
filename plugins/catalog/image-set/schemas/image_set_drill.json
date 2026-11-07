@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "setId": {
+      "type": "string"
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "n": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "format": {
+      "type": "string",
+      "enum": [
+        "classify",
+        "same-or-different",
+        "odd-one-out"
+      ]
+    },
+    "interleave": {
+      "type": "boolean",
+      "const": true
+    }
+  },
+  "required": [
+    "setId",
+    "n",
+    "format",
+    "interleave"
+  ],
+  "additionalProperties": false
+}

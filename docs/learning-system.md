@@ -1,6 +1,6 @@
 # Learning system: target levels, starting point, plan controls, hunts, field guide, calibration
 
-Status: **design, not built.** Written 2026-11-06. This document is the source of truth for the six features below. A reviewing agent should be able to check an implementation against it section by section; §10 is the checklist.
+Status: **built 2026-11-07.** Written 2026-11-06 as the design; the code now exists in `crates/harness` (records, ops, tools, gates), `crates/harness/prompts` (each feature behind a template flag, all on) and `ui/`. This document is still the source of truth for behaviour. §10 records the closing review and what remains open; `docs/learning-system-build.md` records the mechanism choices the design left open.
 
 ## 0. Scope: learning system, not technical architecture
 
@@ -15,7 +15,7 @@ Everything here changes **how the harness teaches**:
 - the agent runtime, op-log storage and replay;
 - the model roles;
 - sync (still not built);
-- the plugin system (still scaffolding only; no real plugins are part of this work).
+- the plugin system (built separately since this was written; no catalogue plugin is part of this work).
 
 The implementation does touch code, but only by **extending existing mechanisms**:
 - new fields on existing records (`goal`, `plan` sections, `question_ask`, `probe_done`, scope brief);
@@ -273,7 +273,7 @@ Before a section is taught, the learner may go on a **hunt**: an assignment to f
 ### When a hunt can happen
 **Never decided by the system alone:**
 - **Explore setting** (goal record; editable on the plan card): `off` / `suggest` / `on`.
-  - `off` is the default, and isn't asked about, for `purpose: "course" | "exam"`.
+  - `off` is the default, and isn't asked about, for `purpose: "course" | "exam"`. Those goals never get hunts at all: `goal_set` forces explore `off`, and `plan_write` refuses a section that marks a hunt available whatever `explore` the plan itself declares (the refusal names the purpose).
   - For curiosity, project and work goals, the tutor asks once at goal time.
   - `on` only means available hunts are shown expanded on the plan card. It never enables one.
 - **The planner may mark a section `hunt.available`,** with a one-line `reason`, only when **all four** hold:
@@ -300,7 +300,7 @@ hunt_send { sectionId,
   - anything surprising;
   - practical tips.
 
-The learner sees the card in the flow. It offers a return form (notes, links, files), **"I'm back"**, and **"Skip hunt"**. There's no deadline; the session waits, and the learner can still message the tutor meanwhile.
+The learner sees the card in the flow. It offers a return form (notes, links, files), **"I'm back"**, and **"Skip hunt"**. There's no deadline; the session waits, and the learner can still message the tutor meanwhile. Once teaching has left the hunt's section the card stays in the flow as history, showing its own finished state and no form: a hunt is driven only while its section is the current one.
 
 ### What the learner brings back
 **Anything:** notes, links, files, half-remembered tips, claims with or without sources. Requiring sources would filter out exactly the knowledge the learner actually picked up, and learners don't remember which thread a trick came from.
@@ -345,8 +345,9 @@ A learner can start a new session from any frontier item. This is how hunts open
 
 ### Acceptance criteria
 - `goal_set.explore` defaults to `off` for course and exam goals without asking.
-- `plan_write` with `hunt.available` while explore is off, or with `hunt.enabled` at all, is refused.
+- `plan_write` with `hunt.available` while explore is off, or with `hunt.enabled` at all, is refused; on a course or exam goal it is refused whatever the plan's `explore` says, and the message names the purpose.
 - `hunt_send` is refused unless the current section's hunt is enabled.
+- Every hunt keeps its own state: a card in an earlier section stays finished, and its return or skip is refused.
 - "Skip hunt" works before and during a hunt, and teaching starts normally.
 - The return form accepts notes, links and files, none required.
 - `debrief_record` is required before the first `question_ask` of a hunted section (the gate refuses teaching questions until the debrief is recorded, or the hunt was skipped).
@@ -374,15 +375,24 @@ At session close the learner gets a **field guide**: the venues useful now, and 
 - **Purpose-aware.** With `depth: "pass"`, the guide shows only `ask` venues: where to get help, nothing else.
 
 ### Where it lives
-- **Now:** venues are stored with the session's scope brief (`brief` op) and shown in the close and in the Map page's plan group, under "Where the field lives".
-- **When the knowledge graph exists:** venues attach to **topics**, so the guide grows across sessions and is visible in the topic tree.
+- **The record** lives on **topics** in the knowledge graph: the builder job submits a `venue` op naming the topic
+  whose material the venue serves (`crates/harness/prompts/jobs/graph-builder.md` §6), and the read model aggregates
+  each topic's own venues with its descendants'. A second session on the same topic refines the row instead of
+  copying it, so the guide grows across sessions (`docs/graph-build.md`).
+- **The Map** shows it from the graph, not from a session: a closed "Where the field lives" panel lists the topics
+  that have venues (row → jump to the topic), and an idea's card lists its topic's own plus descendants' venues
+  grouped Ask / Discussion / Reference (`docs/ui-design.md` §7.6, §7.7.6). With no venues in the graph, neither
+  renders.
+- **The close** remains the session's own judgement: it lists the venues *this session's brief* found, split into
+  useful now / later by the rule below (`docs/ui-design.md` §7.7.5).
 
-A venue is "useful now" when its `entryLevel` is covered by the learner's held nodes. Before the graph exists, the tutor judges this from the session.
+A venue is "useful now" when its `entryLevel` is covered by what the learner holds. The graph cannot compute that
+yet — `entryLevel` is a phrase ("op-amp basics"), not a level id — so the tutor judges the session's brief, and the
+Map shows the topic's venues without a now/later split.
 
 ### Acceptance criteria
 - Scope briefs carry `discourse` per strand and a `venues` list, each venue with a kind and an entry level.
-- The close lists the venues useful now and those coming up; with `depth: "pass"`, only `ask` venues are listed.
-- The Map page shows the guide per plan group.
+- The Map shows the guide per **topic** (own plus descendants' venues), and the close lists the session's venues useful now and those coming up; with `depth: "pass"`, only `ask` venues are listed.
 
 ---
 
@@ -398,13 +408,13 @@ From the confidence the learner already gives on every answer, show them how wel
 - The data already exists. `question_ask` answers carry confidence in five buckets (10/30/50/70/90, `docs/ui-design.md` §7.2.4) plus a verdict.
 
 ### Behavior
-- **Computed by code** from ops: per plan (per topic once the graph exists), per confidence bucket, the share of correct answers.
+- **Computed by code** from ops: per plan (per topic once per-topic calibration is built — it is not yet), per confidence bucket, the share of correct answers. **Every graded answer counts**, probe answers included: a probe answer has no node, and that only keeps it out of the per-node learner model, not out of calibration. An "I don't know" answer carries no confidence, so it never counts.
 - **Threshold:** shown only once a plan has **20** graded answers with confidence. Within that, report only buckets with **at least 5** answers.
 - **What's said:**
   - name a bucket only when accuracy differs from the bucket's value by **15 percentage points or more**;
   - otherwise, one line saying confidence matches results;
   - always observational, never moralizing.
-- **Where:** the close (tutor, from `session_state.calibration`), the Map page's plan group, and on request.
+- **Where:** the close (tutor, from `session_state.calibration`), the Map page's block under the counts, and on request.
 - The tutor also uses it while teaching: an overconfident learner gets more checks before sections close; an underconfident one gets told when they were right.
 
 ### Acceptance criteria
@@ -425,7 +435,7 @@ From the confidence the learner already gives on every answer, show them how wel
 | Plan section | `targetLevel`; `assumedKnown?: boolean`; `knownNote?: string`; `hunt?: { available: boolean, reason, enabled: boolean }`; `learnerNote?: string` |
 | Plan (whole) | `depth`, `explore`, `minutesPerSitting`, `style` (mirrors of the learner's controls) |
 | Scope brief | strands gain `discourse`; top-level `venues[]` |
-| Graph node `kind` (when the graph exists) | adds `heuristic` with `attribution` and `scope`; provenance `source.type` adds `hunt` (with `unverified: true` until the debrief marks the claim correct) |
+| Graph node `kind` | the graph exists; `heuristic` with `attribution` and `scope` is not built yet; provenance `kind` adds `hunt` (with `unverified: true` until the debrief marks the claim correct) when it is |
 | `Outcome` (when practice exists) | `level` |
 | Device settings | `startingPoint` default |
 
@@ -460,7 +470,7 @@ The frontier lives in `frontier.jsonl`, not in a session.
 1. `section_done`: also needs ≥ 1 passing check in the section at `level ≥ targetLevel`.
 2. `section_done` for `assumedKnown` sections: one passing check at `≥ targetLevel` is enough; after `knownRefuted`, rule 1 and the normal per-node rule apply.
 3. `probe_done`: zero questions allowed when `startingPoint: "new"`; at most five when `"quick"`. It still needs the brief.
-4. `plan_write`: refused if any section sets `hunt.enabled`, or `hunt.available` while explore is `off`.
+4. `plan_write`: refused if any section sets `hunt.enabled`, or `hunt.available` while explore is `off` — and refused on a `course` or `exam` goal whatever the plan's `explore` says (§5).
 5. `hunt_send`: refused unless the current section's hunt is enabled.
 6. Teach-phase `question_ask` in a hunted section: refused until a `debrief` op exists for that hunt, or the hunt was skipped.
 7. Nothing from a hunt or debrief counts toward any `section_done` condition.
@@ -501,39 +511,105 @@ The frontier lives in `frontier.jsonl`, not in a session.
 
 Check each item against code and ops, not against UI screenshots alone.
 
+**Closing review, 2026-11-07.** Every box below was checked against the code and the op logs
+(unit tests, the scripted end-to-end tests in `crates/harness/tests/`) and, for the surfaces, in
+headless Chromium against a mocked bridge. Ticked = met; the evidence is in the parentheses.
+What could not be settled is listed after the checklist as a known gap, not deleted.
+
+**Follow-up pass, 2026-11-07.** A fresh-eyes review of the build found four acceptance-criteria
+defects, now fixed with tests: `level` was missing from the teach `question_ask` schema; a plan could
+reintroduce hunts on a course or exam goal; `session_state.hunt` had no per-hunt state, so an earlier
+section's hunt card read as live; calibration dropped probe verdicts. The bullets they touch cite the
+new evidence.
+
 **Levels**
-- [ ] `levels` flag on; `targetLevel` on every section; `level` on every probe and check question.
-- [ ] `section_done` refused without a passing check at target level; the error names the level.
-- [ ] Highest level per node derived from ops, not stored; Map shows "Reached · Aim".
-- [ ] No level stored on graph nodes or edges.
+- [x] `levels` flag on; `targetLevel` on every section; `level` on every probe and check question.
+  (`agent.rs:341` sets the flag; `question_ask` refuses a probe or check without a level, `agent.rs:2549`, and both phase schemas list `level` as required, so the model sees the requirement — `tools.rs` `question_ask`, test `goal_and_question_schemas_carry_the_learning_system_fields`; `probe_done` carries `levelReached`, `tools.rs` schema; the plan schema offers `targetLevel` on each section, `tools.rs:363`, and `check_plan` refuses an unknown one.)
+- [x] `section_done` refused without a passing check at target level; the error names the level.
+  (`close_problems`, `agent.rs:2804`; `state.rs:449`; test `section_done_needs_a_passing_check_at_the_target_level`.)
+- [x] Highest level per node derived from ops, not stored; Map shows "Reached · Aim".
+  (`replay.rs` `record_verdict` + `node_levels` test; `ui/map.js:469`; verified in Chromium: the idea's description read "Reached: Use · Aim: Analyze".)
+- [x] No level stored on graph nodes or edges. (`knowledge.rs` has no level field.)
 
 **Starting point**
-- [ ] `new` → zero probe questions, `probe_done` succeeds after the brief; `quick` → ≤ 5 probe questions.
-- [ ] Default persisted in settings and used on the next session.
+- [x] `new` → zero probe questions, `probe_done` succeeds after the brief; `quick` → ≤ 5 probe questions.
+  (`gate_question`/`probe_done`, `agent.rs:2549`, `973`; tests `starting_point_new_refuses_probe_questions_and_quick_limits_them` and `a_new_learner_is_not_probed_and_the_plan_is_built_from_the_brief`.)
+- [x] Default persisted in settings and used on the next session.
+  (`config.rs` `startingPoint`; `agent.rs:859` fills it into `goal_set`; test `a_course_goal_normalises_explore_depth_and_starting_point`; Settings group sends `set_starting_point`, verified in Chromium.)
 
 **Plan controls**
-- [ ] "⋯" hides all controls by default; edits batch; one `planEdit` per send; Approve disabled while edits are pending.
-- [ ] "Parts I already know" → split, greyed known section; one check closes it; a miss writes `knownRefuted`, no planner job, normal gate after.
-- [ ] `plan_ask` renders on the card and resumes the planner.
-- [ ] Explicit section settings survive later depth/style changes.
+- [x] "⋯" hides all controls by default; edits batch; one `planEdit` per send; Approve disabled while edits are pending.
+  (`ui/cards.js::planCard`; test `edit_plan_writes_one_op_and_one_planner_job`; verified in Chromium: four closed panels, one `edit_plan` with the flat edits object, no Approve button and the primary reading "Send changes".)
+- [x] "Parts I already know" → split, greyed known section; one check closes it; a miss writes `knownRefuted`, no planner job, normal gate after.
+  (the split is the planner's job from the `planEdit` request: `PLAN_EDIT_RULES`, `agent.rs`; the card greys `assumedKnown`, `ui/cards.js`; tests `a_known_section_closes_on_one_check_at_its_target_level`, `a_missed_check_refutes_the_known_section`; browser: known greyed, refuted normal.)
+- [x] `plan_ask` renders on the card and resumes the planner.
+  (`tools.rs` `plan_ask`; `Harness::answer_plan_question`; test `a_planner_question_pauses_the_plan_and_the_answer_resumes_it`; browser: the question above the sections, the answer sent, the block locked.)
+- [x] Explicit section settings survive later depth/style changes.
+  (instruction in `planner/base.md:124` and in the job's own `PLAN_EDIT_RULES`, so it does not depend on the prompt's flag; planner behaviour, so not machine-checkable — see the gaps.)
 
 **Hunts**
-- [ ] Explore defaults off, unasked, for course and exam goals.
-- [ ] Planner can't enable hunts; can't mark them available with explore off.
-- [ ] Hunt card has question, where to look, what to bring back; skip works before and during.
-- [ ] Return accepts notes, links, files, nothing required.
-- [ ] Debrief recorded before teaching questions; claims sorted into the five verdicts; off-route items in `frontier.jsonl`.
-- [ ] No hunt or debrief op counts toward `section_done`.
+- [x] Explore defaults off, unasked, for course and exam goals.
+  (code forces `off` for `course`/`exam`, `agent.rs:855`; `measure.md` says "set `off` and don't ask"; test `a_course_goal_normalises_explore_depth_and_starting_point`.)
+- [x] A course or exam goal never gets hunts, even when the plan declares its own explore on.
+  (`validate_plan` compares the section's hunt against the goal's `purpose`, not only the plan's `explore`, `tools.rs::goal_purpose`; test `a_course_or_exam_goal_never_gets_a_hunt` and e2e `a_course_goal_never_gets_hunts`, which refuses `section \`s1\` marks a hunt available, but this is a \`course\` goal`.)
+- [x] Planner can't enable hunts; can't mark them available with explore off.
+  (`tools.rs:617,628`; test `plan_write_refuses_an_enabled_hunt_and_a_hunt_with_explore_off`.)
+- [x] Each hunt keeps its own state; a card can't be driven once its section has moved on.
+  (`SessionState.hunts` holds every `huntSend`'s record in op order, `replay.rs::hunt_states`, `hunt` stays the current section's; `applyHuntStates` resolves each card by `huntId` and `huntCard` renders a card whose section isn't current as closed, `ui/cards.js`; unit test `every_hunt_keeps_its_own_state_across_sections`, e2e `a_hunt_in_an_earlier_section_stays_finished` (return refused as "already finished"), browser: a skipped card and a stale `out` card both render without a form while the live one keeps its return form.)
+- [x] Hunt card has question, where to look, what to bring back; skip works before and during.
+  (`ui/cards.js::huntCard`; `hunt_skip`; browser: the question, both places, the four things to bring back, and Skip hunt on a card nothing has been entered on; test `skipping_a_hunt_starts_teaching_normally`.)
+- [x] Return accepts notes, links, files, nothing required.
+  (`Harness::hunt_return` reads all three, all optional; browser: an empty return sends `payload: {}`, notes and links send when filled.)
+- [x] Debrief recorded before teaching questions; claims sorted into the five verdicts; off-route items in `frontier.jsonl`.
+  (`gate_question` teach gate; `debrief_record` verdict enum; `frontier.rs`; test `a_hunt_runs_send_return_debrief_then_teaching`, `a_frontier_item_opens_a_new_session`.)
+- [x] No hunt or debrief op counts toward `section_done`.
+  (`close_problems` reads only graded checks; the same hunt test asserts the refusal after a debrief.)
 
 **Field guide**
-- [ ] Brief has `discourse` and `venues`; the close shows now/later venues; `pass` shows only `ask` venues; the Map shows the guide.
+- [x] Brief has `discourse` and `venues`; the close shows now/later venues; `pass` shows only `ask` venues; the Map shows the guide per topic.
+  (`jobs/researcher.md` under `field_guide`; `Composer::session_state` Field guide block; `graph::GraphOp::Venue` + `KnowledgeMap.topic_venues`; `ui/fieldguide.js`; browser: now/later in the close, only Ask at `pass`, the Map's topic panel, and a topic card carrying its own plus its descendants' venues.)
 
 **Calibration**
-- [ ] Hidden below 20 graded answers per plan and below 5 per bucket; ±15-point rule; numbers match the ops.
+- [x] Hidden below 20 graded answers per plan and below 5 per bucket; ±15-point rule; numbers match the ops.
+  (`replay.rs::calibration`; tests `calibration_needs_twenty_graded_answers_with_a_confidence`, `calibration_reports_buckets_with_five_answers_and_names_only_wide_gaps`; browser: the close and Map lines match the block verbatim, and nothing shows below the threshold.)
+- [x] Every graded answer counts, probe answers included; "I don't know" contributes no confidence.
+  (`record_verdict` returns every graded `question_ask` answer for calibration and keeps only `check` questions on a real node in `checks`/`node_levels`, so `node_passed` and the section gates never see a probe; test `a_probe_answer_counts_towards_calibration`.)
 
 **General**
-- [ ] Each flag is turned on in the same change as its code; with all flags off, prompts compose exactly as before.
-- [ ] Every new tool name and field matches `crates/harness/prompts/README.md`.
+- [x] Each flag is turned on in the same change as its code; with all flags off, prompts compose exactly as before.
+  (`agent.rs:341–361`; test `compose_every_agent_phase_and_mode_with_every_flag_off`, which also pins the one unflagged wording fix in `teach.md`; with every flag on, `compose_every_agent_phase_and_mode_with_every_flag_on` proves no placeholder is left unresolved.)
+- [x] Every new tool name and field matches `crates/harness/prompts/README.md`.
+  (`hunt_send`, `debrief_record`, `frontier_park`, `plan_ask`, the `goal_set`/`probe_done`/`plan_write` fields and the op/record names.)
+
+### Known gaps (not settled by this build)
+
+1. **No real-model run.** Level tagging consistency, hunt eligibility judgement, the known-section
+   split, the planner honouring explicit section settings, and the debrief's sorting are proven only
+   against the scripted provider and the prompts; they are model behaviour.
+2. **`targetLevel` is prompt-required but schema-optional.** `plan_write` accepts a section without
+   it (revisions of plans written before levels must stay valid), and such a section has no level
+   gate. Requiring it on new sections would close this.
+3. **The graph-dependent parts are partly built; the rest still waits** (§2, §5, §6): the graph
+   exists and its builder job runs, but the `heuristic` node kind with `attribution`/`scope`,
+   `hunt` provenance on nodes (and its `unverified` state until the debrief) and calibration per
+   topic are not built, and the coach's critique and design-to-constraints problems wait for the
+   coach. **Venues are built**: the builder submits a `venue` op per topic (`docs/graph-build.md`),
+   the read model aggregates own plus descendants, and the Map shows them. The honest residue is
+   the builder's judgement — a venue only reaches its topic because the model named one, and no
+   code checks that the topic is the right one — and the learner cannot edit or remove a venue in
+   the UI yet (a correction means a later builder run restating the row, or a hand edit of
+   `graph/ops.jsonl`).
+4. **"The same controls are available on the plan sheet during teaching" (§4) is half built.** The
+   sheet shows each section's aim, known and refuted status and offers the sheet's existing free-text
+   "Change plan", which goes through the planner job; the structured "⋯" controls exist only on the
+   plan card while the plan awaits approval. `docs/ui-design.md` §7.7.1 records the sheet's reduced
+   scope as shipped; the structured controls there are still owed.
+5. **The Map's session-derived lines still come from one session.** The confidence line and the
+   frontier list are read from the newest Learn session because the Map has no plan grouping. That
+   no longer applies to the guide: venues are per topic and render with no session at all. Two
+   related limits remain: a topic with venues but no claims has no cluster, so the guide panel does
+   not list it as a row (its venues still appear in its parent's row and on an idea's card), and
+   no learner-side venue editing exists (gap 3).
 
 ---
 

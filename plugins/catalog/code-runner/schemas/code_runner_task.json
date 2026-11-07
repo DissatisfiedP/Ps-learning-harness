@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "language": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "write",
+        "fix",
+        "read",
+        "error"
+      ],
+      "description": "write: implement something; fix: the starter compiles but behaves wrongly; read: predict the output, no editing; error: explain a given error message"
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "starter": {
+      "type": "string"
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "input": {
+            "type": "string"
+          },
+          "expected": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "expected"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "predictFirst": {
+      "type": "boolean",
+      "description": "ask the learner to commit to the expected output before running"
+    }
+  },
+  "required": [
+    "language",
+    "kind",
+    "prompt",
+    "tests"
+  ],
+  "additionalProperties": false
+}

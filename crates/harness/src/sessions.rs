@@ -6,6 +6,12 @@
 //! (ULID) and `at`. Derived [`crate::state::SessionState`] is rebuilt by
 //! replaying these ops and is never stored.
 //!
+//! Crash safety: each op is one `write_all` followed by `sync_data`, so a
+//! crash can only tear the final line. Readers repair that tail, skip (and
+//! count) any line that still does not parse instead of failing the whole
+//! session, and a Learn session is read-only unless its second op is the
+//! initial `phase` op (`read_file`, `scan_head`).
+//!
 //! Performance (build prompt M7): `list` reads only each file's first two
 //! lines plus its mtime, and titles generated later come from a device-local
 //! index; the parsed ops of recently used sessions stay in a small LRU so a
@@ -47,6 +53,23 @@ pub enum Ending {
     Interrupted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    /// image | file | folder
+    pub kind: String,
+    /// Image: repo-relative path under `attachments/`. File/folder: the
+    /// absolute path the learner chose (device-specific), or a path relative
+    /// to the session workspace for files inside it.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredMessage {
@@ -72,6 +95,10 @@ pub struct StoredMessage {
     /// be replayed to the same wire in tool loops, even after a restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native: Vec<ContentBlock>,
+    /// Learner attachments (images copied into the repo; files and folders
+    /// referenced by path). Empty for tutor messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +154,124 @@ pub struct PlanKeepOp {
     pub reason: String,
 }
 
+/// The learner's batched plan-card edits (docs/learning-system.md §4): one
+/// structured diff plus an optional comment. Never applied by replay; the
+/// planner job that follows it reads this op to decide the new plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanEditOp {
+    pub op_id: String,
+    pub at: String,
+    /// Plan-level fields (`depth`, `explore`, `minutesPerSitting`, `style`)
+    /// and a `sections` array of per-section edits.
+    #[serde(default)]
+    pub edits: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// The planner's one question on the plan card (§4). `call_id` is the
+/// `plan_ask` tool call; it ends the planner run and the learner's
+/// [`PlanAnswerOp`] starts a fresh one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAskOp {
+    pub op_id: String,
+    pub at: String,
+    pub call_id: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+/// The learner's answer to a [`PlanAskOp`], matched by `call_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAnswerOp {
+    pub op_id: String,
+    pub at: String,
+    pub call_id: String,
+    pub answer: String,
+}
+
+/// An assumed-known section's check was missed (§4): the section loses
+/// `assumedKnown` and the normal per-node gate applies. Written by code in
+/// `verdict_record`; no planner call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownRefutedOp {
+    pub op_id: String,
+    pub at: String,
+    pub section_id: String,
+    pub question_id: String,
+}
+
+/// The learner switched a section's hunt on or off (docs/learning-system.md
+/// §5). Only the learner may enable a hunt, so this is the only op that does;
+/// replay applies the latest toggle per section onto the plan's `Hunt`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HuntToggleOp {
+    pub op_id: String,
+    pub at: String,
+    pub section_id: String,
+    pub enabled: bool,
+}
+
+/// The tutor's `hunt_send` (§5): the learner goes to find things out before
+/// the section is taught. `hunt_id` is this tool call's id — one
+/// conversation-visible id, never a second one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HuntSendOp {
+    pub op_id: String,
+    pub at: String,
+    pub hunt_id: String,
+    pub section_id: String,
+    pub question: String,
+    #[serde(default)]
+    pub look_at: Value,
+    #[serde(default)]
+    pub bring_back: Vec<String>,
+}
+
+/// The learner came back from a hunt (§5). Notes, links and files are all
+/// optional: a tip remembered without its source is still what they learned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HuntReturnOp {
+    pub op_id: String,
+    pub at: String,
+    pub hunt_id: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub links: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+/// The learner skipped the hunt (§5): allowed before or during, at no cost.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HuntSkipOp {
+    pub op_id: String,
+    pub at: String,
+    pub hunt_id: String,
+}
+
+/// The tutor's `debrief_record` (§5): each claim it judged, with the sort it
+/// gave it. Never evidence for the section's exit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebriefOp {
+    pub op_id: String,
+    pub at: String,
+    pub hunt_id: String,
+    #[serde(default)]
+    pub claims: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApproveOp {
@@ -160,6 +305,75 @@ pub struct TitleOp {
     pub op_id: String,
     pub at: String,
     pub title: String,
+}
+
+/// A read root granted by a learner attachment (W3). Device-local paths in
+/// the synced log are unavoidable here: the grant is meaningless without the
+/// path, and another device simply finds it missing and asks again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileGrantOp {
+    pub op_id: String,
+    pub at: String,
+    pub path: String,
+    /// file | folder
+    pub kind: String,
+}
+
+/// A session attached to (or detached from) a learner folder. The absolute
+/// path is device-local; only the folder name is synced so another device can
+/// ask the learner to point at it (build prompt W4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceOp {
+    pub op_id: String,
+    pub at: String,
+    pub attached: bool,
+    pub name: String,
+}
+
+/// One `workspace_write` (build prompt W4). The content is not stored, only
+/// the hash the agent last saw or wrote, so learner edits are never clobbered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceWriteOp {
+    pub op_id: String,
+    pub at: String,
+    pub path: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// A short state summary a view posted (W7 learning hook). The core keeps
+/// only the latest per artifact and writes it just before the learner's next
+/// message; replay renders it on that message in the provider request. Other
+/// view interaction is not logged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewStateOp {
+    pub op_id: String,
+    pub at: String,
+    pub artifact_id: String,
+    pub summary: String,
+}
+
+/// A figure produced by a plugin tool (build prompt W6). Replay never re-runs
+/// plugins: everything needed to display the artifact is here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactOp {
+    pub op_id: String,
+    pub at: String,
+    pub artifact_id: String,
+    pub plugin_id: String,
+    pub plugin_version: String,
+    pub package_hash: String,
+    pub tool: String,
+    #[serde(default)]
+    pub input: Value,
+    #[serde(default)]
+    pub data: Value,
+    pub fallback_svg: String,
 }
 
 /// Notes from a compaction turn that stand in for every conversation op with
@@ -242,12 +456,26 @@ pub enum Op {
     Plan(RecordOp),
     PlanRequest(PlanRequestOp),
     PlanKeep(PlanKeepOp),
+    PlanEdit(PlanEditOp),
+    PlanAsk(PlanAskOp),
+    PlanAnswer(PlanAnswerOp),
+    KnownRefuted(KnownRefutedOp),
+    HuntToggle(HuntToggleOp),
+    HuntSend(HuntSendOp),
+    HuntReturn(HuntReturnOp),
+    HuntSkip(HuntSkipOp),
+    Debrief(DebriefOp),
     Approve(ApproveOp),
     PluginGrant(PluginGrantOp),
     Tool(ToolOp),
     Job(JobOp),
     Compaction(CompactionOp),
     Title(TitleOp),
+    Workspace(WorkspaceOp),
+    WorkspaceWrite(WorkspaceWriteOp),
+    Artifact(ArtifactOp),
+    FileGrant(FileGrantOp),
+    ViewState(ViewStateOp),
 }
 
 impl Op {
@@ -259,12 +487,26 @@ impl Op {
             Op::Goal(o) | Op::Brief(o) | Op::Probe(o) | Op::Plan(o) => &o.at,
             Op::PlanRequest(o) => &o.at,
             Op::PlanKeep(o) => &o.at,
+            Op::PlanEdit(o) => &o.at,
+            Op::PlanAsk(o) => &o.at,
+            Op::PlanAnswer(o) => &o.at,
+            Op::KnownRefuted(o) => &o.at,
+            Op::HuntToggle(o) => &o.at,
+            Op::HuntSend(o) => &o.at,
+            Op::HuntReturn(o) => &o.at,
+            Op::HuntSkip(o) => &o.at,
+            Op::Debrief(o) => &o.at,
             Op::Approve(o) => &o.at,
             Op::PluginGrant(o) => &o.at,
             Op::Tool(o) => &o.at,
             Op::Job(o) => &o.at,
             Op::Compaction(o) => &o.at,
             Op::Title(o) => &o.at,
+            Op::Workspace(o) => &o.at,
+            Op::WorkspaceWrite(o) => &o.at,
+            Op::Artifact(o) => &o.at,
+            Op::FileGrant(o) => &o.at,
+            Op::ViewState(o) => &o.at,
         }
     }
 
@@ -276,12 +518,26 @@ impl Op {
             Op::Goal(o) | Op::Brief(o) | Op::Probe(o) | Op::Plan(o) => &o.op_id,
             Op::PlanRequest(o) => &o.op_id,
             Op::PlanKeep(o) => &o.op_id,
+            Op::PlanEdit(o) => &o.op_id,
+            Op::PlanAsk(o) => &o.op_id,
+            Op::PlanAnswer(o) => &o.op_id,
+            Op::KnownRefuted(o) => &o.op_id,
+            Op::HuntToggle(o) => &o.op_id,
+            Op::HuntSend(o) => &o.op_id,
+            Op::HuntReturn(o) => &o.op_id,
+            Op::HuntSkip(o) => &o.op_id,
+            Op::Debrief(o) => &o.op_id,
             Op::Approve(o) => &o.op_id,
             Op::PluginGrant(o) => &o.op_id,
             Op::Tool(o) => &o.op_id,
             Op::Job(o) => &o.op_id,
             Op::Compaction(o) => &o.op_id,
             Op::Title(o) => &o.op_id,
+            Op::Workspace(o) => &o.op_id,
+            Op::WorkspaceWrite(o) => &o.op_id,
+            Op::Artifact(o) => &o.op_id,
+            Op::FileGrant(o) => &o.op_id,
+            Op::ViewState(o) => &o.op_id,
         }
     }
 
@@ -312,6 +568,11 @@ pub struct Session {
     pub messages: Vec<StoredMessage>,
     /// All ops, ordered by `at`, for state replay and the UI.
     pub ops: Vec<Op>,
+    /// Lines this file had that did not parse and were skipped (a corrupt
+    /// line, or an op kind written by a newer build). Zero for a healthy
+    /// file; the UI can warn on it instead of the session failing to open.
+    #[serde(default)]
+    pub skipped_ops: usize,
 }
 
 pub struct Store {
@@ -319,8 +580,20 @@ pub struct Store {
     /// Device-local title index (`<config>/session-index.json`).
     index_path: PathBuf,
     index: Mutex<Option<HashMap<String, String>>>,
-    /// Parsed, sorted ops of recently used sessions, most recent last.
-    cache: Mutex<VecDeque<(String, Vec<Op>)>>,
+    /// Parsed ops (plus what the parse had to skip) of recently used
+    /// sessions, most recent last.
+    cache: Mutex<VecDeque<(String, ParsedOps)>>,
+}
+
+/// What one read of a session file produced.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedOps {
+    /// Ops in replay order (`at`, then `opId`).
+    pub(crate) ops: Vec<Op>,
+    /// Lines that did not parse and were skipped; blank lines don't count.
+    pub(crate) skipped: usize,
+    /// The read-only rule for this file, see [`second_line_is_phase`].
+    pub(crate) runtime: bool,
 }
 
 impl Store {
@@ -383,9 +656,9 @@ impl Store {
         let path = self.existing_path(id)?;
         append(&path, op)?;
         let mut cache = lock(&self.cache);
-        if let Some((_, ops)) = cache.iter_mut().find(|(k, _)| k == id) {
-            let pos = ops.partition_point(|o| o.key() <= op.key());
-            ops.insert(pos, op.clone());
+        if let Some((_, parsed)) = cache.iter_mut().find(|(k, _)| k == id) {
+            let pos = parsed.ops.partition_point(|o| o.key() <= op.key());
+            parsed.ops.insert(pos, op.clone());
         }
         drop(cache);
         if let Op::Title(t) = op {
@@ -396,8 +669,7 @@ impl Store {
 
     pub fn load(&self, id: &str) -> Result<Session, Error> {
         let path = self.existing_path(id)?;
-        let ops = self.ops(id)?;
-        let mut session = session_from_ops(&path, ops)?;
+        let mut session = session_from_ops(&path, self.parsed_ops(id)?)?;
         if let Some(title) = self.indexed_title(id) {
             session.summary.title = title;
         }
@@ -407,38 +679,31 @@ impl Store {
     /// All ops for a session, sorted by `at` (ties by `opId`). Served from the
     /// LRU after the first read.
     pub fn ops(&self, id: &str) -> Result<Vec<Op>, Error> {
+        Ok(self.parsed_ops(id)?.ops)
+    }
+
+    /// As [`Store::ops`], with the parse report (skipped lines and the
+    /// read-only rule). Cached together with the ops.
+    pub(crate) fn parsed_ops(&self, id: &str) -> Result<ParsedOps, Error> {
         {
             let mut cache = lock(&self.cache);
             if let Some(pos) = cache.iter().position(|(k, _)| k == id) {
                 if let Some(entry) = cache.remove(pos) {
-                    let ops = entry.1.clone();
+                    let parsed = entry.1.clone();
                     cache.push_back(entry);
-                    return Ok(ops);
+                    return Ok(parsed);
                 }
             }
         }
-        let ops = read_ops(&self.existing_path(id)?)?;
+        let parsed = read_file(&self.existing_path(id)?)?;
         let mut cache = lock(&self.cache);
         if !cache.iter().any(|(k, _)| k == id) {
-            cache.push_back((id.to_owned(), ops.clone()));
+            cache.push_back((id.to_owned(), parsed.clone()));
             while cache.len() > LRU_SESSIONS {
                 cache.pop_front();
             }
         }
-        Ok(ops)
-    }
-
-    /// Runs `f` over a session's ops without touching the LRU order or
-    /// filling it (scans over every session would otherwise evict the open
-    /// ones). A cached session is borrowed, not cloned.
-    pub fn with_ops<R>(&self, id: &str, f: impl FnOnce(&[Op]) -> R) -> Result<R, Error> {
-        {
-            let cache = lock(&self.cache);
-            if let Some((_, ops)) = cache.iter().find(|(k, _)| k == id) {
-                return Ok(f(ops));
-            }
-        }
-        Ok(f(&read_ops(&self.existing_path(id)?)?))
+        Ok(parsed)
     }
 
     pub fn summary(&self, id: &str) -> Result<SessionSummary, Error> {
@@ -542,8 +807,8 @@ impl Store {
             let Ok(path) = self.existing_path(&s.id) else {
                 continue;
             };
-            if let Ok(ops) = read_ops(&path) {
-                if let Some(t) = ops.iter().rev().find_map(|o| match o {
+            if let Ok(parsed) = read_file(&path) {
+                if let Some(t) = parsed.ops.iter().rev().find_map(|o| match o {
                     Op::Title(t) => Some(t.title.clone()),
                     _ => None,
                 }) {
@@ -597,6 +862,7 @@ pub(crate) fn new_message(role: Role, content: String) -> StoredMessage {
         tag: None,
         job_id: None,
         native: Vec::new(),
+        attachments: Vec::new(),
     }
 }
 
@@ -625,39 +891,202 @@ fn title_from(text: &str) -> String {
     }
 }
 
+/// Appends one op as one line. `sync_data` afterwards means a crash loses at
+/// most the op in flight, not the whole tail of the file. The cost is one
+/// fsync per op, and ops arrive tens per turn (never per streaming delta), so
+/// this is not on any hot path.
 fn append(path: &Path, op: &Op) -> Result<(), Error> {
     let mut line = serde_json::to_vec(op)?;
     line.push(b'\n');
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?
-        .write_all(&line)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&line)?;
+    file.sync_data()?;
     Ok(())
 }
 
-fn write_index(path: &Path, index: &HashMap<String, String>) -> Result<(), Error> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
+/// Trims ASCII whitespace (spaces, `\r`, ...) off a raw line.
+fn trim_ws(line: &[u8]) -> &[u8] {
+    let blank = u8::is_ascii_whitespace;
+    let start = line.iter().position(|b| !blank(b)).unwrap_or(line.len());
+    let end = line
+        .iter()
+        .rposition(|b| !blank(b))
+        .map_or(start, |i| i + 1);
+    &line[start..end]
+}
+
+/// First 80 characters of a line, for a warning that stays one line long.
+fn preview(line: &[u8]) -> String {
+    let head = String::from_utf8_lossy(&line[..line.len().min(160)]);
+    head.chars().take(80).collect()
+}
+
+/// The one read-only rule, deliberately narrow.
+///
+/// A session is a *runtime* session - one the tutor may append to - iff its
+/// **second op is a `Phase` op**. [`Store::create`] writes exactly that shape
+/// (`session`, then `phase`).
+///
+/// Everything else that is a Learn session is read-only:
+///
+/// * legacy files, from before the agent runtime, have no `phase` op at all;
+/// * a merged or hand-edited file whose `phase` op sits anywhere but second is
+///   read-only too: replay would otherwise enter the phase machine at an
+///   arbitrary point, so we refuse rather than guess.
+///
+/// This deliberately tests the second *line*, not the second op of the sorted
+/// replay order: `list` reads two lines while `load` sorts every op, and both
+/// go through this function so the UI and the write path cannot disagree.
+///
+/// Takes the lines of a session file from its start. Returns `None` when the
+/// first line is not a header op (nothing can open such a file), else the
+/// header and whether the session is a runtime session.
+fn scan_head<I, S>(lines: I) -> Option<(Header, bool)>
+where
+    I: Iterator<Item = S>,
+    S: AsRef<[u8]>,
+{
+    let mut non_blank = 0usize;
+    let mut header: Option<Header> = None;
+    let mut runtime = false;
+    for line in lines {
+        let raw = trim_ws(line.as_ref());
+        if raw.is_empty() {
+            continue;
+        }
+        non_blank += 1;
+        if non_blank == 1 {
+            match serde_json::from_slice::<Op>(raw) {
+                Ok(Op::Session(h)) => header = Some(h),
+                _ => return None,
+            }
+        } else {
+            runtime = matches!(serde_json::from_slice::<Op>(raw), Ok(Op::Phase(_)));
+            break;
+        }
     }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_vec(index)?)?;
-    fs::rename(&tmp, path)?;
+    header.map(|h| (h, runtime))
+}
+
+/// Heals a file whose last line a crash cut short.
+///
+/// One `write_all` per op means at most the tail can be torn: the complete
+/// prefix is always whole lines. A tail that does not parse is dropped at the
+/// last newline (and only that tail); a tail that *does* parse only gets the
+/// newline it lost, so the next append cannot glue two ops together. No other
+/// byte of the file is ever rewritten.
+fn repair_torn_tail(path: &Path, bytes: &mut Vec<u8>) -> Result<(), Error> {
+    if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+        return Ok(());
+    }
+    let last_nl = bytes.iter().rposition(|&b| b == b'\n');
+    let tail_start = last_nl.map_or(0, |i| i + 1);
+    let tail = trim_ws(&bytes[tail_start..]);
+    if serde_json::from_slice::<Op>(tail).is_ok() {
+        // A complete op that only lost its newline: add it, so the next append
+        // cannot glue two ops into one line. Never truncate a complete op.
+        let repaired = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .and_then(|mut f| {
+                f.write_all(b"\n")?;
+                f.sync_data()
+            });
+        match repaired {
+            Ok(()) => {
+                bytes.push(b'\n');
+                tracing::warn!(
+                    path = %path.display(),
+                    "session file's last op had no newline; added it"
+                );
+            }
+            // Read-only mount, say: the op is still readable, so carry on.
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                "session file's last op has no newline and could not be fixed: {e}"
+            ),
+        }
+        return Ok(());
+    }
+    let Some(last_nl) = last_nl else {
+        // One incomplete line and nothing before it: truncating would leave an
+        // empty file behind, so let it be reported as a skipped line instead.
+        return Ok(());
+    };
+    let dropped = bytes.len() - last_nl - 1;
+    match OpenOptions::new().append(true).open(path).and_then(|f| {
+        f.set_len(u64::try_from(last_nl + 1).unwrap_or(u64::MAX))?;
+        f.sync_data()
+    }) {
+        Ok(()) => {
+            bytes.truncate(last_nl + 1);
+            tracing::warn!(
+                path = %path.display(),
+                dropped,
+                "session file ends in a torn op; truncated to the last complete line"
+            );
+        }
+        // Not fatal: the torn line is skipped below either way.
+        Err(e) => tracing::warn!(
+            path = %path.display(),
+            dropped,
+            "session file ends in a torn op that could not be truncated: {e}"
+        ),
+    }
     Ok(())
 }
 
-fn read_ops(path: &Path) -> Result<Vec<Op>, Error> {
-    let text = fs::read_to_string(path)?;
+/// Reads a session file, skipping and reporting lines that do not parse.
+///
+/// One bad line (a corrupt write, a hand edit, or an op kind from a newer
+/// build) must never cost the learner the whole session, so it is skipped and
+/// counted instead of failing the read. Blank lines are not corruption and
+/// stay silent.
+fn read_file(path: &Path) -> Result<ParsedOps, Error> {
+    let mut bytes = fs::read(path)?;
+    repair_torn_tail(path, &mut bytes)?;
+    let runtime = scan_head(bytes.split(|&b| b == b'\n')).is_some_and(|(_, runtime)| runtime);
     let mut ops: Vec<Op> = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        ops.push(serde_json::from_str(line)?);
+    let mut skipped = 0usize;
+    let mut first_bad = String::new();
+    for line in bytes.split(|&b| b == b'\n') {
+        let line = trim_ws(line);
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_slice::<Op>(line) {
+            Ok(op) => ops.push(op),
+            Err(_) => {
+                skipped += 1;
+                if first_bad.is_empty() {
+                    first_bad = preview(line);
+                }
+            }
+        }
+    }
+    if skipped > 0 {
+        tracing::warn!(
+            path = %path.display(),
+            skipped,
+            first = %first_bad,
+            "session ops that do not parse were skipped"
+        );
     }
     // Lines from merged devices may interleave; `at` is the order of record.
     ops.sort_by(|a, b| a.key().cmp(&b.key()));
-    Ok(ops)
+    Ok(ParsedOps {
+        ops,
+        skipped,
+        runtime,
+    })
 }
 
-fn session_from_ops(path: &Path, ops: Vec<Op>) -> Result<Session, Error> {
+fn session_from_ops(path: &Path, parsed: ParsedOps) -> Result<Session, Error> {
+    let ParsedOps {
+        ops,
+        skipped,
+        runtime,
+    } = parsed;
     let header = ops
         .iter()
         .find_map(|op| match op {
@@ -665,7 +1094,6 @@ fn session_from_ops(path: &Path, ops: Vec<Op>) -> Result<Session, Error> {
             _ => None,
         })
         .ok_or_else(|| Error::Corrupt(format!("{} has no session header", path.display())))?;
-    let has_phase = ops.iter().any(|op| matches!(op, Op::Phase(_)));
     let messages: Vec<StoredMessage> = ops
         .iter()
         .filter_map(|op| match op {
@@ -691,28 +1119,21 @@ fn session_from_ops(path: &Path, ops: Vec<Op>) -> Result<Session, Error> {
             title,
             created_at: header.at,
             updated_at,
-            read_only: header.mode == Mode::Learn && !has_phase,
+            read_only: header.mode == Mode::Learn && !runtime,
         },
         messages,
         ops,
+        skipped_ops: skipped,
     })
 }
 
-/// Reads only the first two lines (header, then the initial `phase` op of a
-/// Learn session) for `list`; `updated_at` comes from the file mtime.
+/// Reads only the first two non-blank lines (header, then the initial `phase`
+/// op of a runtime Learn session) for `list`, via the same [`scan_head`] rule
+/// `load` uses; `updated_at` comes from the file mtime.
 fn read_header(path: &Path) -> Result<Option<SessionSummary>, Error> {
-    let file = fs::File::open(path)?;
-    let mut lines = std::io::BufReader::new(file).lines();
-    let line = match lines.next() {
-        Some(Ok(l)) => l,
-        _ => return Ok(None),
-    };
-    let Ok(Op::Session(h)) = serde_json::from_str::<Op>(&line) else {
+    let lines = first_lines(path, 2)?;
+    let Some((h, runtime)) = scan_head(lines.iter().map(Vec::as_slice)) else {
         return Ok(None);
-    };
-    let has_phase = match lines.next() {
-        Some(Ok(l)) => matches!(serde_json::from_str::<Op>(&l), Ok(Op::Phase(_))),
-        _ => false,
     };
     let updated = fs::metadata(path)?
         .modified()
@@ -726,8 +1147,36 @@ fn read_header(path: &Path) -> Result<Option<SessionSummary>, Error> {
         title: h.title,
         created_at: h.at,
         updated_at: updated,
-        read_only: h.mode == Mode::Learn && !has_phase,
+        read_only: h.mode == Mode::Learn && !runtime,
     }))
+}
+
+/// The first `want` non-blank lines of a file, as raw bytes: `list` never
+/// reads a session body, and invalid UTF-8 in a torn line must not matter.
+fn first_lines(path: &Path, want: usize) -> Result<Vec<Vec<u8>>, Error> {
+    let mut reader = std::io::BufReader::new(fs::File::open(path)?);
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut buf = Vec::new();
+    while out.len() < want {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        if !trim_ws(&buf).is_empty() {
+            out.push(buf.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn write_index(path: &Path, index: &HashMap<String, String>) -> Result<(), Error> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec(index)?)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -851,6 +1300,216 @@ mod tests {
             store.load("../../etc/passwd"),
             Err(Error::NotFound(_))
         ));
+    }
+
+    // ---- crash safety and forward compatibility ------------------------
+
+    /// Writes raw bytes as a session file under the year dir its id picks.
+    fn raw_file(repo: &Path, id: &str, body: &[u8]) -> PathBuf {
+        let year = DateTime::<Utc>::from(Ulid::from_string(id).unwrap().datetime()).year();
+        let dir = repo.join("sessions").join(year.to_string());
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{id}.jsonl"));
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn header_line(id: &str) -> String {
+        let op = Op::Session(Header {
+            op_id: op_id(),
+            at: "2026-01-01T00:00:00.000Z".into(),
+            id: id.into(),
+            mode: Mode::Learn,
+            title: "t".into(),
+        });
+        format!("{}\n", serde_json::to_string(&op).unwrap())
+    }
+
+    fn phase_line(at: &str) -> String {
+        let op = Op::Phase(PhaseOp {
+            op_id: op_id(),
+            at: at.into(),
+            phase: Phase::Measure,
+            section_id: None,
+        });
+        format!("{}\n", serde_json::to_string(&op).unwrap())
+    }
+
+    fn message_line(content: &str, at: &str) -> String {
+        let mut m = new_message(Role::User, content.into());
+        m.at = at.into();
+        format!("{}\n", serde_json::to_string(&Op::Message(m)).unwrap())
+    }
+
+    #[test]
+    fn a_torn_final_line_is_repaired_and_the_complete_ops_open() {
+        let repo = temp_repo("torn");
+        let id = Ulid::new().to_string();
+        let complete = format!(
+            "{}{}{}",
+            header_line(&id),
+            phase_line("2026-01-01T00:00:01.000Z"),
+            message_line("whole", "2026-01-01T00:00:02.000Z"),
+        );
+        // A crash in the middle of `write_all`: the tail is half an op and
+        // never got its newline.
+        let torn = message_line("half", "2026-01-01T00:00:03.000Z");
+        let mut body = complete.clone().into_bytes();
+        body.extend_from_slice(&torn.as_bytes()[..torn.len() / 2]);
+        let path = raw_file(&repo, &id, &body);
+
+        // Before the fix this was `Err`: one unparseable line sank the session.
+        let store = store(&repo);
+        let s = store.load(&id).unwrap();
+        let contents: Vec<&str> = s.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, ["whole"]);
+        assert_eq!(s.skipped_ops, 0, "a torn tail is repaired, not skipped");
+        assert!(!s.summary.read_only);
+        // The tail was dropped on disk; not one other byte changed.
+        assert_eq!(fs::read(&path).unwrap(), complete.as_bytes());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn a_tail_that_parses_but_lost_its_newline_keeps_its_op() {
+        let repo = temp_repo("nonewline");
+        let id = Ulid::new().to_string();
+        let last = message_line("last", "2026-01-01T00:00:02.000Z");
+        let complete = format!(
+            "{}{}{}",
+            header_line(&id),
+            phase_line("2026-01-01T00:00:01.000Z"),
+            last,
+        );
+        let path = raw_file(&repo, &id, complete.trim_end_matches('\n').as_bytes());
+
+        let store = store(&repo);
+        let s = store.load(&id).unwrap();
+        let contents: Vec<&str> = s.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, ["last"], "a complete op is never truncated");
+        assert_eq!(s.skipped_ops, 0);
+        // Only the missing newline was added, so the next append stays whole.
+        assert_eq!(fs::read(&path).unwrap(), complete.as_bytes());
+        store
+            .append(&id, &new_message(Role::User, "next".into()))
+            .unwrap();
+        let fresh = Store::new(&repo, &repo.join("local"));
+        let after = fresh.parsed_ops(&id).unwrap();
+        assert_eq!(after.skipped, 0);
+        assert_eq!(after.ops.len(), 4);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_middle_line_is_skipped_counted_and_the_rest_replays() {
+        let repo = temp_repo("corrupt");
+        let id = Ulid::new().to_string();
+        let body = format!(
+            "{}{}{}{}{}",
+            header_line(&id),
+            phase_line("2026-01-01T00:00:01.000Z"),
+            message_line("one", "2026-01-01T00:00:02.000Z"),
+            "{\"op\":\"message\",\"opId\":\"torn-mid-write\n",
+            message_line("two", "2026-01-01T00:00:04.000Z"),
+        );
+        let path = raw_file(&repo, &id, body.as_bytes());
+
+        let store = store(&repo);
+        let s = store.load(&id).unwrap();
+        let contents: Vec<&str> = s.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, ["one", "two"], "the rest of the log replays");
+        assert_eq!(s.skipped_ops, 1);
+        assert!(
+            !s.summary.read_only,
+            "a damaged line is not damage to the header"
+        );
+        // A skipped line is never rewritten.
+        assert_eq!(fs::read(&path).unwrap(), body.as_bytes());
+        // A fresh store (no LRU) reports the same count.
+        let fresh = Store::new(&repo, &repo.join("local"));
+        assert_eq!(fresh.parsed_ops(&id).unwrap().skipped, 1);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn an_op_kind_from_a_newer_build_is_skipped_not_fatal() {
+        let repo = temp_repo("future");
+        let id = Ulid::new().to_string();
+        // Forward compatibility: a newer build may write an op kind this one
+        // has never heard of. It must cost that one op, nothing more.
+        let body = format!(
+            "{}{}{}{}",
+            header_line(&id),
+            phase_line("2026-01-01T00:00:01.000Z"),
+            "{\"op\":\"futureThing\",\"opId\":\"01J00000000000000000000002\",\"at\":\"2026-01-01T00:00:02.000Z\",\"payload\":1}\n",
+            message_line("still here", "2026-01-01T00:00:03.000Z"),
+        );
+        raw_file(&repo, &id, body.as_bytes());
+
+        let s = store(&repo).load(&id).unwrap();
+        assert_eq!(s.skipped_ops, 1);
+        assert_eq!(s.messages.len(), 1);
+        assert_eq!(s.messages[0].content, "still here");
+        // The session stays writable: the unknown op was line 3, not line 2.
+        assert!(!s.summary.read_only);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn a_phase_op_anywhere_but_second_is_read_only_for_list_and_load() {
+        let repo = temp_repo("merged");
+        let id = Ulid::new().to_string();
+        // Merged/hand-edited: `phase` is on line 3. Its `at` would even sort it
+        // second - the rule is the second *line*, deliberately, so both readers
+        // agree instead of one trusting sort order and the other line order.
+        let body = format!(
+            "{}{}{}",
+            header_line(&id),
+            message_line("hi", "2026-01-01T00:00:01.000Z"),
+            phase_line("2026-01-01T00:00:00.500Z"),
+        );
+        raw_file(&repo, &id, body.as_bytes());
+
+        let store = store(&repo);
+        let s = store.load(&id).unwrap();
+        assert!(s.summary.read_only);
+        assert!(
+            !store.parsed_ops(&id).unwrap().runtime,
+            "not a runtime session"
+        );
+        assert!(store.list().unwrap()[0].read_only);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn a_normal_append_reads_back_byte_identical_ops() {
+        let repo = temp_repo("roundtrip");
+        let store = store(&repo);
+        let s = store.create(Mode::Learn, "voltage").unwrap();
+        store
+            .append(&s.id, &new_message(Role::User, "hi".into()))
+            .unwrap();
+        let path = store.existing_path(&s.id).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let want: Vec<u8> = store
+            .ops(&s.id)
+            .unwrap()
+            .iter()
+            .flat_map(|op| {
+                let mut line = serde_json::to_vec(op).unwrap();
+                line.push(b'\n');
+                line
+            })
+            .collect();
+        assert_eq!(bytes, want, "appends round-trip byte for byte");
+        // Reading is side-effect free for a healthy file.
+        let parsed = store.parsed_ops(&s.id).unwrap();
+        assert_eq!(parsed.skipped, 0);
+        assert!(parsed.runtime);
+        assert_eq!(parsed.ops.len(), 3);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]

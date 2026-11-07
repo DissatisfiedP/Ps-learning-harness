@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "conclusion": {
+      "type": "string"
+    },
+    "premises": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "objections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "string",
+            "description": "premise id"
+          },
+          "by": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "replies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "targets",
+          "text",
+          "replies"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "blanks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "ids of premises, objections or replies to hide"
+    }
+  },
+  "required": [
+    "title",
+    "conclusion",
+    "premises",
+    "objections"
+  ],
+  "additionalProperties": false
+}

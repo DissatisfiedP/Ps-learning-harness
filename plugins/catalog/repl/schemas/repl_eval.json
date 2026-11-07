@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "lang": {
+      "type": "string"
+    },
+    "input": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "lang",
+    "input"
+  ],
+  "additionalProperties": false
+}

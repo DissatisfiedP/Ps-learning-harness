@@ -14,6 +14,20 @@ tokio.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing = "0.1"
 ulid = "1"
+base64 = "0.22"
+flate2 = "1"
+mlua = { version = "0.12", features = ["luau", "send", "serialize"] }
+quick-xml = "0.42"
+semver = "1"
+sha2 = "0.10"
+tar = "0.4"
+toml = "1"
+pdf-extract = "0.12.1"
+lopdf = "0.42.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+# Sync (docs/sync-build.md): libgit2 from source so no system libgit2 is needed;
+# HTTPS goes through the system OpenSSL, and SSH is out of scope.
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https"] }
 
 [lints]
 workspace = true

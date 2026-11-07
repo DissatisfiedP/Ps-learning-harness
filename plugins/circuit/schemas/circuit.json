@@ -1,0 +1,64 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["components", "analysis"],
+  "properties": {
+    "title": { "type": "string" },
+    "analysis": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["dc"], "properties": { "dc": { "type": "boolean" } } },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ac"],
+          "properties": {
+            "ac": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["frequencyHz"],
+              "properties": { "frequencyHz": { "type": "number", "exclusiveMinimum": 0 } }
+            }
+          }
+        }
+      ]
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "from"],
+        "description": "Points on a grid; parts whose ends share a point are joined. Two-terminal parts (R, C, L, V, I, wire, switch) need `from` and `to`.",
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string", "enum": ["R", "C", "L", "V", "I", "opamp", "ground", "wire", "switch", "probe"] },
+          "from": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "V: − terminal; I: the source draws its current out of this node; opamp: + input; ground: the grounded point; probe: the point measured" },
+          "to": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "V: + terminal (V raises `to` above `from`); I: the source pushes its current into this node; opamp: − input; ground: ignored; probe: reference point, default ground (reads V(from) − V(to))" },
+          "third": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "op-amp output; from is +, to is −" },
+          "value": { "type": "number", "description": "SI units: Ω, F, H (must be > 0), V, A" },
+          "label": { "type": "string" },
+          "closed": { "type": "boolean" },
+          "hidden": { "type": "boolean", "description": "probe only: draw '?' and keep the value from the learner (the tool text still reports it)" },
+          "adjustable": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["min", "max"],
+            "properties": {
+              "min": { "type": "number" },
+              "max": { "type": "number" },
+              "step": { "type": "number" }
+            }
+          },
+          "ac": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "magnitude": { "type": "number" },
+              "phaseDeg": { "type": "number" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

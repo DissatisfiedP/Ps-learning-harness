@@ -54,6 +54,7 @@ fn replay_message(m: &crate::Message) -> Vec<Value> {
     let mut tool_calls = Vec::new();
     let mut tool_results = Vec::new();
     let mut native_text: Option<String> = None;
+    let mut images = Vec::new();
     for block in &m.content {
         match block {
             ContentBlock::Text { text: t } => match text.as_mut() {
@@ -83,6 +84,12 @@ fn replay_message(m: &crate::Message) -> Vec<Value> {
                     "role": "tool",
                     "tool_call_id": call_id,
                     "content": c,
+                }));
+            }
+            ContentBlock::Image { media_type, data } => {
+                images.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{media_type};base64,{data}") },
                 }));
             }
             // Only replay our own native blocks; this wire has none normally.
@@ -115,8 +122,17 @@ fn replay_message(m: &crate::Message) -> Vec<Value> {
             let body = text.or(native_text);
             let only_text = tool_results.is_empty();
             out.extend(tool_results);
-            if body.is_some() || only_text {
-                out.push(json!({ "role": "user", "content": body.unwrap_or_default() }));
+            if images.is_empty() {
+                if body.is_some() || only_text {
+                    out.push(json!({ "role": "user", "content": body.unwrap_or_default() }));
+                }
+            } else {
+                let mut parts = Vec::new();
+                if let Some(t) = &body {
+                    parts.push(json!({ "type": "text", "text": t }));
+                }
+                parts.extend(images);
+                out.push(json!({ "role": "user", "content": parts }));
             }
         }
     }

@@ -17,7 +17,7 @@ If a candidate root needs "usually" or "except when", it isn't a root yet; go on
 
 **When it works,** loose facts the learner arrived with ("that's just how it is") start following from a few base facts. When that happens, point it out in one sentence; it is the payoff, not a tangent.
 
-Interactive demos and exact figures help when a quantity varies or the geometry matters. Use them if the section's plugins include them.
+When a quantity varies or the geometry matters, show it: with an active plugin's figure or interactive view if one fits, otherwise with a diagram block or a small table of values.
 
 **Example: decreed vs motivated.**
 - Decreed (the learner holds it loosely): "The derivative is defined as $\lim_{h\to0}\frac{f(x+h)-f(x)}{h}$."

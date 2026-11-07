@@ -1,7 +1,9 @@
-//! `page_fetch` for the researcher: GET with a 20 s timeout and a 2 MB cap,
-//! HTML converted to text in-tree (the `html2text` crate isn't available
-//! offline; a small converter is enough for reading articles), truncated to
-//! about 40k characters. PDFs are refused: PDF reading isn't built yet.
+//! `page_fetch` for the researcher: GET with a 20 s timeout and a 2 MB cap
+//! (32 MiB for a PDF), HTML converted to text in-tree (the `html2text` crate
+//! isn't available offline; a small converter is enough for reading
+//! articles), truncated to about 40k characters. A PDF comes back as
+//! page-tagged text (`[p.3] …`), so a paper can be read without leaving the
+//! tool; a scanned page says it has no text layer.
 
 use std::time::Duration;
 
@@ -12,21 +14,24 @@ const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHARS: usize = 40_000;
 const USER_AGENT: &str = "LearningHarness/0.1 (researcher)";
 
-/// Fetch a page as text. Errors are written for the model.
-pub async fn page_fetch(client: &Client, url: &str) -> Result<String, String> {
-    let url = url.trim();
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err("only http(s) URLs can be fetched".into());
-    }
-    if url
+/// True when the URL's path ends in `.pdf` (query string and fragment
+/// ignored), so a PDF gets the larger fetch cap before its headers arrive.
+fn looks_like_pdf_url(url: &str) -> bool {
+    url.trim()
         .to_ascii_lowercase()
         .split(['?', '#'])
         .next()
         .is_some_and(|p| p.ends_with(".pdf"))
-    {
-        return Err(crate::files::PDF_NOT_BUILT.into());
+}
+
+/// GET `url`: http(s) only, a success status only. Returns the response and
+/// its lowercased content type.
+async fn get(client: &Client, url: &str) -> Result<(reqwest::Response, String), String> {
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("only http(s) URLs can be fetched".into());
     }
-    let mut resp = client
+    let resp = client
         .get(url)
         .header("user-agent", USER_AGENT)
         .timeout(TIMEOUT)
@@ -43,26 +48,20 @@ pub async fn page_fetch(client: &Client, url: &str) -> Result<String, String> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if content_type.contains("pdf") {
-        return Err(crate::files::PDF_NOT_BUILT.into());
-    }
-    let textual = content_type.is_empty()
-        || content_type.starts_with("text/")
-        || content_type.contains("html")
-        || content_type.contains("xml")
-        || content_type.contains("json");
-    if !textual {
-        return Err(format!("unsupported content type `{content_type}`"));
-    }
+    Ok((resp, content_type))
+}
+
+/// Read the body up to `limit` bytes; `true` means the rest was dropped.
+async fn read_body(mut resp: reqwest::Response, limit: usize) -> Result<(Vec<u8>, bool), String> {
     let mut body: Vec<u8> = Vec::new();
     let mut capped = false;
-    let fetch = async {
+    let read = async {
         while let Some(chunk) = resp
             .chunk()
             .await
             .map_err(|e| format!("read failed: {}", e.without_url()))?
         {
-            let room = MAX_BYTES - body.len();
+            let room = limit.saturating_sub(body.len());
             if chunk.len() >= room {
                 body.extend_from_slice(&chunk[..room]);
                 capped = true;
@@ -72,9 +71,40 @@ pub async fn page_fetch(client: &Client, url: &str) -> Result<String, String> {
         }
         Ok::<(), String>(())
     };
-    tokio::time::timeout(TIMEOUT, fetch)
+    tokio::time::timeout(TIMEOUT, read)
         .await
         .map_err(|_| "timed out after 20 s".to_owned())??;
+    Ok((body, capped))
+}
+
+/// Fetch a page as text. Errors are written for the model.
+pub async fn page_fetch(client: &Client, url: &str) -> Result<String, String> {
+    let pdf_url = looks_like_pdf_url(url);
+    let (resp, content_type) = get(client, url).await?;
+    let pdf = pdf_url || content_type.contains("pdf");
+    let limit = if pdf {
+        crate::pdf::MAX_PDF_BYTES
+    } else {
+        MAX_BYTES
+    };
+    let (body, capped) = read_body(resp, limit).await?;
+    if pdf || crate::pdf::is_pdf(&body) {
+        if capped {
+            return Err(format!(
+                "the PDF is over the {} MiB fetch cap; fetch a smaller document",
+                crate::pdf::MAX_PDF_BYTES / (1024 * 1024)
+            ));
+        }
+        return fetch_pdf_text(&body);
+    }
+    let textual = content_type.is_empty()
+        || content_type.starts_with("text/")
+        || content_type.contains("html")
+        || content_type.contains("xml")
+        || content_type.contains("json");
+    if !textual {
+        return Err(format!("unsupported content type `{content_type}`"));
+    }
     let raw = String::from_utf8_lossy(&body);
     let looks_html = content_type.contains("html")
         || raw.trim_start().get(..15).is_some_and(|h| {
@@ -95,6 +125,32 @@ pub async fn page_fetch(client: &Client, url: &str) -> Result<String, String> {
         text.push_str("\n\n[truncated]");
     }
     Ok(text)
+}
+
+/// A fetched PDF as page-tagged text, capped at [`MAX_CHARS`] bytes.
+fn fetch_pdf_text(body: &[u8]) -> Result<String, String> {
+    let pages = crate::pdf::pages(body)?;
+    Ok(crate::pdf::tagged(&pages, MAX_CHARS))
+}
+
+/// Fetch a PDF's bytes over HTTP (at most the PDF input cap), for the
+/// researcher's `source_page_image`.
+pub async fn fetch_pdf(client: &Client, url: &str) -> Result<Vec<u8>, String> {
+    let (resp, content_type) = get(client, url).await?;
+    let (body, capped) = read_body(resp, crate::pdf::MAX_PDF_BYTES).await?;
+    if capped {
+        return Err(format!(
+            "the PDF is over the {} MiB fetch cap",
+            crate::pdf::MAX_PDF_BYTES / (1024 * 1024)
+        ));
+    }
+    if !crate::pdf::is_pdf(&body) {
+        return Err(format!(
+            "`{}` isn't a PDF (content type `{content_type}`)",
+            url.trim()
+        ));
+    }
+    Ok(body)
 }
 
 /// Convert HTML to readable text: drop scripts/styles/head, turn block
@@ -269,5 +325,27 @@ mod tests {
         assert!(text.contains("holds for ohmic materials."));
         assert!(text.contains("- two & three"));
         assert!(!text.contains("color:red") && !text.contains("var x") && !text.contains("hidden"));
+    }
+
+    /// The PDF half of `page_fetch`, tested without a server: a PDF body
+    /// becomes page-tagged text; a PDF named by its URL or content type takes
+    /// the same path.
+    #[test]
+    fn a_fetched_pdf_comes_back_as_page_tagged_text() {
+        assert!(looks_like_pdf_url("https://example.org/paper.pdf"));
+        assert!(looks_like_pdf_url(
+            "https://example.org/paper.PDF?dl=1#page=3"
+        ));
+        assert!(!looks_like_pdf_url("https://example.org/paper.html"));
+        let pdf = crate::pdf::fixtures::text_pdf(&[
+            "A first page with plenty of words to count as a text layer",
+            "",
+        ]);
+        assert!(crate::pdf::is_pdf(&pdf));
+        let text = fetch_pdf_text(&pdf).unwrap();
+        assert!(text.contains("[p.1]"), "{text}");
+        assert!(text.contains("[p.2] (no text layer"), "{text}");
+        let err = fetch_pdf_text(b"<html>not a pdf</html>").unwrap_err();
+        assert!(err.contains("isn't a PDF"), "{err}");
     }
 }

@@ -1,0 +1,32 @@
+# Catalogue entry, not built (docs/plugins.md §11). Nothing loads this
+# directory: it is not a folder plugin, not in a registry and not used by any
+# test. Native plugin: it needs the `exec` permission, which no Luau api 1
+# package may declare (docs/plugins.md §8.4), so it will be an in-tree Rust
+# type implementing `plugins::Plugin` (§12) with this manifest. Tool `entry`
+# names the Rust method; there is no src/main.luau.
+id = "code-runner"
+version = "0.0.0"
+api = 1
+title = "Code runner"
+description = "Lets the learner write, fix, read and run code inside the lesson, graded by the tutor's tests."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = ["exec"]
+use_when = "Programming sections where the learner must write, read, debug or predict the output of code. Languages on every platform: JavaScript, TypeScript, Python (Pyodide). Desktop also: the toolchains installed on the device."
+avoid_when = "The section is about concepts that don't need running code, e.g. what a hash table is for."
+cost = "Python loads a 10–20 MB runtime the first time it is used on a device."
+
+# The old brief ran in measure, teach and practice and listed the desktop
+# languages through a {{desktop_languages}} template value; the native plugin
+# puts them in use_when when it registers.
+
+[[tool]]
+name = "code_runner_task"
+description = "Give the learner a code task card. Returns the learner's final code, every run's output or error, the test results and their prediction."
+agents = ["tutor", "practice"]
+input = "schemas/code_runner_task.json"
+entry = "task"
+artifact = false
+
+[prompts]
+tutor = "prompts/tutor.md"

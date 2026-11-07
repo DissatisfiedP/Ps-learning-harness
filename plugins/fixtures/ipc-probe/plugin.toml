@@ -1,0 +1,36 @@
+# Security fixture, not a teaching plugin. Its view tries every known way out
+# of the plugin-view sandbox (Tauri IPC, the parent window, network, navigation,
+# eval) and reports what got through. `ui/tests/run.sh` runs it in headless
+# Chromium against the mocked UI; on WebKitGTK it is a manual run through the
+# real app (docs/plugins.md §7.2, "IPC isolation").
+id = "ipc-probe"
+version = "0.1.0"
+api = 1
+title = "IPC escape probe"
+description = "Security fixture: a view that tries to escape its sandbox and reports every attempt."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = []
+use_when = "Never in teaching; only to verify view isolation on a new webview."
+avoid_when = "Any real session."
+cost = "instant"
+
+[[tool]]
+name = "ipc_probe_show"
+description = "Show the IPC escape probe. Place it with ![IPC probe](artifact:<id>); the view lists every escape attempt and whether it was blocked."
+agents = ["tutor"]
+input = "schemas/show.json"
+entry = "show"
+artifact = true
+
+[[renderer]]
+entry = "render"
+
+[[view]]
+name = "ipc-probe"
+html = "views/probe.html"
+calls = []
+answer = false
+
+[prompts]
+tutor = "prompts/tutor.md"

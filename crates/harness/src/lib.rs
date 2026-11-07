@@ -3,40 +3,61 @@
 //! [`Harness`].
 
 mod agent;
+mod artifacts;
+mod attachments;
 mod config;
 pub mod events;
 mod files;
+mod frontier;
+pub mod graph;
 mod jobs;
-mod map;
+pub mod knowledge;
+mod models;
+mod pdf;
 pub mod plugins;
 mod prompts;
+pub mod proposals;
 pub mod replay;
 mod sessions;
 pub mod state;
+pub mod sync;
 pub mod tools;
 mod web;
+mod workspace;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use providers::claude_oauth::{self, PendingLogin};
 use providers::workbuddy::{self, LoginStart};
 use providers::{
-    stream_chat, ChatRequest, Client, ContentBlock, Credential, CredentialKind, Message, ModelInfo,
+    stream_chat, ChatRequest, Client, ContentBlock, Credential, CredentialKind, Message,
     ProviderError, ProviderId, Role, StopReason, StreamEvent, ToolSpec, Usage,
 };
 use serde::Serialize;
+use serde_json::Value;
 use tokio::sync::{oneshot, Semaphore};
 
 pub use config::{ModelChoice, ModelRole, Roles, Settings};
 pub use events::{AgentEvent, AgentName, Coalescer, Envelope, EventSink};
-pub use map::{MapNode, MapPlan};
-pub use prompts::{Composer, PluginManifest, TemplateValues};
+pub use files::Mention;
+pub use frontier::FrontierItem;
+pub use knowledge::{
+    Checks, KnowledgeChain, KnowledgeEdge, KnowledgeMap, KnowledgeNode, KnowledgeTopic,
+    ProposedSplit, SplitGroup,
+};
+pub use plugins::{PluginManifest, PluginSource};
+pub use prompts::{Composer, TemplateValues};
 pub use providers;
-pub use sessions::{Ending, Mode, Op, RemovedPlugin, Session, SessionSummary, StoredMessage};
+pub use sessions::{
+    ApproveOp, Attachment, CompactionOp, Ending, Header, Mode, Op, PhaseOp, RecordOp,
+    RemovedPlugin, Session, SessionSummary, StoredMessage, ToolOp, ToolResultValue,
+};
 pub use state::SessionState;
+pub use sync::{ConflictPath, SyncConfig, SyncReport, SyncStatus};
 
 const MAX_TOKENS: u32 = 8192;
 const LOGIN_POLL: Duration = Duration::from_millis(1500);
@@ -58,6 +79,8 @@ pub enum Error {
     Invalid(String),
     #[error("prompt: {0}")]
     Prompt(String),
+    #[error("{0}")]
+    Sync(String),
 }
 
 /// Streamed to the UI during a Practice turn (`send`/`retry`). Learn sessions
@@ -90,7 +113,6 @@ pub struct ProviderStatus {
     pub account: Option<String>,
     pub base_url: Option<String>,
     pub default_base_url: &'static str,
-    pub models: Vec<ModelInfo>,
 }
 /// In-memory token usage per role (architecture §4.22). Accumulated as model
 /// calls complete; never persisted (derived, device-local).
@@ -138,24 +160,42 @@ pub struct Harness {
     /// Stop handles of running tutor/practice turns, by session.
     pub(crate) running: Mutex<HashMap<String, oneshot::Sender<()>>>,
     pub(crate) login_cancelled: AtomicBool,
+    /// PKCE verifier/state between the two Claude subscription login steps.
+    pub(crate) pending_claude_login: Mutex<Option<PendingLogin>>,
     /// Input/output tokens per role, accumulated in memory.
     pub(crate) role_usage: Mutex<HashMap<ModelRole, RoleUsage>>,
     /// Per-session turn lock: tutor turns, answers and job deliveries for one
     /// session are serialized; different sessions never wait on each other.
     pub(crate) turn_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Registered plugins (scaffolding, M5).
+    /// Registered plugins: installed packages, folder plugins and natives.
     pub(crate) plugins: Mutex<plugins::PluginRegistry>,
+    /// Device-local copy of the data repo path (plugin installs, registries).
+    pub(crate) config_dir: PathBuf,
+    /// Last model list per provider plus the models.dev metadata
+    /// (`models-cache.json`). Read on every turn's context lookup.
+    pub(crate) model_cache: Mutex<config::ModelCache>,
+    /// session → workspace folder mapping (device-local).
+    pub(crate) workspaces: Mutex<workspace::Workspaces>,
+    /// (session, workspace-relative path) → sha256 the agent last saw.
+    pub(crate) workspace_hashes: Mutex<HashMap<(String, String), String>>,
     /// Running jobs by job id.
     pub(crate) jobs: Mutex<HashMap<String, jobs::JobHandle>>,
     /// Background tasks by session (jobs, wakes, titles).
     pub(crate) background: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
     /// Sessions whose interrupted jobs were already restarted.
     pub(crate) recovered: Mutex<HashSet<String>>,
-    /// Concurrency per role: Reader 3 (researcher, titles), Planner 1.
+    /// Concurrency per role: Reader 3 (researcher, titles), Planner 1, and
+    /// one graph builder at a time.
     pub(crate) reader_slots: Arc<Semaphore>,
     pub(crate) planner_slots: Arc<Semaphore>,
+    pub(crate) librarian_slots: Arc<Semaphore>,
     /// Where runtime events go (the UI); `None` drops them.
     pub(crate) sink: Mutex<Option<EventSink>>,
+    /// session → artifact → latest view-state summary since the learner's
+    /// last message; flushed as `viewState` ops when they next send (W7).
+    pub(crate) view_states: Mutex<HashMap<String, BTreeMap<String, String>>>,
+    /// Git sync of the data repo (device-local settings + one run at a time).
+    pub(crate) sync: Arc<sync::Sync>,
 }
 
 impl Harness {
@@ -174,16 +214,70 @@ impl Harness {
             config: Mutex::new(config::Config::load(config_dir)?),
             running: Mutex::new(HashMap::new()),
             login_cancelled: AtomicBool::new(false),
+            pending_claude_login: Mutex::new(None),
             role_usage: Mutex::new(HashMap::new()),
             turn_locks: Mutex::new(HashMap::new()),
             plugins: Mutex::new(plugins::PluginRegistry::default()),
+            config_dir: config_dir.to_owned(),
+            model_cache: Mutex::new(config::ModelCache::load(config_dir)?),
+            workspaces: Mutex::new(workspace::Workspaces::load(config_dir)?),
+            workspace_hashes: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
             background: Mutex::new(HashMap::new()),
             recovered: Mutex::new(HashSet::new()),
             reader_slots: Arc::new(Semaphore::new(3)),
             planner_slots: Arc::new(Semaphore::new(1)),
+            librarian_slots: Arc::new(Semaphore::new(1)),
             sink: Mutex::new(None),
+            view_states: Mutex::new(HashMap::new()),
+            sync: Arc::new(sync::Sync::new(repo, config_dir)),
         })
+        .inspect(|harness: &Self| {
+            // Chips don't survive a restart, so neither do their staged images.
+            crate::attachments::clear_staging(&harness.staging_dir());
+            if let Err(e) = harness.reload_plugins() {
+                tracing::warn!(error = %e, "could not load plugins");
+            }
+            // Best effort: a configured sync catches up in the background, and
+            // an offline launch only records `last_error` (the UI banner).
+            harness.sync.trigger();
+        })
+    }
+
+    // ---- sync (docs/sync-build.md) --------------------------------------
+
+    /// Configuration plus local ahead/behind counts; no network.
+    pub fn sync_status(&self) -> Result<SyncStatus, Error> {
+        self.sync.status()
+    }
+
+    /// Save the device-local remote and token. An empty remote disconnects
+    /// sync and forgets the token.
+    pub fn set_sync(
+        &self,
+        remote: Option<&str>,
+        token: Option<&str>,
+        branch: Option<&str>,
+    ) -> Result<SyncStatus, Error> {
+        self.sync.set(remote, token, branch)?;
+        self.sync.status()
+    }
+
+    /// One full sync run (commit, fetch, merge, resolve, push).
+    pub fn sync_now(&self) -> Result<SyncReport, Error> {
+        self.sync.sync()
+    }
+
+    /// The learner saw the conflict copies: clear the banner state (the
+    /// `.conflicts/` files stay in the repo and its history).
+    pub fn acknowledge_conflicts(&self) -> Result<SyncStatus, Error> {
+        self.sync.acknowledge()?;
+        self.sync.status()
+    }
+
+    /// Best-effort background sync; never blocks the caller or a turn.
+    pub fn sync_in_background(&self) {
+        self.sync.trigger();
     }
 
     /// Where runtime events (turns, ops, jobs) go.
@@ -202,6 +296,7 @@ impl Harness {
     }
 
     pub fn delete_session(&self, id: &str) -> Result<(), Error> {
+        lock(&self.view_states).remove(id);
         self.cancel(id);
         let jobs: Vec<String> = lock(&self.jobs)
             .iter()
@@ -214,18 +309,52 @@ impl Harness {
         self.store.delete(id)
     }
 
-    /// The Map page's data: every non-legacy Learn session with an approved
-    /// plan, newest first, with check verdicts per idea (ui-design §7.6).
-    pub fn learning_map(&self) -> Result<Vec<MapPlan>, Error> {
-        let mut out = Vec::new();
-        for summary in self.store.list()? {
-            if summary.mode != Mode::Learn || summary.read_only {
-                continue;
-            }
-            let state = self.store.with_ops(&summary.id, replay::replay_state)?;
-            out.extend(map::plan_of(summary, state));
-        }
-        Ok(out)
+    /// The Map page's data: the standalone knowledge graph (topics, claims,
+    /// prerequisite edges that may cross topics, and per-topic check totals)
+    /// read from `<repo>/graph/` (ui-design §7.6, architecture §4.2/§4.5).
+    pub fn knowledge_map(&self) -> Result<KnowledgeMap, Error> {
+        knowledge::load(&self.repo)
+    }
+
+    /// The Map page's review list: proposed prerequisite edges the extractor
+    /// wrote, with the titles the UI shows instead of ids (ui-design §7.6).
+    pub fn edge_proposals(&self) -> Result<proposals::Review, Error> {
+        proposals::review(&self.repo)
+    }
+
+    /// Accepts and dismisses proposals by key (`from\0to`). Validation happens
+    /// here, not in the UI: what survives is appended to `graph/edges.jsonl`,
+    /// what the graph refuses is reported, and both leave the review file.
+    pub fn decide_edge_proposals(
+        &self,
+        accept: &[String],
+        dismiss: &[String],
+    ) -> Result<proposals::Decision, Error> {
+        proposals::decide(&self.repo, accept, dismiss)
+    }
+
+    /// Start the graph builder for this session (`docs/graph-build.md`). Runs
+    /// in the background on the Librarian role, appends ops, and never
+    /// delivers anything into the conversation. Refuses with a readable
+    /// message while one is already open for the session.
+    pub fn graph_build(self: &Arc<Self>, session_id: &str) -> Result<String, Error> {
+        self.spawn_graph_job(session_id, "manual")
+    }
+
+    /// Recompute the topic-split proposals (writing
+    /// `graph/splits.proposed.json`) and return them.
+    pub fn graph_splits(&self) -> Result<Vec<ProposedSplit>, Error> {
+        graph::splits(&self.repo)
+    }
+
+    /// Accept and/or dismiss proposed topic splits. Accepting appends a
+    /// `split` op per topic; either way the proposal file is rewritten.
+    pub fn decide_splits(
+        &self,
+        accept: &[String],
+        dismiss: &[String],
+    ) -> Result<graph::SplitDecision, Error> {
+        graph::decide_splits(&self.repo, accept, dismiss)
     }
 
     /// Practice mode: appends the learner's message (creating the session
@@ -239,6 +368,18 @@ impl Harness {
         text: &str,
         on_event: &mut (dyn FnMut(ChatEvent<'_>) + Send),
     ) -> Result<StoredMessage, Error> {
+        self.send_with(session_id, mode, text, &[], on_event).await
+    }
+
+    /// As [`send`], with attachments (W3).
+    pub async fn send_with(
+        &self,
+        session_id: Option<&str>,
+        mode: Mode,
+        text: &str,
+        attachments: &[Attachment],
+        on_event: &mut (dyn FnMut(ChatEvent<'_>) + Send),
+    ) -> Result<StoredMessage, Error> {
         if mode != Mode::Practice {
             return Err(Error::Invalid(
                 "Learn sessions run through the tutor; use start_teaching".into(),
@@ -247,6 +388,18 @@ impl Harness {
         let text = text.trim();
         if text.is_empty() {
             return Err(Error::Invalid("message is empty".into()));
+        }
+        // Practice has no file tools: it takes images only (ui-design §7.3).
+        if attachments.iter().any(|a| a.kind != "image") {
+            return Err(Error::Invalid(
+                "Practice can't read files or folders; attach images only".into(),
+            ));
+        }
+        if !attachments.is_empty() && self.role_vision(ModelRole::Tutor) == Some(false) {
+            return Err(Error::Invalid(
+                "this model can't see images; send without them or choose another Tutor model"
+                    .into(),
+            ));
         }
         // Fail before writing anything if no model is usable.
         self.model_choice()?;
@@ -263,8 +416,10 @@ impl Harness {
                 summary.id
             }
         };
-        self.store
-            .append(&id, &sessions::new_message(Role::User, text.to_owned()))?;
+        self.commit_attachments(attachments)?;
+        let mut message = sessions::new_message(Role::User, text.to_owned());
+        message.attachments = attachments.to_vec();
+        self.store.append(&id, &message)?;
         self.reply(&id, on_event).await
     }
 
@@ -302,12 +457,12 @@ impl Harness {
         let session = self.store.load(session_id)?;
         let choice = self.model_choice()?;
         let system = practice_prompt(&self.repo)?;
-        let history: Vec<Message> = session
-            .messages
-            .iter()
-            .filter(|m| !m.content.trim().is_empty())
-            .map(|m| Message::text(m.role, m.content.clone()))
-            .collect();
+        let history: Vec<Message> = replay::conversation_with(
+            &session.ops,
+            Some(&self.repo),
+            self.role_vision(ModelRole::Tutor) != Some(false),
+            false,
+        );
         let req = ChatRequest {
             model: &choice.model,
             system: &system,
@@ -386,6 +541,11 @@ impl Harness {
                 let endpoint = provider.endpoint(&fresh, base.as_deref(), conversation_id)?;
                 Ok(stream_chat(&self.client, &endpoint, req, on_delta).await?)
             }
+            (Err(ProviderError::Unauthorized(_)), Credential::ClaudeCode(s)) if s.can_refresh() => {
+                let fresh = self.refresh_claude(s).await?;
+                let endpoint = provider.endpoint(&fresh, base.as_deref(), conversation_id)?;
+                Ok(stream_chat(&self.client, &endpoint, req, on_delta).await?)
+            }
             (result, _) => Ok(result?),
         }
     }
@@ -394,6 +554,12 @@ impl Harness {
 
     pub fn settings(&self) -> Settings {
         lock(&self.config).settings.clone()
+    }
+
+    /// The learner's saved default starting point (§3), normalized on load to
+    /// `measure` when the settings file holds anything else.
+    pub fn saved_starting_point(&self) -> String {
+        lock(&self.config).settings.starting_point.clone()
     }
 
     /// Static metadata for the five role cards in Settings.
@@ -421,6 +587,7 @@ impl Harness {
                 let saved = config.credentials.get(&id);
                 let (source, account) = match saved {
                     Some(Credential::Workbuddy(s)) => (Some("saved"), s.account.clone()),
+                    Some(Credential::ClaudeCode(s)) => (Some("saved"), s.account.clone()),
                     Some(Credential::ApiKey { .. }) => (Some("saved"), None),
                     None if id.credential_from_env().is_some() => (Some("env"), None),
                     None => (None, None),
@@ -435,32 +602,9 @@ impl Harness {
                     account,
                     base_url: config.settings.base_urls.get(&id).cloned(),
                     default_base_url: spec.default_base_url,
-                    models: id.suggested_models(),
                 }
             })
             .collect()
-    }
-
-    /// Model list for the picker. WorkBuddy's comes from the account's live
-    /// catalog; the others are suggestions (any id can be typed).
-    pub async fn models(&self, provider: ProviderId) -> Result<Vec<ModelInfo>, Error> {
-        if provider != ProviderId::Workbuddy {
-            return Ok(provider.suggested_models());
-        }
-        let credential = self.current_credential(provider).await?;
-        let base = self.workbuddy_base();
-        match (
-            workbuddy::list_models(&self.client, &base, &credential).await,
-            &credential,
-        ) {
-            (Err(ProviderError::Unauthorized(_)), Credential::Workbuddy(s))
-                if s.can_refresh(unix_now()) =>
-            {
-                let fresh = self.refresh_workbuddy(s).await?;
-                Ok(workbuddy::list_models(&self.client, &base, &fresh).await?)
-            }
-            (result, _) => Ok(result?),
-        }
     }
 
     pub fn save_api_key(&self, provider: ProviderId, key: &str) -> Result<(), Error> {
@@ -500,6 +644,19 @@ impl Harness {
         config.save_settings()
     }
 
+    /// Remember the learner's default starting point for new sessions (§3).
+    pub fn set_starting_point(&self, point: &str) -> Result<(), Error> {
+        let point = point.trim();
+        if !matches!(point, "measure" | "quick" | "new") {
+            return Err(Error::Invalid(
+                "starting point must be measure, quick or new".into(),
+            ));
+        }
+        let mut config = lock(&self.config);
+        config.settings.starting_point = point.to_owned();
+        config.save_settings()
+    }
+
     /// Set (or clear, with `None`) the model for one role. WorkBuddy efforts
     /// are validated against the live catalog so unsupported efforts are
     /// never sent.
@@ -518,7 +675,7 @@ impl Harness {
                 c.model = model.clone();
                 c.effort = match (c.provider, c.effort) {
                     (ProviderId::Workbuddy, Some(effort)) => self
-                        .models(ProviderId::Workbuddy)
+                        .models(ProviderId::Workbuddy, false)
                         .await?
                         .iter()
                         .find(|m| m.id == model)
@@ -625,6 +782,161 @@ impl Harness {
         self.login_cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// Step 1 of Claude subscription sign-in: keep the PKCE verifier and
+    /// return the URL for the learner to open in a browser.
+    pub fn claude_login_start(&self) -> claude_oauth::LoginStart {
+        let pending = PendingLogin::new();
+        let start = pending.start();
+        *lock(&self.pending_claude_login) = Some(pending);
+        start
+    }
+
+    /// Step 2: exchange the `code[#state]` the browser showed, then save the
+    /// subscription grant. Returns the account label, if the token response
+    /// carried one.
+    pub async fn claude_login_submit(&self, pasted: &str) -> Result<Option<String>, Error> {
+        let pending = lock(&self.pending_claude_login)
+            .take()
+            .ok_or_else(|| Error::Invalid("start sign-in again".into()))?;
+        let session = pending.exchange(&self.client, pasted).await?;
+        let account = session.account.clone();
+        let mut config = lock(&self.config);
+        config
+            .credentials
+            .insert(ProviderId::ClaudeCode, Credential::ClaudeCode(session));
+        config.save_credentials()?;
+        Ok(account)
+    }
+
+    pub fn claude_login_cancel(&self) {
+        *lock(&self.pending_claude_login) = None;
+    }
+
+    // ---- learner commands: attachments, mentions, views -------------------
+
+    /// Device-local folder for images that are chips but not yet sent.
+    pub(crate) fn staging_dir(&self) -> PathBuf {
+        crate::attachments::staging_dir(&self.config_dir)
+    }
+
+    /// Stage a pasted image (device-local until Send) and describe it (W3).
+    pub fn stage_image(&self, data_base64: &str, name: Option<&str>) -> Result<Attachment, Error> {
+        crate::attachments::store_image(&self.staging_dir(), data_base64, name)
+    }
+
+    /// Describe a picked, dropped or mentioned path: an image file is staged
+    /// like a pasted one; a file or folder is referenced, never copied.
+    /// Paths inside the session workspace are kept workspace-relative.
+    pub fn stage_file(&self, session_id: Option<&str>, path: &str) -> Result<Attachment, Error> {
+        let workspace = session_id.and_then(|id| lock(&self.workspaces).get(id));
+        crate::attachments::reference(path, workspace.as_deref(), &self.staging_dir())
+    }
+
+    /// Delete a staged image whose chip was removed before Send.
+    pub fn unstage_image(&self, path: &str) -> Result<(), Error> {
+        crate::attachments::unstage(&self.staging_dir(), path)
+    }
+
+    /// Move a message's staged images into the repo (`attachments/<yyyy>/`)
+    /// as it is sent.
+    pub(crate) fn commit_attachments(&self, attachments: &[Attachment]) -> Result<(), Error> {
+        crate::attachments::commit(&self.repo, &self.staging_dir(), attachments)
+    }
+
+    /// A data URL for an image chip or a sent image (message thumbnails).
+    pub fn attachment_data(&self, path: &str) -> Result<String, Error> {
+        crate::attachments::data_url(&self.repo, &self.staging_dir(), path)
+    }
+
+    /// `@`-mention candidates under home, the session workspace and the
+    /// session's granted roots.
+    pub fn mentions(
+        &self,
+        session_id: Option<&str>,
+        query: &str,
+    ) -> Result<Vec<files::Mention>, Error> {
+        let mut roots: Vec<PathBuf> = files::home_dir().into_iter().collect();
+        let mut workspace = None;
+        if let Some(id) = session_id {
+            workspace = lock(&self.workspaces).get(id);
+            if let Ok(state) = self.session_state(id) {
+                roots.extend(state.file_grants.iter().map(PathBuf::from));
+            }
+        }
+        Ok(files::mentions(&roots, workspace.as_deref(), query, 50))
+    }
+
+    /// Vision capability for the two agents that can receive images.
+    pub fn vision_capabilities(&self) -> VisionCapabilities {
+        VisionCapabilities {
+            tutor: self.role_vision(ModelRole::Tutor),
+            practice: self.role_vision(ModelRole::Tutor),
+        }
+    }
+
+    /// Metadata for a plugin's interactive view: what the UI needs to build
+    /// the bridge. The document itself is served separately by [`Self::view_document`].
+    pub fn plugin_view(&self, plugin_id: &str) -> Result<PluginView, Error> {
+        let plugin = self.enabled_plugin(plugin_id)?;
+        let view = plugin
+            .manifest()
+            .view
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::Invalid("that plugin has no view".into()))?;
+        Ok(PluginView {
+            name: view.name,
+            calls: view.calls,
+            answer: view.answer,
+        })
+    }
+
+    /// The inlined view document for the `pluginview` URI scheme. Kept out of
+    /// `plugin_view` so the iframe's HTML is never sent over the UI command
+    /// channel — only the sandboxed scheme response carries it.
+    pub fn view_document(&self, plugin_id: &str) -> Result<Vec<u8>, Error> {
+        let plugin = self.enabled_plugin(plugin_id)?;
+        if plugin.manifest().view.is_empty() {
+            return Err(Error::Invalid("that plugin has no view".into()));
+        }
+        Ok(plugin.view_html().map_err(Error::Invalid)?.into_bytes())
+    }
+
+    /// A bridge call from a view (allow-listed by the manifest; the plugin
+    /// must be enabled).
+    pub fn plugin_view_call(
+        &self,
+        plugin_id: &str,
+        function: &str,
+        args: Value,
+    ) -> Result<Value, Error> {
+        let plugin = self.enabled_plugin(plugin_id)?;
+        plugin.view_call(function, &args).map_err(Error::Invalid)
+    }
+
+    /// Hold a view's short state summary for the learner's next message.
+    /// Only the latest per artifact is kept; it is stored as a `viewState`
+    /// op when the learner sends, so ordinary interaction is not logged.
+    pub fn view_state(
+        &self,
+        session_id: &str,
+        artifact_id: &str,
+        summary: &str,
+    ) -> Result<(), Error> {
+        let ops = self.learn_ops(session_id)?;
+        if !ops
+            .iter()
+            .any(|o| matches!(o, Op::Artifact(a) if a.artifact_id == artifact_id))
+        {
+            return Err(Error::Invalid(format!("unknown artifact {artifact_id}")));
+        }
+        lock(&self.view_states)
+            .entry(session_id.to_owned())
+            .or_default()
+            .insert(artifact_id.to_owned(), sanitize_view_state(summary));
+        Ok(())
+    }
+
     // ---- internals ------------------------------------------------------
 
     fn model_choice(&self) -> Result<ModelChoice, Error> {
@@ -652,8 +964,8 @@ impl Harness {
             .cloned()
     }
 
-    /// The saved or environment credential; a WorkBuddy session is refreshed
-    /// first when less than a day of it remains.
+    /// The saved or environment credential; expiring sessions are refreshed
+    /// before the request (WorkBuddy: 1 day; Claude subscription: 5 minutes).
     async fn current_credential(&self, provider: ProviderId) -> Result<Credential, Error> {
         let credential = self.credential(provider)?;
         match &credential {
@@ -661,6 +973,9 @@ impl Harness {
                 if s.needs_refresh(unix_now()) && s.can_refresh(unix_now()) =>
             {
                 self.refresh_workbuddy(s).await
+            }
+            Credential::ClaudeCode(s) if s.needs_refresh(unix_now()) && s.can_refresh() => {
+                self.refresh_claude(s).await
             }
             _ => Ok(credential),
         }
@@ -689,12 +1004,60 @@ impl Harness {
         config.save_credentials()?;
         Ok(credential)
     }
+
+    /// Rotate a Claude subscription grant and persist it. A failed refresh
+    /// surfaces `Unauthorized` so the UI can ask the learner to sign in again.
+    async fn refresh_claude(&self, session: &claude_oauth::Session) -> Result<Credential, Error> {
+        let fresh = claude_oauth::refresh(&self.client, session, unix_now()).await?;
+        let credential = Credential::ClaudeCode(fresh);
+        let mut config = lock(&self.config);
+        config
+            .credentials
+            .insert(ProviderId::ClaudeCode, credential.clone());
+        config.save_credentials()?;
+        Ok(credential)
+    }
 }
 
-/// The Practice prompt (unchanged until the coach is built). A learner
-/// override in `<repo>/prompts/practice.md` wins over the bundled text.
+/// Vision capability for the composer (W2/W3). `None` = unverified.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisionCapabilities {
+    pub tutor: Option<bool>,
+    pub practice: Option<bool>,
+}
+
+/// Metadata for a plugin's interactive view (the document is served by the
+/// `pluginview` scheme, not sent here).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginView {
+    pub name: String,
+    pub calls: Vec<String>,
+    pub answer: bool,
+}
+
+/// A view-state summary as one line: control characters and line breaks
+/// become spaces, capped at 500 characters (W7).
+pub(crate) fn sanitize_view_state(summary: &str) -> String {
+    summary
+        .chars()
+        .map(|c| match c {
+            c if c.is_control() => ' ',
+            '\u{2028}' | '\u{2029}' => ' ',
+            c => c,
+        })
+        .take(500)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// The Practice prompt, rendered like every other prompt (unchanged until the
+/// coach is built). A learner override in `<repo>/prompts/practice.md` wins
+/// over the bundled text.
 fn practice_prompt(repo: &Path) -> Result<String, Error> {
-    Composer::new(repo).load("practice.md")
+    Composer::new(repo).compose_practice()
 }
 
 /// A poisoned lock only means another command panicked mid-update of plain

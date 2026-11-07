@@ -3,13 +3,15 @@
 //!
 //! - `settings.json`: per-role model choices, per-provider base URL overrides.
 //! - `credentials.json`: API keys and WorkBuddy sessions, mode 0600.
+//! - `models-cache.json`: the model list each provider last returned, plus the
+//!   public metadata that fills the fields a listing leaves out.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use providers::{Credential, ProviderId};
+use providers::{Credential, ModelInfo, ProviderId};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::Error;
@@ -79,11 +81,11 @@ impl ModelRole {
     /// Guidance shown to the learner, from architecture §4.22.
     pub fn guidance(self) -> &'static str {
         match self {
-            ModelRole::Tutor => "This model teaches you and does most of the work. Learning quality depends on it more than on anything else. Use your best model here; save money on the other roles instead.",
-            ModelRole::Planner => "Plans your route and checks practice problems. Called only a few times, so the best reasoning model at high effort costs little.",
-            ModelRole::Reader => "Reads web pages and your documents and writes short cited summaries. A fast, cheap, long-context model is right. Vision lets it read scanned pages.",
-            ModelRole::Librarian => "Decides what you've learned and how the ideas connect. Its mistakes stay in your graph, so don't pick the cheapest.",
-            ModelRole::Builder => "Writes interactive demos and draws exact figures. Needs a good coding model; figures need vision.",
+            ModelRole::Tutor => "Your best model. Learning quality depends on it most.",
+            ModelRole::Planner => "Best reasoning model, high effort. Called rarely.",
+            ModelRole::Reader => "Fast, cheap, long context. Vision reads scans.",
+            ModelRole::Librarian => "Not the cheapest: its mistakes stay in your graph.",
+            ModelRole::Builder => "Good coding model. Figures need vision.",
         }
     }
 
@@ -161,6 +163,28 @@ pub struct Settings {
     /// written after load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelChoice>,
+    /// Plugin registries (W8). Empty by default: no public registry ships
+    /// until the owner publishes one.
+    #[serde(default)]
+    pub registries: Vec<crate::plugins::install::Registry>,
+    /// Development plugins added by folder.
+    #[serde(default)]
+    pub plugin_folders: Vec<crate::plugins::install::FolderPlugin>,
+    /// Installed plugins the learner turned off.
+    #[serde(default)]
+    pub disabled_plugins: Vec<String>,
+    /// How a new session measures the learner (docs/learning-system.md §3):
+    /// `measure` (the full probe), `quick` (at most five questions) or `new`
+    /// (no probe questions). Remembered as the learner's default; the tutor
+    /// may still set a different one per goal.
+    #[serde(default = "default_starting_point")]
+    pub starting_point: String,
+}
+
+/// The default starting point: the full probe, which is the most useful one
+/// for planning (§3).
+pub fn default_starting_point() -> String {
+    "measure".to_owned()
 }
 
 impl Settings {
@@ -175,6 +199,11 @@ impl Settings {
         // Always clear: even if tutor was already set, never keep the legacy
         // field around.
         self.model = None;
+        // A missing or garbled starting point falls back to the default
+        // (a fresh settings file is `Default`, which is empty).
+        if !matches!(self.starting_point.as_str(), "measure" | "quick" | "new") {
+            self.starting_point = default_starting_point();
+        }
     }
 }
 
@@ -219,7 +248,51 @@ impl Config {
     }
 }
 
-fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, Error> {
+/// The model list one provider last returned, and the base URL it came from.
+/// A proxy's list is not the provider's own, so the base URL is part of the
+/// entry: switching overrides must not show the other server's models.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedModels {
+    pub base_url: String,
+    /// Unix seconds when the fetch completed.
+    pub fetched_at: u64,
+    pub models: Vec<ModelInfo>,
+}
+
+/// The trimmed models.dev metadata, with the validator needed to revalidate
+/// without downloading the full catalog again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedCatalog {
+    pub fetched_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    pub providers: providers::Catalog,
+}
+
+/// `models-cache.json`. Device-local and rebuildable: a model list belongs to
+/// an account and a base URL, so it is never synced.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCache {
+    #[serde(default)]
+    pub providers: BTreeMap<ProviderId, CachedModels>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<CachedCatalog>,
+}
+
+impl ModelCache {
+    pub fn load(dir: &Path) -> Result<Self, Error> {
+        read_json(&dir.join("models-cache.json"))
+    }
+
+    pub fn save(&self, dir: &Path) -> Result<(), Error> {
+        write_json(&dir.join("models-cache.json"), self, false)
+    }
+}
+
+pub(crate) fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, Error> {
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|e| Error::Corrupt(format!("{}: {e}", path.display()))),
@@ -229,7 +302,7 @@ fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, Error> {
 }
 
 /// Write-then-rename so a crash never leaves a half-written file.
-fn write_json<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<(), Error> {
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<(), Error> {
     let tmp = path.with_extension("json.tmp");
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -292,6 +365,28 @@ mod tests {
         s.migrate();
         assert_eq!(s.roles.tutor.as_ref().unwrap().model, "gpt");
         assert!(s.model.is_none());
+    }
+
+    #[test]
+    fn the_starting_point_defaults_to_measure_and_serializes_camel_case() {
+        let mut fresh = Settings::default();
+        fresh.migrate();
+        assert_eq!(fresh.starting_point, "measure");
+        let json = serde_json::to_value(&fresh).unwrap();
+        assert_eq!(json["startingPoint"], "measure", "{json}");
+
+        // A stored value survives a load; a garbled one is repaired.
+        let mut stored: Settings =
+            serde_json::from_value(serde_json::json!({ "startingPoint": "quick" })).unwrap();
+        stored.migrate();
+        assert_eq!(stored.starting_point, "quick");
+        let mut garbled: Settings =
+            serde_json::from_value(serde_json::json!({ "startingPoint": "sometimes" })).unwrap();
+        garbled.migrate();
+        assert_eq!(garbled.starting_point, "measure");
+        let mut missing: Settings = serde_json::from_value(serde_json::json!({})).unwrap();
+        missing.migrate();
+        assert_eq!(missing.starting_point, "measure");
     }
 
     #[test]

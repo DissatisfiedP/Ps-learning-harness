@@ -60,7 +60,7 @@ Headers on every call, as the WorkBuddy desktop client sets them (**official** h
 | `X-Agent-Intent` | `craft` (official default) |
 | `X-Agent-Purpose` | `conversation` |
 | `X-Agent-Runtime` | `local-agent` |
-| `X-Conversation-ID` | the Learning Harness session id |
+| `X-Conversation-ID` | the P's Learning Harness session id |
 | `X-Conversation-Request-ID`, `X-Conversation-Message-ID`, `X-Request-ID` | a new UUID per request |
 
 Requests missing the client headers are reported to fail with `11128` (**third-party**). This is why the app identifies itself as the WorkBuddy client. If Tencent changes the expected versions, update `APP_VERSION` and `CLI_VERSION` in `workbuddy.rs`.

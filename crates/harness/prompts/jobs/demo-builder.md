@@ -7,10 +7,12 @@ Title: {{title}}
 Brief:
 {{brief}}
 
+The brief states the concept, every control with its range and what it changes, what is drawn, the formulas and constants, and what the learner should notice. The tutor teaches on while you build, then tells the learner which control to move and what to watch, so keep the brief's control names and make that visible.
+
 ## Requirements
 
 - **One self-contained HTML file.** Inline CSS and JavaScript. No network access: no CDN imports, no fonts, no remote images. Vanilla JS with Canvas 2D or SVG.
-- **Correct before pretty.** Implement the formulas and constants exactly as the brief gives them. If the brief is missing something the model needs, choose the standard value and note it in your submission.
+- **Correct before pretty.** Implement the formulas and constants exactly as the brief gives them. If the brief misses one of the items above, choose the standard value and note it in your submission.
 - **Controls:** every control the brief names, with a visible label and the current value. Sliders show their units. Include a reset button.
 - **Responsive:** usable from 360 px wide upward. Touch works (pointer events, not mouse-only). Text is at least 14 px.
 - **Theme:** read `prefers-color-scheme` and draw legibly in both light and dark.
@@ -24,4 +26,4 @@ Brief:
 3. Fix every error. Look at both screenshots and fix anything clipped, overlapping or illegible.
 4. Repeat until the test is clean, at most four rounds.
 
-Call `demo_submit { html, notes }`. In `notes`, list any value you chose that the brief didn't give, and anything you couldn't get working. If the demo still fails after four rounds, submit it with `failed: true` and the reason. The tutor will fall back to prose.
+Call `demo_submit { html, notes }`. In `notes`, list any value you chose that the brief didn't give, and anything you couldn't get working. If the demo still fails after four rounds, submit it with `failed: true` and the reason. The tutor then says so, carries on in prose, and may re-request with a tighter brief.

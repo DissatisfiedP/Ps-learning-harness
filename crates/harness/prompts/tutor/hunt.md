@@ -14,8 +14,8 @@ hunt_send { sectionId, question, lookAt: [{ kind, venue?, why }], bringBack: [st
   - Good: "Find out why op-amp circuits almost always use negative feedback, and where people disagree about it."
   - Bad: "Learn about op-amps."
 - **`lookAt`:** two to four kinds of place, matched to what this learner can read now. Use the venues in the session state, and their entry levels.
-  - Kinds: forum thread, datasheet or docs, lecture, hobbyist video, paper, a person to ask.
-  - Don't send a beginner to research papers. Do send them to the places they can follow, and say why each is worth a look.
+  - `kind` is one of `forum`, `datasheet`, `docs`, `lecture`, `video`, `paper`, `person`; `venue` is the place by name, and `why` is one line on what to look for there.
+  - Don't send a beginner to research papers. Do send them to the places they can follow: `ask` venues work at every level, `discussion` venues only once they hold the entry level.
 - **`bringBack`:** always claims (with sources if they have them, but not required), open questions, anything surprising, and practical tips.
 
 Before the call, write two or three sentences: what the hunt is for, that there's no deadline, and that they can skip it at any time. Then end your turn.

@@ -1,0 +1,39 @@
+# Catalogue entry, not built (docs/plugins.md §11). Nothing loads this
+# directory: it is not a folder plugin, not in a registry and not used by any
+# test. Native plugin: it needs the `exec` permission, which no Luau api 1
+# package may declare (docs/plugins.md §8.4), so it will be an in-tree Rust
+# type implementing `plugins::Plugin` (§12) with this manifest. Tool `entry`
+# names the Rust method; there is no src/main.luau.
+id = "repl"
+version = "0.0.0"
+api = 1
+title = "Language REPL (nix, python, sql, …)"
+description = "Evaluates expressions in a local language toolchain for the tutor, and gives the learner REPL tasks with a checked end state."
+license = "MIT"
+platforms = ["desktop"]
+permissions = ["exec"]
+use_when = "Sections about a language or tool where checking real evaluation beats explaining: Nix expressions and the module system, SQL queries, shell semantics, a library's actual behaviour. Available languages: the toolchains found on the device."
+avoid_when = "Pure syntax facts the learner can memorize faster than running them."
+cost = "Needs the language toolchain installed locally (for example the `nix` binary)."
+
+# The old brief ran in teach and practice and filled {{repl_languages}} from
+# the installed toolchains; the native plugin puts them in use_when.
+
+[[tool]]
+name = "repl_eval"
+description = "Evaluate an input for yourself and return the result. The learner does not see it unless you quote it."
+agents = ["tutor", "practice"]
+input = "schemas/repl_eval.json"
+entry = "eval"
+artifact = false
+
+[[tool]]
+name = "repl_task"
+description = "Give the learner a REPL card with a task; `check` is evaluated against their session's final state. Returns their inputs, outputs and the check result."
+agents = ["tutor", "practice"]
+input = "schemas/repl_task.json"
+entry = "task"
+artifact = false
+
+[prompts]
+tutor = "prompts/tutor.md"

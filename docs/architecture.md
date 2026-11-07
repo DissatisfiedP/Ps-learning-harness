@@ -1,6 +1,6 @@
-# Learning harness — architecture review
+# P's Learning Harness — architecture review
 
-Status: design document, last revised 2026-11-06. Partly built: see `docs/agent-system-plan.md` for what exists and where the code departs from this document. Agent prompts live in `crates/harness/prompts/` (index: `crates/harness/prompts/README.md`).
+Status: design document, last revised 2026-11-07 (the learning-system features of §4.23 are now built; see `docs/agent-system-plan.md` for what exists and where the code departs from this document). Agent prompts live in `crates/harness/prompts/` (index: `crates/harness/prompts/README.md`).
 
 **Two layers.** This document covers the technical architecture and the core learning design. The learning-system features added on 2026-11-06 are specified in **`docs/learning-system.md`**, which is their source of truth:
 - target levels;
@@ -183,7 +183,10 @@ Reviewed at tag `v0.4.1` (commit `e69e852`, 2026-10-31): all prompts, `docs/`, t
 - **Field brief.** The researcher's map of the field relative to the goal: strands and their kinds, foundations, standard order, known misconceptions, conventions, suggested plugins, sources.
 - **Section.** A run of consecutive plan nodes taught with one mode. It carries a style, a plugin list, the planner's notes for the tutor and an exit criterion. The tutor teaches one section at a time.
 - **Exit criterion.** The observable task the learner must perform to finish a section.
-- **Plugin.** An optional capability: a manifest, a short prompt fragment and one to three tools. The planner activates plugins per section. Examples: lab sandbox, code runner, REPL, CAS check, live search.
+- **Plugin.** A package (`plugin.toml` + Luau modules + optional view and fragments) that adds tools, a renderer, an interactive view and prompt fragments. The planner activates plugins per section, at most three. Authoring spec: `docs/plugins.md`. Examples: lab sandbox, code runner, REPL, CAS check, live search.
+- **Artifact.** A figure a plugin tool produced: a sanitized fallback SVG plus the data a view needs, stored as an op and placed in the prose with `![alt](artifact:<id>)`.
+- **View.** A plugin's interactive page for one artifact, sandboxed and bridged to an allow-list of the plugin's Luau functions; optional, with the fallback SVG as the always-available form.
+- **Workspace.** One learner folder attached to a session: a read root, and the only place the agent may write (`workspace_write`, text files, never deletes).
 - **Core tools.** Tools an agent always has in a given phase: question tools, research requests, file reading, graph search, phase-control tools.
 - **Plan change request.** The tutor asks the planner, with evidence, to revise the plan mid-lesson. The planner revises it or keeps it.
 - **Live agent vs job.** A live agent (the tutor, the coach) holds the conversation with the learner. The planner reads that conversation but speaks only through the plan card. A job is a separate one-shot agent with its own small input, whose result arrives as a message. Every split exists because separation improves the result (§4.10).
@@ -734,24 +737,15 @@ repo/
 
 ### 4.20 Sections and plugins
 
-**Chosen:** the planner chooses a **mode** and **at most three plugins** per section from a catalog. A plugin is a Markdown file:
-- **frontmatter manifest:** `id`, `title`, `tools`, `platforms`, `phases`, `use_when`, `avoid_when`, `cost`;
-- **body:** a prompt fragment of at most about 200 words that tells the agent how to use the tools.
+**Chosen:** the planner chooses a **mode** and **at most three plugins** per section from a catalog. A plugin is a **package** that can add:
+- **tools** the model calls (ordinary tools in the same tool list, no second protocol);
+- a **renderer** that redraws an artifact from its stored data;
+- one **interactive view** for the learner (HTML/JS/CSS in a sandboxed iframe);
+- **prompt fragments**, one per agent allowed to use it.
 
-Only the active section's plugins are in the prompt.
+The package format, manifest, host API and limits are specified in **`docs/plugins.md`**. The short version: `plugin.toml` (id, version, api, title, platforms, permissions, planner hints, up to three tools, at most one renderer and one view, fragments), Luau modules under `src/`, JSON Schemas under `schemas/`, tests under `tests/`.
 
-Starting catalog (`crates/harness/prompts/plugins/`):
-
-| Plugin | Example use | Platforms |
-|---|---|---|
-| `sandbox` | Cybersecurity labs: local container or VM targets, the learner's terminal observed, success by `lab_check` | desktop |
-| `code-runner` | Programming: write, fix, read and error-reading tasks graded by tests | desktop, mobile |
-| `repl` | Nix, Python, SQL: the agent verifies claims by evaluation; the learner does REPL tasks | desktop |
-| `cas` | Math and physics: SymPy checks of the tutor's own working and answer keys | desktop, mobile |
-| `live-search` | Fashion, current tools and threats: web and image search inside the lesson | desktop, mobile |
-| `image-set` | Perceptual drills from labeled image sets | desktop, mobile |
-| `demo`, `figure` | Interactive simulations and exact figures (background jobs) | desktop, mobile |
-| `argument-map` | Philosophy and contested tradeoffs: a pinned premise/objection card | desktop, mobile |
+Only the active section's plugin tools and fragments are in the prompt.
 
 **Why plugins rather than every tool always on.**
 - Every tool description and fragment costs tokens on every turn.
@@ -762,9 +756,66 @@ Rules:
 1. **The planner selects**, using each plugin's `use_when` and `avoid_when` lines. It adds a plugin only when the section's exit can't be met, or is clearly worse, without it.
 2. **At most three per section,** plus the core tools.
 3. **Platform-aware.** A desktop-only plugin is never activated on mobile; the section is marked `desktopOnly` and the approach says so.
-4. **Visible.** Plugins show as chips on each section of the plan, and the learner can remove them before approving.
-5. **Escape hatch.** Mid-section, the tutor can call `plugin_request`. Code grants it if the rules allow, and the plugin is active from the next turn.
-6. **Measure and practice.** During probing, the tutor gets the read-only plugins the scope brief suggests for measuring. A practice session gets the plugins that were active when the target node was taught (recorded in the session log).
+4. **Visible and removable.** Plugins appear as checkboxes on each section of the plan card, all checked; the learner's unchecked ones become `removedPlugins` on approval.
+5. **Escape hatch.** Mid-section, the tutor can call `plugin_request`. Code grants it if the rules allow (installed, enabled, on this platform, under the limit), and the plugin is active from the next step.
+6. **Measure and practice** (not built yet). During probing, the tutor gets the read-only plugins the scope brief suggests for measuring. A practice session gets the plugins that were active when the target node was taught (recorded in the session log). Today Measure composes no plugins, and Practice mode is a single prompt with no tool loop; a `practice`-scoped tool is validated but never sent to a model until the coach lands.
+
+**Runtime: Luau.** Plugin scripts run in `mlua` with the `luau` feature:
+- `StdLib::ALL_SAFE`, then `io`, `os`, `debug`, `package`, `dofile`, `loadfile`, `loadstring`, `load` and `collectgarbage` removed, plus `sandbox(true)`;
+- `require` resolves only `host.<name>` and modules inside the package's `src/`; `..`, absolute paths and symlink escapes are refused;
+- 64 MiB per plugin instance, 2 s per tool call, 200 ms per view bridge call, checked by the Luau interrupt; exceeding a limit returns a tool error and discards the VM;
+- one VM per plugin, created lazily and reused; `src/main.luau` is re-evaluated per call, so edits to it in a folder package take effect on the next call (`require`d modules stay cached until the VM is recreated);
+- tool results are capped at 16 KiB.
+
+The host library is pure: `host.json` (encode/decode), `host.svg` (element builder with escaping, `currentColor` strokes and a complete-document helper), `host.num` (real and complex arithmetic, matrix multiply, partial-pivoting LU solve), `host.rand` (seeded, never clock-seeded) and `host.log` (tracing only). There is no I/O, network, process or clock.
+
+Why Luau: the owner chose it; the interpreter is small and runs where the app runs, including mobile **[inference]**; plugins are mostly AI-written, so an exact typed host API matters more than ecosystem size; the sandbox, memory cap and interrupt are one crate away (`mlua`).
+
+**Native plugins.** The `Plugin` trait stays for in-tree Rust plugins that need system access (future `sandbox`, `code-runner`, `repl`, `cas`, `live-search`, `image-set`; their manifests, fragments and schemas wait as catalogue entries in `plugins/catalog/`). They use the same `plugin.toml` shape, may declare permissions (`exec`, `net`, `fs-read`, `fs-write`), and reach the planner, tool list, plan limits and consent screen the same way. None is implemented in this build.
+
+**Output placement: a handle in the prose.** A tool with `artifact = true` returns an artifact (a static SVG plus the data a view needs), which is stored as an `artifact` op. The model receives the handle and one instruction line, then places the figure itself with `![short description](artifact:<id>)` next to the sentence that refers to it. The UI resolves the reference to a view or the fallback SVG. Built-in syntax (math, code, mermaid) stays inline.
+
+| Alternative | For | Against |
+|---|---|---|
+| Figure is a fenced block in tool output, rendered where the tool call happened | Nothing for the model to remember | The position is an artefact of call order; the model can't put prose around it or place it beside the sentence it belongs to |
+| Tool result sits at the call position, model does not choose | Direct | Same problem: the model cannot refer forward or backward; the learner sees the figure before the text that explains it |
+| **Handle + `![alt](artifact:<id>)`** (chosen) | The model places it where it explains something; the tool's text (errors, computed values) reaches the model before the learner sees the figure; the alt text becomes the accessible name; replay never re-runs the plugin | The model may forget the reference; the app then appends the artifact after that turn's message, in creation order |
+
+**[learning]** Placing a picture next to the text that refers to it improves learning over separating them (spatial contiguity; Ginns 2006). A handle lets the model do that; a fixed call position does not.
+
+**Views and iframes.** A plugin may ship one view: the figure plus controls the learner manipulates. It runs in `<iframe sandbox="allow-scripts">` (no `allow-same-origin`, so its origin is opaque) loaded from the shell's `pluginview` URI scheme, which serves the package HTML with JS/CSS inlined and its own CSP header: `sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'`. The work order's `srcdoc` was dropped because a `srcdoc` document inherits the app CSP (`script-src 'self'`), which blocks the view's inline script; that was measured in headless Chromium 155, not assumed (`docs/plugins.md` §7.2). The host and view speak JSON over `postMessage` with `protocol: 1`: `init` (artifact data, theme tokens, whether this is an answer surface), `theme` (new tokens after a light/dark switch), `call`/`result` (only functions named in the manifest's `calls`), `resize`, `state` (a ≤ 500-character summary attached to the learner's next message) and, in answer mode, `submit`. The host validates `event.source` and ignores everything else. An IPC-escape probe view (globals, `parent.*`, `fetch` to the app, `ipc://` and `http://ipc.localhost`, XHR, WebSocket, beacons, navigation) failed every attempt in headless Chromium. In the Tauri 2.12.5 source the IPC initialisation scripts, which carry the invoke key added for GHSA-57fm-592m-34r7, are registered with `for_main_frame_only: true` (`src/manager/webview.rs`), so a frame never receives them. WebKitGTK and the mobile webviews are still owed (`docs/agent-system-plan.md`, Known gaps).
+
+Every artifact also has its static SVG fallback: replays, read-only sessions, a removed plugin, a phone without views and screen readers still get the figure. This follows the same pattern as MCP Apps (SEP-1865): a tool result plus a sandboxed UI resource and an explicit capability bridge (https://github.com/modelcontextprotocol/ext-apps).
+
+**[learning]** Animations outperform static pictures on average (Höffler & Leutner 2007) and simulations improve on traditional instruction (Rutten et al. 2012), when the learner is told what to manipulate. That is why the view's `state` summary reaches the tutor but ordinary interaction is not logged.
+
+**Answer mode.** A view may declare `answer = true`. `question_ask` then takes `view: { artifactId, task, target }` instead of a typed answer; the target is committed in the call op and never shown to the learner. The learner works in the view and submits; the host calls the plugin's `grade(answer, target)` with the view's `submit { answer }` value exactly as the view sent it; the plugin returns `{ correct, detail }`, and the tutor gets `{ questionId, artifactId, answer, view }` as the tool result. The tutor still calls `verdict_record` with the same `questionId`. **The plugin never records a verdict**, so grading policy stays in the agent loop (details: `docs/plugins.md` §7.4).
+
+**Registries, install and consent.** A registry is an HTTPS URL (or a `file://` URL or absolute local path) serving one `index.json`. Indexes are cached device-locally at `<config>/registry-cache/<sha256(url)>.json`; install downloads, verifies sha256, unpacks to `<config>/plugins/<id>/<sha256>/`, validates the package and records it in the data repo's `plugins.lock`. Prior art: Typst Universe (a reviewed package repository) and Cargo's sparse index. The learner adds registries in Settings; no public registry ships until the owner publishes one. Installing third-party code requires explicit consent; every Luau api-1 plugin shows "No access to your files, network or programs" because it has no privileged capability. There are no automatic updates and no separate update command: installing another version is refused while any session has a tutor turn running with that plugin active, so an update never lands mid-turn. Startup loads the version whose sha256 matches `plugins.lock`. Folder plugins are the development path: added by path, recorded in device-local settings and the lock, preferred over an installed copy with the same id, and reloaded from disk when their files change.
+
+**Planner search, not planner install.** `plugin_search { query }` splits the query into whitespace-separated terms and requires every term to appear (case-insensitive) in id, title, description or `use_when`; only entries that list this device's platform are offered. It returns at most five uninstalled matches as JSON (`id`, `title`, `description`, `useWhen`, `avoidWhen`, `platforms`, `permissions`, highest semver `version`, `registry`). `plan_write` may then name an uninstalled plugin in a section; validation accepts it only if a cached index lists it *and* the entry lists this device's platform, and code sets that section's `needsInstall: [<id>, …]` from the installed/enabled/on-platform catalog at that moment — the model cannot set it. The plan card shows an **install** chip for ids still missing from the live installed list (it re-renders when that list changes), and approval g…
+
+Naming: a tool must start with `<id>_` where dashes become underscores. A manifest may scope a tool to an agent; `tutor` and `practice` are accepted, `coach`, `figure-maker`, `demo-builder` and `problem-checker` are reserved and rejected until those agents exist. Only the tutor has a tool loop today.
+
+**Security model,** in one list:
+- the guest has no I/O, network or process access, a memory cap and a wall-clock interrupt;
+- the entry module and every tool result are untrusted input: the core does **not** validate tool arguments against the schema (the schema is what the model is shown; the plugin must check its arguments), truncates result text to 16 KiB and sanitizes every fallback SVG;
+- SVG is sanitized in the core (no scripts, event handlers, `<foreignObject>`, `<style>`, external references) and again in the UI with DOMPurify's SVG profile;
+- views cannot reach Tauri IPC or the parent document (no `allow-same-origin`, strict CSP, source-checked bridge, allow-listed calls). Iframes reaching Tauri IPC was a real vulnerability class (GHSA-57fm-592m-34r7, CVE-2024-35222). The probe view `plugins/fixtures/ipc-probe` tries every known way out; `scripts/ui-check/run.sh ipc` runs it in headless Chromium and fails on any escape. WebKitGTK still needs a manual run (`docs/plugins.md` §7.2);
+- installs are content-addressed (sha256) and manifest-validated; manifest and view asset paths are canonicalised and must stay inside the package;
+- consent is per install (a UI step; the core install command does not check it); removal never destroys artifacts;
+- folder plugins are unsigned development code: adding one goes through the same consent screen with the folder path as its source, and Settings lists its source as `folder <name>`.
+
+Alternatives considered at the plugin level:
+
+| Alternative | For | Against |
+|---|---|---|
+| **Luau package with a typed host API** (chosen) | One tool path; no extra process; mobile; exact API for AI authors; memory/time limits | Small ecosystem; the host library must grow with each domain |
+| MCP servers as plugins | Existing ecosystem; language-agnostic | A second process to supervise, install and secure; most MCP servers assume a desktop **[inference]**; MCP tool results are text, not artifacts and views; violates R1's "no separate server process" for the common case |
+| WASM components | Language-neutral, strong sandbox | A WASM host plus a per-language toolchain, and no small numeric/SVG library story; mobile support unproven here |
+| JavaScript-in-webview plugins | No new runtime; UI authors know JS | Plugins would run beside the app's own JS with IPC reachable; no memory cap or interrupt; the webview is suspended when the app is in the background on mobile **[inference]** |
+| Native Rust plugins only | Full capability control | Every plugin needs a compiler, a release per platform and a review; kills learner-written plugins |
+| Typst as a host renderer | Better typography than SVG hand-building | Binary and font weight; only circuits would use it today; output syntax is not Markdown (see §4.24) |
 
 **Is web search standard or a plugin?** Both, at different levels.
 - *Verifying* a fact is standard for every session. `research_request` runs a background researcher that returns a short cited brief, so raw search results never enter the tutor's context.
@@ -778,9 +829,9 @@ Rules:
 | Fixed tool set per mode | Automatic | The tool need is not determined by kind: procedure sections need a sandbox for cybersecurity but a code runner for Python |
 | Learner picks the tools | Full control | Logistics burden; learners don't know what helps |
 | Retrieval picks tools every turn (RAG-MCP style) | Adapts turn by turn | The tool set changes mid-step; harder to test; another model call per turn |
-| **Planner picks per section, tutor can request more mid-section** (chosen) | Small, stable prompts; visible to the learner; matches the plan's structure | Over- or under-selection; mitigated by `use_when`/`avoid_when`, the limit of three, learner chips and `plugin_request` |
+| **Planner picks per section, tutor can request more mid-section** (chosen) | Small, stable prompts; visible to the learner; matches the plan's structure | Over- or under-selection; mitigated by `use_when`/`avoid_when`, the limit of three, learner checkboxes and `plugin_request` |
 
-Future extension: a plugin's tools could be served by an MCP server named in its manifest, so that learner-written plugins don't need app code. The fragment stays hand-written either way.
+Sources: RAG-MCP https://arxiv.org/abs/2505.03275 ; `mlua` sandbox/memory/interrupt https://docs.rs/mlua/latest/mlua/struct.Lua.html ; MCP Apps (SEP-1865) https://github.com/modelcontextprotocol/ext-apps ; Tauri advisory https://github.com/tauri-apps/tauri/security/advisories/ghsa-57fm-592m-34r7 ; Typst Universe https://typst.app/universe/ ; Cargo sparse index https://doc.rust-lang.org/cargo/reference/registry-index.html .
 
 ### 4.21 Research: scope first, then any time
 
@@ -816,11 +867,11 @@ The tutor uses the brief to re-aim its probing; the planner uses it for roots, o
 
 | Role (as labeled in Settings) | Agents | Token share | Needs | Guidance shown to the learner |
 |---|---|---|---|---|
-| **Tutor** · heavy · *talks with you* | tutor, coach, and their compaction turns | Largest by far | Tool calling (required); strong reasoning and instruction following; ≥128k context | "This model teaches you and does most of the work. Learning quality depends on it more than on anything else. Use your best model here; save money on the other roles instead." |
-| **Planner** · heavy · *thinks rarely, deeply* | planner, problem checker | Small: a few calls per session | Tool calling; the strongest reasoning available; high effort by default | "Plans your route and checks practice problems. Called only a few times, so the best reasoning model at high effort costs little." |
-| **Reader** · light · *searches and reads* | researcher (scope, verify, source), session titles | Medium, mostly input | Tool calling; long context (≥200k recommended); vision optional, for scanned PDFs | "Reads web pages and your documents and writes short cited summaries. A fast, cheap, long-context model is right. Vision lets it read scanned pages." |
-| **Librarian** · medium · *keeps your knowledge graph* | graph builder, topic splitter | Small, after sessions | Tool calling; reliable structured output; careful judgement | "Decides what you've learned and how the ideas connect. Its mistakes stay in your graph, so don't pick the cheapest." |
-| **Builder** · medium · *code and visuals* | demo builder, figure maker | Small, on request | Tool calling; strong coding; vision for figures | "Writes interactive demos and draws exact figures. Needs a good coding model; figures need vision." |
+| **Tutor** · heavy · *talks with you* | tutor, coach, and their compaction turns | Largest by far | Tool calling (required); strong reasoning and instruction following; ≥128k context | "Your best model. Learning quality depends on it most." |
+| **Planner** · heavy · *thinks rarely, deeply* | planner, problem checker | Small: a few calls per session | Tool calling; the strongest reasoning available; high effort by default | "Best reasoning model, high effort. Called rarely." |
+| **Reader** · light · *searches and reads* | researcher (scope, verify, source), session titles | Medium, mostly input | Tool calling; long context (≥200k recommended); vision optional, for scanned PDFs | "Fast, cheap, long context. Vision reads scans." |
+| **Librarian** · medium · *keeps your knowledge graph* | graph builder, topic splitter | Small, after sessions | Tool calling; reliable structured output; careful judgement | "Not the cheapest: its mistakes stay in your graph." |
+| **Builder** · medium · *code and visuals* | demo builder, figure maker | Small, on request | Tool calling; strong coding; vision for figures | "Good coding model. Figures need vision." |
 
 Rules:
 - **Only Tutor is required.** Every unset role falls back to the Tutor model, which is always safe for quality, and the UI shows "using Tutor model" on that role.
@@ -847,12 +898,93 @@ Six features are specified, with their rationale, alternatives, data, gates, acc
 - field guide;
 - calibration.
 
-Their effect on this document:
-- the graph gains the `heuristic` node kind and `hunt` provenance (§5 below);
-- plan sections gain fields (§5 below);
-- the phase machine of §4.10 gains the gates listed in `learning-system.md` §8.
+**Built 2026-11-07** (`docs/learning-system.md` §10 records the review). Their effect on this document:
+- plan sections gained fields (§5 below);
+- the phase machine of §4.10 gained the gates listed in `learning-system.md` §8;
+- `session_state` gained the level, known-section, hunt, field-guide and calibration lines (§4.15).
 
-Prompt behavior for each feature sits behind a template flag until its code is built (`crates/harness/prompts/README.md`, "Composition").
+The graph-facing parts of the design are still to come: the graph gains the `heuristic` node kind with `attribution`/`scope`, `hunt` provenance on nodes, and venues attached to topics when the graph builder lands (step 4 of §8); per-topic calibration waits for the same.
+
+Every prompt flag for these features is on now; the composer still drops a flag's block when the data it needs cannot exist (`crates/harness/prompts/README.md`, "Composition").
+
+### 4.24 What agents output
+
+**Chosen:** agents write **Markdown with LaTeX math**, rendered as a document:
+- inline `$…$`, display `$$…$$`; KaTeX renders both;
+- fenced code with a language tag, highlighted **when the block is finalized**, never per streaming delta;
+- fenced `mermaid` blocks rendered by a vendored Mermaid, loaded on the first such block with `securityLevel: "strict"`;
+- plugin artifacts placed with `![alt](artifact:<id>)` (§4.20).
+
+Nothing else is a first-class output syntax. Unknown fence languages render as plain code, without an error.
+
+Why Markdown with LaTeX: it is the syntax models are most fluent in **[inference]**, so the prompt asks for what the model already does best. Partial Markdown renders correctly while streaming, so the learner sees structure as it arrives. LaTeX math is the one notation every model writes reliably **[inference]**, and KaTeX renders without a layout engine.
+
+| Alternative | For | Against |
+|---|---|---|
+| **Markdown + LaTeX math** (chosen) | Strongest model habit; partial rendering while streaming; KaTeX is small and vendored | Markdown cannot express precise layout; that is what artifacts/views are for |
+| Typst markup | Better typography; one syntax for text and math | Not Markdown: `*bold*`, `= Heading`, `frac(a, b)`; models must suppress their strongest habit and users report frequent errors (Typst forum, "LLM code generation?"). Typst's HTML export is still incomplete and behind a feature flag (Typst docs). Binary and fonts add weight |
+| Full LaTeX | Exact math typesetting; familiar to academics | A document language for prose; models make macro and package errors; a TeX engine in the app is heavy; slow to render while streaming |
+| HTML as the output language | Full control | Verbose, error-prone, unsafe to inject, and unreadable to the learner |
+| Plain text | Trivial to render | Loses math, code structure, tables and diagrams |
+
+**Highlighting.** Prism core plus a fixed language set (bash/sh, c, cpp, css, diff, java, javascript, json, latex, lua, markdown, markup/HTML, nix, python, rust, sql, toml, typescript, yaml) is vendored in `ui/vendor/prism/`; core plus components occupy about 51 KB. Highlighting runs only when a block is finalized, so streaming cost is unchanged. Colors come from existing CSS tokens; `forced-colors` turns highlight colors off.
+
+| Alternative | For | Against |
+|---|---|---|
+| **Small built-in highlighter, Prism-class** (chosen) | Small; no compile step; finalize-only keeps the streaming budget | A fixed grammar set; unknown languages stay plain |
+| highlight.js (common bundle) | More languages out of the box | 129,254 B versus 19,683 B for the `prism.min.js` bundle (jsDelivr, 2026-11-06); more CSS to reconcile with the tokens |
+| tree-sitter (`web-tree-sitter`) | Real parsing; better for large files and editor-style features | 205,488 B WASM plus a grammar per language; no evidence highlighting helps novices, so pay the least |
+| No highlighting | Zero cost | Code blocks are harder to scan, and every model expects fences to be honored |
+
+The decision rests on a controlled experiment with 390 novices that found no evidence syntax highlighting improves comprehension (Hannebauer et al. 2018). If highlighting does not teach, choose the cheapest implementation; this is not the place for a parser.
+
+**Mermaid.** Built in, not a plugin: it is an output syntax models already know, useful in every subject, and costs one prompt line. `mermaid.min.js` is 2,749,172 B in `ui/vendor/mermaid/` (the jsDelivr mermaid 11 build measured 3,572,661 B on 2026-11-06), so it must not load at startup. The vendored file is an IIFE bundle: it sets `globalThis.mermaid` only when loaded as a classic `<script>` element, so that is added on the first `mermaid` block (D4 said dynamic `import()`; importing it threw "Cannot read properties of undefined (reading 'mermaid')" in headless Chromium). `startOnLoad: false`, `securityLevel: "strict"`, `htmlLabels: false` (HTML labels live in `<foreignObject>`, which DOMPurify drops, leaving empty boxes), theme from the current tokens, SVG passed through DOMPurify's SVG profile. A diagram that fails to parse shows its source as a code block plus a one-line error and removes Mermaid's scratch node. Startup loads neither Mermaid nor any Prism language not in the document.
+
+| Alternative | For | Against |
+|---|---|---|
+| **Vendored Mermaid, lazy** (chosen) | Universal output syntax; no plugin to install for a basic need; pays only when used | 2.7 MB in the bundle; a parse failure needs a fallback |
+| Mermaid as a plugin | Keeps the core smaller; opt-in | Every learner who wants a diagram must install code; the planner has to predict diagram use before the model writes one |
+| Server-side SVG rendering | No client bundle | A server (violates R1) and a round trip per block |
+| Text-only diagrams (ASCII) | Tiny | Poor legibility and accessibility on a phone |
+
+**No tree-sitter in this build.** A tree-sitter code plugin may come later for tasks that need parsing (structure-aware editing, precise error ranges); it is not part of output rendering. Sources and measured sizes: jsDelivr `mermaid@11/dist/mermaid.min.js`, `@highlightjs/cdn-assets@11/highlight.min.js`, `prismjs@1/prism.min.js`, `web-tree-sitter/tree-sitter.wasm`, all measured 2026-11-06.
+
+### 4.25 Learner attachments and session workspaces
+
+**Chosen:** two separate mechanisms for "material the learner brings":
+- **attachments** on a message: images are copied into the data repo; files and folders are referenced by path and made readable through session-scoped grants;
+- an optional **workspace folder** per session, which the agent may read and write (text files only) while the learner can edit the same files in their own editor.
+
+**Attachments (D11).**
+- The composer offers "+" (native picker, multiple), paste of images, drag-and-drop onto the composer, and `@` mentions of files and folders. The same composer is used on Home and in sessions.
+- **Images** (pasted, or a picked, dropped or mentioned file whose bytes are PNG, JPEG, GIF or WebP) are staged in a device-local folder (`<config>/staged-images/`) while they are chips, and moved to `attachments/<yyyy>/<ulid>.<ext>` inside the data repo only when the message is sent, so they then sync and survive a restart, while a chip removed before Send (or dropped by "Send without images") is deleted and never reaches the repo. The staging folder is emptied at startup. The cap is **5 MiB** per image; the bytes decide the media type; a larger pasted image is refused with an inline message, and a larger picked image stays a file reference. The message op records `attachments: [{ kind: "image", path, mediaType, bytes }]`; the image bytes stay out of the op log and are read back when a provider request is built, only from the repo's `attachments/` (canonical containment) and re-sniffed.
+- **Files and folders** are **not copied**. The op records `{ kind: "file" | "folder", path }` (a file inside the session workspace relative to the workspace, so the log never holds the workspace's absolute path), and the model gets one text line per reference: `[attached file] /abs/path, 12 KiB — read it with file_read or file_find`; the "read it" hint appears only for agents with the file tools. It reads them with the ordinary file tools, which is already the contract in `shared/learner-files.md`. Practice has no file tools and takes images only. A message always has text.
+- Every file or folder attachment (picked or mentioned) whose path is outside the home directory becomes a **session read root** for that exact path, recorded as a `fileGrant` op (once per path per session), so the grant survives a restart. The file tools accept home + the workspace + every grant as roots, with the same canonicalisation/symlink checks as before. The absolute path is in the synced log because a grant without its path is meaningless; on another device the path simply does not exist, and the learner can attach the file again. An image the model cannot receive (no vision, or unreadable) is replaced by the line `[image attached] <name> (not sent to this model)`.
+- The `@` combobox lists files and folders from home + the workspace + granted roots, each folder once, skips hidden directories, and caps at 50 results. `file_find` and the mention list print home hits as `~/…`, workspace hits relative to the workspace (the form `file_read` and `workspace_write` take), and granted-root hits as absolute paths; a workspace inside home is walked once, as the workspace. Selecting a mention inserts the path and adds a chip; a folder chip can be promoted to the session workspace.
+- If the Tutor model's catalog entry says `vision: Some(false)`, image chips say "This model can't see images" and the send path refuses images rather than sending bytes the model cannot read. Unknown capability (`None`) is treated as possibly-vision and does not block.
+- PDFs are referenced like other files and are readable: `file_read` returns page-tagged text (`[p.3] …`) from the text layer, and a page with no text layer is reported as a scan (the researcher fetches it as an image with `source_page_image`). No OCR; caps in §6.5.
+
+**Workspace (D12).**
+- A session can be attached to one folder: from the running head/menu ("Attach folder…", "Detach"), or from an `@`-mentioned folder's chip ("Use as workspace").
+- The path is device-specific, so the mapping `sessionId → canonical absolute path` lives in `<config>/workspaces.json`. The session op log gets a `workspace` op with the folder's **name** and `attached` only, so other devices know one existed and can ask the learner to point at it.
+- Read: the workspace is a read root for `file_find` and `file_read`.
+- Write: `workspace_write { path, content }`, available to the tutor in Teach when a workspace is attached (not to the planner; Practice has no tool loop yet). Paths resolve inside the workspace with the same escape checks; parent directories are created as needed; **nothing is ever deleted**.
+  - **Write-after-edit guard:** overwriting an existing file is refused unless its current sha256 equals the hash from the agent's last `file_read` of it (kept in memory) or its last write (kept in memory and in the `workspaceWrite` op, so it survives a restart). A new file needs no hash. The error tells the agent to `file_read` first. A learner edit in an external editor can therefore never be clobbered silently.
+  - **Limits:** text files only, at most **256 KiB** per write. Binary extensions (png, jpg, gif, webp, pdf, zip, gz, wasm, exe, so) are refused. A `workspaceWrite` op stores `path`, `sha256`, `size`, never the content.
+- Content: a prompt fragment `shared/workspace.md` is composed only when a workspace is attached (per-compose flag `workspace`, set in `agent.rs` with `mermaid`), naming the folder and asking the agent to put starter files, task statements and long code there, and to re-read a file before relying on it. `tutor/phases/teach.md` and `practice.md` carry one line each inside `{{#workspace}}`; Practice mode renders `practice.md` with `workspace` off, so the block is dropped (Practice has no workspace tools).
+- Detaching removes write access immediately (the next tool call is refused) and clears the remembered hashes; already written files remain with the learner.
+
+| Alternative | For | Against |
+|---|---|---|
+| Copy every attached file into the repo | One location; works offline on another device | Duplicates the learner's material and their edits; large files in git; privacy surface grows |
+| **Images copied, other paths referenced + granted** (chosen) | Images must travel with the conversation to be shown at all; documents stay where the learner edits them | Grants are device-local, so another device must re-attach |
+| Read anything under the home directory without grants | No friction | A model could roam; consent must be explicit per path |
+| Store the workspace's absolute path in the synced log | One record | Two devices with different mount points; the path is meaningless elsewhere |
+| Store only the folder name in the log (chosen) | Sync-safe; prompts can still name the folder | A second device must ask the learner to point at it |
+| Free writes into the workspace | Simple | External-editor edits get clobbered; a delete could destroy learner work |
+| **No deletes, text only, hash-guarded overwrite** (chosen) | The agent cannot silently destroy work | More tool errors; the agent must re-read before writing |
+
+Sources: Ginns 2006 spatial contiguity https://doi.org/10.1016/j.learninstruc.2006.10.001 ; Höffler & Leutner 2007 https://doi.org/10.1016/j.learninstruc.2007.09.013 ; Rutten et al. 2012 https://doi.org/10.1016/j.compedu.2011.07.017 ; Hannebauer et al. 2018 https://doi.org/10.1007/s10664-017-9579-0 ; Typst forum "LLM code generation?" https://forum.typst.app/t/llm-code-generation/1331 ; Typst HTML export https://typst.app/docs/reference/html ; Typst Universe `zap` https://typst.app/universe/package/zap .
 
 ---
 
@@ -927,7 +1059,8 @@ interface PlanNode {
 interface Section {
   id: string; title: string; nodeIds: string[];
   mode: Kind; style: "socratic" | "expository" | "mixed";
-  plugins: string[];                       // plugin ids, ≤ 3
+  plugins: string[];                       // plugin ids, ≤ 3; may name an uninstalled registry plugin (install chip)
+  needsInstall?: string[];                 // set by code at plan_write: plugins not installed+enabled+on-platform here; omitted when empty; the model cannot set it. The plan card shows an install chip only for ids in this set (plus the live missing id), so a stale plan never offers a dead install
   notes: string; exit: string; desktopOnly?: boolean;
   // learning system (docs/learning-system.md §8):
   targetLevel?: "explain" | "use" | "analyze" | "design";
@@ -935,16 +1068,23 @@ interface Section {
   hunt?: { available: boolean; reason: string; enabled: boolean };   // enabled only by the learner
 }
 
-interface PluginManifest {                 // frontmatter of prompts/plugins/<id>.md
-  id: string; title: string; tools: string[];
-  platforms: ("desktop" | "mobile")[];
-  phases: ("probe" | "teach" | "practice")[];
+// plugin.toml. The full reference (every key, type and constraint) is docs/plugins.md §2.
+interface PluginManifest {
+  id: string; version: string; api: 1;      // id: [a-z][a-z0-9-]*; semver; api must be 1
+  title: string; description: string; license: string;
+  platforms: ("desktop" | "mobile")[];      // non-empty subset
+  permissions?: string[];                   // default []; must be empty for a Luau plugin in api 1
   use_when: string; avoid_when: string; cost: string;
+  tool?: { name: string; description: string; agents: ("tutor" | "practice")[];   // agents non-empty
+          input: string; entry: string; artifact?: boolean }[];   // ≤ 3; name starts "<id>_"; input = JSON Schema object file; artifact default false
+  renderer?: { entry: string }[];           // ≤ 1; required when an artifact tool exists
+  view?: { name: string; html: string; calls?: string[]; answer?: boolean }[]; // ≤ 1; calls default [], answer default false
+  prompts?: { tutor?: string; practice?: string };  // fragment paths, ≤ 250 words each; unknown keys anywhere are errors
 }
 
 type SessionOp =                           // one line of sessions/<yyyy>/<ulid>.jsonl
-  | { op: "session"; /* built: id, mode, title, createdAt */ }
-  | { op: "message"; /* built: role, content, reasoning, ending, at */ }
+  | { op: "session"; /* built: id, mode, title */ }
+  | { op: "message"; /* built: role, content, thinking, ending, model?, tag?, jobId?, native[], attachments[] */ }
   // target, with the phase machine:
   | { op: "phase"; at: Iso; phase: "measure" | "plan" | "awaitApproval" | "teach" | "close"; sectionId?: string }
   | { op: "planRequest"; at: Iso; from: "probe" | "tutor" | "learner"; reason?: string; evidence?: string; learnerWords?: string }
@@ -952,9 +1092,20 @@ type SessionOp =                           // one line of sessions/<yyyy>/<ulid>
   | { op: "goal" | "brief" | "probe" | "plan"; at: Iso; payload: unknown }  // the phase tool's arguments, verbatim
   | { op: "approve"; at: Iso; planVersion: number; removedPlugins: { sectionId: string; plugin: string }[] }
   | { op: "pluginGrant"; at: Iso; sectionId: string; plugin: string; by: "plan" | "request" | "learner" }
-  | { op: "tool"; at: Iso; callId: string; name: string; args: unknown; result?: unknown } // persisted before acting (resumable turns)
-  | { op: "job"; at: Iso; jobId: Id; kind: string; state: "queued" | "running" | "done" | "failed" | "aborted"; result?: unknown };
+  | { op: "tool"; at: Iso; callId: string; name: string; args?: unknown; result?: { content: string; isError: boolean }; agent?: "planner" }
+  | { op: "job"; at: Iso; jobId: Id; kind: string; state: "queued" | "running" | "done" | "failed" | "aborted"; result?: unknown }
+  // built 2026-11-06 (plugins, artifacts, attachments, workspace):
+  | { op: "compaction"; at: Iso; summary: string; cutAt: Iso; cutOpId: Id }
+  | { op: "title"; at: Iso; title: string }
+  | { op: "workspace"; opId: Id; at: Iso; attached: boolean; name: string }  // only the folder name is synced
+  | { op: "workspaceWrite"; opId: Id; at: Iso; path: string; sha256: string; size: number } // path relative to the workspace; content is not stored
+  | { op: "artifact"; opId: Id; at: Iso; artifactId: Id; pluginId: string; pluginVersion: string;
+      packageHash: string; tool: string; input: unknown; data: unknown; fallbackSvg: string } // input = the tool call's arguments; fallbackSvg sanitized, ≤ 256 KiB
+  | { op: "fileGrant"; opId: Id; at: Iso; path: string; kind: "file" | "folder" } // a session read root, exact path
+  | { op: "viewState"; opId: Id; at: Iso; artifactId: Id; summary: string };      // ≤ 500 chars; only the latest per artifact reaches the next learner message
 ```
+
+A learner message's `attachments` are `{ kind: "image" | "file" | "folder", path, mediaType?, bytes?, name?, granted? }` (absent optionals are omitted; `granted` only when true): images are repo-relative under `attachments/`, files and folders are absolute device paths; folders carry no `bytes`. A `question_ask` tool call's `args` may carry `view: { artifactId, task, target }` (`task` non-empty, `target` an object); `target` is committed here and never rendered.
 
 Example node file `graph/nodes/01JC8Q….md`:
 ```markdown
@@ -1015,13 +1166,12 @@ Webview caveat: rendering differs across WKWebView (iOS/macOS), Android WebView,
 
 Built in `crates/providers`:
 - **Wire formats:** OpenAI chat completions, OpenAI Responses, Anthropic Messages, with SSE decoding.
-- **Providers:** Anthropic, OpenAI, OpenRouter, DeepSeek and Z.AI with API keys. ChatGPT/Codex with an access token. WorkBuddy with browser sign-in or a key; it is an undocumented API with terms-of-service risk, see `docs/workbuddy-provider.md`.
+- **Providers:** Anthropic, OpenAI, OpenRouter, DeepSeek and Z.AI with API keys. ChatGPT/Codex with an access token. WorkBuddy with browser sign-in or a key; it is an undocumented API with terms-of-service risk, see `docs/workbuddy-provider.md`. **Claude Pro/Max (subscription)** with the Claude Code OAuth sign-in (authorization-code + PKCE, paste-the-code flow) — a `Bearer` token against the same `/v1/messages` endpoint, no API key; see `docs/claude-subscription.md`.
 - **Base URL override** per provider, which covers proxies and local OpenAI-compatible servers.
+- **Model catalogs fetched, not written down:** each provider's own listing endpoint (`/models`; Anthropic's with capabilities and limits, Codex's preset list, WorkBuddy's product config) is the only source of which models exist, so a picker can never offer a model the account does not have or miss one it does. Where a listing carries no metadata (OpenAI and Z.AI return ids only), the public models.dev catalog fills context window, vision and effort levels; a live value always wins and an absent one stays "unverified". Lists are cached device-locally against their base URL, so a proxy's list never stands in for the provider's. `crates/providers/src/models.rs`.
 - A stream that stops early is an error, not a silent stop. Gateway error envelopes become readable messages.
 
 Not built yet:
-- **Tool calling** in all three wire formats. Every agent in §4.10 depends on it, so it is the next prerequisite.
-- **Model roles** (§4.22). Today there is one model choice.
 - **Resumable turns:** every tool call and result persisted as a `tool` op before acting (§5).
 
 ### 6.4 Git implementation
@@ -1036,18 +1186,20 @@ Not built yet:
 
 ### 6.5 Other pieces
 
-- **Frontend:** plain ES modules; vendored `marked`, `DOMPurify`, `KaTeX`. Mermaid is not vendored yet; the `mermaid` flag in the formatting fragment stays off until it is.
-- **Device-local state (built):** `settings.json` and `credentials.json` (mode 0600) in the OS config dir, never in the repo.
+- **Frontend:** plain ES modules; vendored `marked`, `DOMPurify`, `KaTeX`, Prism (core + a fixed language set, loaded as classic scripts, highlighted only when a code block is finalized) and Mermaid (2.75 MB, added as a `<script>` element on the first `mermaid` block, `securityLevel: "strict"`, `htmlLabels: false`). Views are HTML documents served from the shell's `pluginview` URI scheme with their own CSP (§4.20), not `srcdoc`. Startup loads neither Mermaid nor an unused Prism language.
+- **Device-local state (built):** in the OS config dir, never in the repo: `settings.json` (incl. `registries`, `pluginFolders`, `disabledPlugins`), `credentials.json` (mode 0600), `session-index.json`, `workspaces.json` (session → workspace path), `plugins/<id>/<sha256>/` (installed packages) and `registry-cache/<sha256(url)>.json` (cached indexes).
+- **Focus mode (built, desktop shell):** `crates/app/src/focus.rs` exposes `focus_dnd_support` and `focus_dnd(on)`, which pause desktop notifications on Linux (mako, swaync, dunst, GNOME), touch only a do-not-disturb state the app itself set, and restore it from a `focus-dnd` marker in the config dir on exit or after a crash. Full screen is the Tauri window API from the UI (`docs/ui-design.md` §7.8).
 - **Secrets:** the 0600 file today. **Open:** OS keychain on desktop (the dev shell already carries `libsecret`) and the platform keystore on mobile.
 - **Web search (built):** `crates/research-search`, Brave Search API when `BRAVE_API_KEY` is set, otherwise Wikipedia. DuckDuckGo and Mojeek block Rust HTTP clients.
 - **Derived index:** in memory, or SQLite via `rusqlite`. Rebuildable, never synced.
 - **Graph canvas:** Canvas 2D + d3-force, vendored like the other UI libraries; topic-level zoom; touch pan/zoom.
 - **Dictation:** streaming speech-to-text behind the `Stt` port (Deepgram-style websocket now; local Whisper on desktop later).
-- **PDF:** text and page images for the source reader. pdf.js in the webview or pdfium from Rust is **open**.
-- **Plugin runtimes:**
-  - `demo`: sandboxed iframe with a hidden self-test before showing it;
-  - `code-runner` and `cas`: JS workers and Pyodide in the webview;
-  - `repl` and `sandbox`: a Rust command runner that spawns local toolchains and Docker/Podman, desktop only.
+- **PDF (built 2026-11-07):** `pdf-extract` (text layer, per page) and `lopdf` (page images) in `crates/harness/src/pdf.rs`, not pdf.js and not pdfium: both crates are in the offline cache, the parser lives next to the tools rather than in the webview, and no C library has to cross-compile to a phone. Extracted page images cover `DCTDecode` and `FlateDecode`; **no rasteriser and no OCR** — a scanned page is an image for a vision-capable Reader, and a Reader without vision is told to ask for a text copy. Bounded: 32 MiB input, 400 pages, 512 KiB of text per read, 8 MiB per page image.
+- **Plugin runtimes (built):**
+  - every plugin is a package with `plugin.toml`, Luau modules, JSON Schemas, optional view and fragments (§4.20, `docs/plugins.md`);
+  - Luau runs in `mlua` with a sandbox, a 64 MiB cap, a 2 s tool-call interrupt and a 200 ms view-bridge interrupt;
+  - views are HTML in a sandboxed iframe with an allow-listed `postMessage` bridge;
+  - native Rust plugins keep the `Plugin` trait for future system access (`sandbox`, `code-runner`, `repl`, `cas`); none is implemented.
 
 ---
 
@@ -1071,15 +1223,23 @@ Not built yet:
 
 ## 8. Build order
 
-1. **Done:** provider crate with streaming for seven providers; Tauri shell on desktop; session op logs; streaming Markdown/KaTeX UI; settings and credentials.
-2. **Done:** agent runtime: tool calling in `providers`; resumable `tool` ops; the phase machine; the prompt composer (shared → agent → phase → section → mode → plugins); plugin scaffolding (loader, platform filter, three-plugin limit, `plugin_request`); model roles (§4.22).
+1. **Done:** provider crate with streaming for eight providers; Tauri shell on desktop; session op logs; streaming Markdown/KaTeX UI; settings and credentials.
+2. **Done:** agent runtime: tool calling in `providers`; resumable `tool` ops; the phase machine; the prompt composer (shared → agent → phase → section → mode → plugins); model roles (§4.22).
 3. **Done:** tutor + planner in mechanism mode: measure (goal → probe, with the scope job in the background), planner + plan card + approval, teach with sections and `plan_change_request`; compaction turns; researcher job (`scope`, `verify`, `source`). Carrel UI and the plan-based Map page.
-3b. **Learning-system features** (`docs/learning-system.md`), in order: target levels and starting point; plan controls and known sections; calibration; field guide; hunts, debriefs and the frontier. The `heuristic` node kind waits for step 4.
-4. **Graph core:** entity files + op logs, alias resolution, chain re-validation, graph builder job, derived index, topic splitter.
-5. **Sync:** `git2` with per-file conflict resolution.
+3b. **Done (2026-11-06):** the output and material pipeline:
+   - Prism-class highlighting at finalize and lazy Mermaid (§4.24);
+   - composer "+", paste, drag-and-drop and `@` mentions, with image staging and per-session read grants (§4.25);
+   - session workspace attach/detach and `workspace_write` with the hash guard (§4.25);
+   - plugin packages: Luau sandbox and host API, strict manifest, plan selection and grants, `plugin_search`, registries/install/lock, consent surfaces (§4.20, `docs/plugins.md`);
+   - artifacts and placement, sandboxed views with the bridge, answer mode (`question_ask.view`);
+   - the reference `circuit` plugin (`plugins/circuit/`).
+   The UI half shipped with the same change; `docs/ui-design.md` §11a records what was verified in headless Chromium 155 and `docs/agent-system-plan.md` records what is still unverified (WebKitGTK/mobile, no real-model run, no `luau-analyze` in the dev shell).
+3c. **Done (2026-11-07): learning-system features** (`docs/learning-system.md`): target levels, starting point (with the device default), plan controls and known sections, hunts with their debriefs and the frontier, the field guide and calibration — records, ops, tools, commands, gates, prompt flags (all on) and the surfaces of `docs/ui-design.md` §7.7. Reviewed against §10 of that document; its known gaps (no real-model run, and the graph-dependent `heuristic` kind, hunt provenance, per-topic venues and calibration) are in `docs/agent-system-plan.md`. The `heuristic` node kind waits for step 4.
+4. **Done (2026-11-07): graph core.** `graph/ops.jsonl` op log (with a migration from the older files), alias resolution and chain re-validation at load, the `graph` builder job on session close, a derived index, and the topic splitter (`docs/graph-build.md`).
+5. **Done (2026-11-07): sync.** `git2` with per-file conflict resolution: union merges for op logs, local-wins + `.conflicts/` elsewhere, device-local remote and token (`docs/sync-build.md`). Proof is against local bare repositories; a real host, a phone, and libgit2 on Android are unproven.
 6. **Learner model + practice:** outcomes log, FSRS, layers, the coach (write → problem checker → check script → pose), stream/set/exam formats, exam mode.
 7. **Android build** (the flake's `android` shell), then **iOS**.
-8. **Remaining modes and their plugins,** in order of grader objectivity: fact; procedure (`code-runner`, `repl`, then `sandbox`); perceptual (`image-set`, `live-search`); argument (`argument-map`, then comparative judging for essays once anchors exist).
+8. **Remaining modes and their plugins,** in order of grader objectivity: fact; procedure (native `code-runner`, `repl`, then `sandbox`); perceptual (`image-set`, `live-search`); argument (`argument-map`, then comparative judging for essays once anchors exist).
 
 ---
 
@@ -1097,9 +1257,21 @@ Stack
 
 Agent design
 - RAG-MCP: Mitigating Prompt Bloat in LLM Tool Selection via Retrieval-Augmented Generation, arXiv 2505.03275: https://arxiv.org/abs/2505.03275
+- `mlua` `Lua` API (sandbox, memory limit, interrupt): https://docs.rs/mlua/latest/mlua/struct.Lua.html
+- MCP Apps, SEP-1865: https://github.com/modelcontextprotocol/ext-apps ; overview: https://modelcontextprotocol.io/extensions/apps/overview
+- Tauri advisory GHSA-57fm-592m-34r7 / CVE-2024-35222 (iframes bypassing IPC origin checks): https://github.com/tauri-apps/tauri/security/advisories/ghsa-57fm-592m-34r7
+- Typst forum, "LLM code generation?" (2024–2025): https://forum.typst.app/t/llm-code-generation/1331
+- Typst HTML export reference ("very incomplete… behind a feature flag"): https://typst.app/docs/reference/html
+- Typst Universe (package registry): https://typst.app/universe/ ; `zap` circuit package: https://typst.app/universe/package/zap
+- Cargo registry index (sparse protocol): https://doc.rust-lang.org/cargo/reference/registry-index.html
+- Library sizes measured 2026-11-06 from jsDelivr: `mermaid@11/dist/mermaid.min.js` 3 572 661 B; `@highlightjs/cdn-assets@11/highlight.min.js` 129 254 B; `prismjs@1/prism.min.js` 19 683 B; `web-tree-sitter/tree-sitter.wasm` 205 488 B. Vendored in this repo on the same day: `ui/vendor/mermaid/mermaid.min.js` 2 749 172 B; `ui/vendor/prism/` (core + 20 components) 51 420 B.
 
 Learning research
 - Dunlosky et al. 2013, effective learning techniques — doi:10.1177/1529100612453266
+- Ginns 2006, spatial and temporal contiguity meta-analysis — doi:10.1016/j.learninstruc.2006.10.001
+- Höffler & Leutner 2007, instructional animation versus static pictures — doi:10.1016/j.learninstruc.2007.09.013
+- Rutten, van Joolingen & van der Veen 2012, computer simulations in science education — doi:10.1016/j.compedu.2011.07.017
+- Hannebauer, Hesenius & Gruhn 2018, does syntax highlighting help programming novices? — doi:10.1007/s10664-017-9579-0
 - Roediger & Karpicke 2006, test-enhanced learning — doi:10.1111/j.1467-9280.2006.01693.x
 - Cepeda et al. 2006, distributed practice — doi:10.1037/0033-2909.132.3.354
 - Ye et al. 2022, FSRS scheduling — doi:10.1145/3534678.3539081

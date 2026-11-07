@@ -1,0 +1,211 @@
+# Formatting, clippy, tests and the headless UI checks — plus the two bundles the
+# owner wants built (Linux AppImage, Android APK), which upload artifacts only.
+#
+# No secrets and no publishing. The check jobs are the commands in README.md's
+# "Test" section, in the order that fails fastest; the bundle jobs come last and
+# gate nothing.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Read-only: nothing here writes to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Expected to FAIL until the pending formatting pass lands: today
+      # `cargo fmt --all --check` rewrites 35 files. The gate is committed now so
+      # that pass is verified when it lands and cannot regress afterwards.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  rust:
+    name: clippy and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Tauri v2 links WebKitGTK 4.1, libsoup 3 and GTK 3; `crates/app` is a
+      # workspace member, so clippy and the tests need them even though no
+      # bundle is built here.
+      - name: Install Tauri v2 Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev patchelf libssl-dev
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+
+  ui-check:
+    name: UI checks (headless Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1
+      # Ubuntu 24.04 has no `chromium` deb: `chromium-browser` is a transitional
+      # package that installs the snap, and GitHub's runners have no working
+      # snapd, so this installs the Chrome build for that same package instead.
+      - name: Install a Chromium-based browser
+        run: |
+          sudo apt-get update
+          wget -q -O /tmp/chrome.deb \
+            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/chrome.deb
+      # run.js takes the check names as argv (`ipc placement`) and reads the
+      # browser executable from $CHROMIUM, so it needs no nix wrapper here.
+      - name: Run the UI checks
+        run: CHROMIUM=google-chrome bun scripts/ui-check/run.js ipc placement
+
+  # The two bundle jobs are the owner's smoke test of the packaging path: they
+  # build and upload an artefact, they are not part of the tree's gates. Both
+  # need a green `rust` job first, and neither gates the checks above or each
+  # other.
+  appimage:
+    name: Linux AppImage
+    # Built on 22.04 (glibc 2.35): an AppImage built on a newer glibc cannot run
+    # on an older distribution.
+    runs-on: ubuntu-22.04
+    needs: [rust]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: cargo-tauri-cli-v2-${{ runner.os }}
+      - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2" --locked
+      # libfuse2 is for running AppImages on 22.04; patchelf and librsvg are the
+      # bundler's inputs; xvfb is only for the smoke start below.
+      - name: Install Tauri v2 Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev patchelf libssl-dev \
+            libfuse2 xvfb
+      # There is no frontend build step: `build.frontendDist` is the checked-in
+      # `ui/` directory, so the CLI goes straight to cargo and linuxdeploy.
+      - name: Build the AppImage
+        run: cargo tauri build --bundles appimage
+      - name: Check the AppImage
+        run: |
+          appimage=$(ls target/release/bundle/appimage/*.AppImage | head -1)
+          echo "built: $appimage"
+          test -x "$appimage"
+          size=$(stat -c%s "$appimage")
+          echo "size: ${size} bytes"
+          test "$size" -gt 10000000
+      - name: Smoke-start the AppImage (reported, never fatal)
+        # The app is a GUI with no CLI: it ignores arguments and opens a window,
+        # so "started" = the process was still alive when the 25 s timeout fired
+        # (exit 124). Whatever happens is printed, not enforced: this step exists
+        # to catch a bundle whose libraries do not resolve, and the first CI run
+        # shows whether WebKitGTK starts under xvfb.
+        run: |
+          appimage=$(ls target/release/bundle/appimage/*.AppImage | head -1)
+          set +e
+          APPIMAGE_EXTRACT_AND_RUN=1 timeout 25 xvfb-run -a "$appimage"
+          code=$?
+          set -e
+          echo "app exit code: ${code} (124 = still running after 25 s, i.e. it started)"
+      - name: Upload the AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    needs: [rust]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # Gradle 9 and AGP 9 (the versions in tauri-cli 2.12's mobile template)
+      # need JDK 17 or newer; the template compiles to JVM 1.8 bytecode.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      # Installs cmdline-tools, accepts the SDK licences and downloads the
+      # platform tauri-cli 2.12's template compiles against (compileSdk 37,
+      # read from the CLI binary); AGP fetches the matching build-tools itself.
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-37'
+      # NDK r29: tauri-cli 2.12.4 carries 29.0.13846066 — the only Android NDK
+      # version literal in the binary — and refuses an older `NDK_HOME`.
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r29
+          add-to-path: false
+      # cargo-mobile2 reads NDK_HOME (not ANDROID_NDK_HOME) and fails without it.
+      - name: Point the Tauri CLI at the NDK
+        run: echo "NDK_HOME=$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: |
+            aarch64-linux-android
+            armv7-linux-androideabi
+            i686-linux-android
+            x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - name: Cache the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: cargo-tauri-cli-v2-${{ runner.os }}
+      - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2" --locked
+      # Generates the Gradle project into the git-ignored crates/app/gen/android/.
+      - name: Generate the Android project
+        run: cargo tauri android init --ci
+      # --debug, not a release build: release APKs are unsigned without a
+      # keystore (and this repo has none), while Gradle's debug build type signs
+      # with the standard debug key, so the artifact actually installs
+      # (`adb install app-universal-debug.apk`). Gradle writes it under the
+      # generated project, app/build/outputs/apk/universal/debug/.
+      - name: Build the APK
+        run: cargo tauri android build --apk --debug --ci
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: crates/app/gen/android/**/*.apk
+          if-no-files-found: error

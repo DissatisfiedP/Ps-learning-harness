@@ -16,6 +16,7 @@
 //! into a running turn. No std lock is held across an `.await`.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use providers::{
@@ -26,15 +27,17 @@ use tokio::sync::oneshot;
 
 use crate::events::{AgentEvent, AgentName};
 use crate::files;
-use crate::plugins::{Plugin, PluginContext};
-use crate::prompts::{Composer, TemplateValues};
+use crate::plugins::PluginContext;
+use crate::prompts::{render, Composer, TemplateValues};
 use crate::replay::{self, replay_state};
 use crate::sessions::{
-    self, op_id, ApproveOp, Op, PhaseOp, PlanRequestOp, PluginGrantOp, RemovedPlugin, ToolOp,
-    ToolResultValue,
+    self, op_id, ApproveOp, DebriefOp, HuntReturnOp, HuntSendOp, HuntSkipOp, HuntToggleOp,
+    KnownRefutedOp, Op, PhaseOp, PlanAnswerOp, PlanEditOp, PlanRequestOp, PluginGrantOp,
+    RemovedPlugin, ToolOp, ToolResultValue,
 };
-use crate::state::{Phase, SessionState};
+use crate::state::{Level, Phase, PlanQuestion, Section, SessionState};
 use crate::tools::{self, opt_str, req_str, MAX_PLUGINS_PER_SECTION};
+use crate::workspace;
 use crate::{lock, now_iso, Ending, Error, Harness, Mode, ModelRole, SessionSummary};
 
 /// Most model calls in one agent turn.
@@ -143,18 +146,20 @@ impl Harness {
 
     /// Ops of a writable Learn session.
     pub(crate) fn learn_ops(&self, session_id: &str) -> Result<Vec<Op>, Error> {
-        let ops = self.store.ops(session_id)?;
-        let mode = ops.iter().find_map(|o| match o {
+        let parsed = self.store.parsed_ops(session_id)?;
+        let mode = parsed.ops.iter().find_map(|o| match o {
             Op::Session(h) => Some(h.mode),
             _ => None,
         });
         if mode != Some(Mode::Learn) {
             return Err(Error::Invalid("this is not a Learn session".into()));
         }
-        if !ops.iter().any(|o| matches!(o, Op::Phase(_))) {
+        // The same rule `list` and the UI use: only a session whose second op
+        // is the initial `phase` op may be written to (sessions.rs).
+        if !parsed.runtime {
             return Err(Error::Invalid(READ_ONLY.into()));
         }
-        Ok(ops)
+        Ok(parsed.ops)
     }
 
     /// Derived state of a session (never stored).
@@ -162,22 +167,22 @@ impl Harness {
         Ok(replay_state(&self.store.ops(session_id)?))
     }
 
-    /// Register a plugin implementation (M5 scaffolding). Its manifest comes
-    /// from `prompts/plugins/<id>.md` when that file exists.
-    pub fn register_plugin(&self, plugin: Arc<dyn Plugin>) -> Result<(), Error> {
+    /// Register a native in-tree plugin (the trait stays for system-level
+    /// tools; none ship in this build).
+    pub fn register_native_plugin(
+        &self,
+        plugin: Arc<dyn crate::plugins::Plugin>,
+    ) -> Result<(), Error> {
         let id = plugin.manifest().id.clone();
-        let composer = Composer::new(&self.repo);
-        let path = format!("plugins/{id}.md");
-        let prompt = if Composer::bundled(&path).is_some()
-            || self.repo.join("prompts").join(&path).exists()
-        {
-            Some(composer.plugin(&path)?)
-        } else {
-            None
-        };
-        lock(&self.plugins)
-            .register(plugin, prompt)
-            .map_err(Error::Invalid)
+        let hash = format!("native-{id}");
+        lock(&self.plugins).register(
+            plugin,
+            crate::plugins::PluginSource::Folder {
+                name: "native".into(),
+            },
+            hash,
+        );
+        Ok(())
     }
 
     /// Remove every saved credential string from text that will be persisted
@@ -195,6 +200,7 @@ impl Harness {
                         .iter()
                         .filter_map(|p| match p.credential_from_env() {
                             Some(providers::Credential::ApiKey { key }) => Some(key),
+                            Some(providers::Credential::ClaudeCode(s)) => Some(s.access_token),
                             _ => None,
                         }),
                 )
@@ -311,16 +317,12 @@ impl Harness {
         }
     }
 
-    /// Context window of the model behind `role`, from the catalog.
+    /// Context window of the model behind `role`, from the cached catalog.
     pub(crate) fn context_window(&self, role: ModelRole) -> usize {
         let Ok(choice) = lock(&self.config).resolve(role) else {
             return DEFAULT_CONTEXT;
         };
-        choice
-            .provider
-            .suggested_models()
-            .into_iter()
-            .find(|m| m.id == choice.model)
+        self.model_info(choice.provider, &choice.model)
             .and_then(|m| m.context_window)
             .map_or(DEFAULT_CONTEXT, |c| c as usize)
     }
@@ -331,23 +333,84 @@ impl Harness {
     /// session's phase).
     pub(crate) fn compose_tutor(
         &self,
+        session_id: &str,
         ops: &[Op],
         state: &SessionState,
         phase: Phase,
     ) -> Result<(String, Vec<ToolSpec>), Error> {
         let composer = Composer::new(&self.repo);
-        let flags = HashSet::new(); // mermaid stays off until the UI renders it
+        let mut flags = HashSet::new();
+        flags.insert("mermaid".to_owned());
+        // Learning-system flags (docs/learning-system-build.md): each is on
+        // when the data its blocks need can exist.
+        flags.insert("levels".to_owned());
+        flags.insert("starting_point".to_owned());
+        flags.insert("plan_controls".to_owned());
+        flags.insert("hunts".to_owned());
+        // A hunt is live only when the planner marked it available *and* the
+        // learner switched it on; replay turns a skip into off (§5).
+        let hunt_active = state.hunt_active();
+        if hunt_active {
+            flags.insert("hunt_active".to_owned());
+        }
+        // A known section is greyed until a miss refutes it (§4), and only the
+        // current section can be taught.
+        if state
+            .current_section()
+            .is_some_and(|s| s.assumed_known && !state.known_refuted.contains(&s.id))
+        {
+            flags.insert("known_section".to_owned());
+        }
+        if !Composer::brief_venues(state.brief.as_ref()).is_empty() {
+            flags.insert("field_guide".to_owned());
+        }
+        if state.calibration.is_some() {
+            flags.insert("calibration".to_owned());
+        }
+        let workspace = lock(&self.workspaces).get(session_id).is_some();
+        if workspace {
+            flags.insert("workspace".to_owned());
+        }
         let mut base = TemplateValues::new();
-        base.set("session_state", Composer::session_state(state));
+        base.set(
+            "session_state",
+            Composer::session_state_with(state, Some(&self.saved_starting_point())),
+        );
+        base.set(
+            "workspace_name",
+            state
+                .workspace
+                .clone()
+                .unwrap_or_else(|| "workspace".into()),
+        );
         let (fragments, plugin_tools) = {
-            let registry = lock(&self.plugins);
+            let registry = self.plugin_registry();
             (
-                registry.fragments(&state.active_plugins),
-                registry.tool_specs(&state.active_plugins),
+                registry.fragments(&state.active_plugins, "tutor"),
+                registry.tool_specs(&state.active_plugins, "tutor"),
             )
         };
         let mut values = TemplateValues::new();
         values.set("active_plugins", "");
+        // The hunt fragment (§5): `teach.md` renders it inside
+        // `{{#hunt_active}}`, so its own placeholder is resolved here and the
+        // value is empty whenever the flag drops the block.
+        values.set("hunt.state", state.hunt_state());
+        values.set(
+            "hunt",
+            if hunt_active {
+                let mut hunt_values = TemplateValues::new();
+                hunt_values.set("hunt.state", state.hunt_state());
+                render(
+                    &composer.load("tutor/hunt.md")?,
+                    &hunt_values,
+                    &HashSet::new(),
+                )?
+            } else {
+                String::new()
+            },
+        );
+        set_section_level_values(&mut values, None);
         let (file, label) = match phase {
             Phase::Measure => ("tutor/phases/measure.md", "measure"),
             Phase::Teach | Phase::Close => {
@@ -358,6 +421,7 @@ impl Harness {
                     plan.sections.iter().find(|s| &s.id == last)
                 });
                 let carry = carry_over(ops);
+                set_section_level_values(&mut values, section);
                 match section {
                     Some(s) => {
                         values.set("section.title", s.title.clone());
@@ -403,7 +467,7 @@ impl Harness {
             }
         };
         let system = composer.compose_tutor(file, label, &base, &values, &flags)?;
-        let mut tools = tools::tutor_tools(phase);
+        let mut tools = tools::tutor_tools(phase, workspace);
         if phase == Phase::Teach {
             tools.extend(plugin_tools);
         }
@@ -412,9 +476,47 @@ impl Harness {
 
     pub(crate) fn compose_planner(&self, state: &SessionState) -> Result<String, Error> {
         let composer = Composer::new(&self.repo);
+        let mut flags = HashSet::new();
+        flags.insert("levels".to_owned());
+        flags.insert("starting_point".to_owned());
+        flags.insert("plan_controls".to_owned());
+        flags.insert("hunts".to_owned());
+        // The planner is told a hunt can be offered; it is never told one is
+        // live for teaching, but the keys exist so no prompt fails to render.
+        let hunt_active = state.hunt_active();
+        if hunt_active {
+            flags.insert("hunt_active".to_owned());
+        }
+        if !Composer::brief_venues(state.brief.as_ref()).is_empty() {
+            flags.insert("field_guide".to_owned());
+        }
+        if state.calibration.is_some() {
+            flags.insert("calibration".to_owned());
+        }
         let mut values = TemplateValues::new();
-        values.set("session_state", Composer::session_state(state));
-        let catalog = lock(&self.plugins).available();
+        values.set(
+            "session_state",
+            Composer::session_state_with(state, Some(&self.saved_starting_point())),
+        );
+        values.set("hunt.state", state.hunt_state());
+        values.set(
+            "hunt",
+            if hunt_active {
+                let mut hunt_values = TemplateValues::new();
+                hunt_values.set("hunt.state", state.hunt_state());
+                render(
+                    &composer.load("tutor/hunt.md")?,
+                    &hunt_values,
+                    &HashSet::new(),
+                )?
+            } else {
+                String::new()
+            },
+        );
+        // The planner has no current section; the keys exist so a prompt may
+        // mention them without failing to render.
+        set_section_level_values(&mut values, None);
+        let catalog = self.plugin_registry().available();
         values.set(
             "plugin_catalog",
             composer.plugin_catalog(&state.platform, &catalog),
@@ -443,7 +545,7 @@ impl Harness {
             );
             values.set("sittings_left", "unknown");
         }
-        composer.compose_planner(&values, exam, &HashSet::new())
+        composer.compose_planner(&values, exam, &flags)
     }
 
     // ---- the tutor turn ----------------------------------------------------
@@ -495,8 +597,13 @@ impl Harness {
                 break;
             }
             let prompt_phase = if handoff { start_phase } else { state.phase };
-            let (system, tools) = self.compose_tutor(&ops, &state, prompt_phase)?;
-            let mut messages = replay::conversation(&ops);
+            let (system, tools) = self.compose_tutor(session_id, &ops, &state, prompt_phase)?;
+            let mut messages = replay::conversation_with(
+                &ops,
+                Some(&self.repo),
+                self.role_vision(ModelRole::Tutor) != Some(false),
+                true,
+            );
             ensure_user_last(&mut messages);
 
             let window = self.context_window(ModelRole::Tutor);
@@ -681,22 +788,36 @@ impl Harness {
         let ops = self.store.ops(session_id)?;
         let state = replay_state(&ops);
         match name {
-            "question_ask" => Ok(gate_question(&state, args)),
+            "question_ask" => match self.question_view_ok(&ops, &state, args) {
+                Ok(()) => Ok(gate_question(&ops, &state, args)),
+                Err(e) => Ok(refuse("question_ask", e)),
+            },
             "choice_ask" => Ok(gate_choice(args)),
             "goal_set" => self.goal_set(session_id, &state, args),
             "verdict_record" => self.verdict_record(session_id, &ops, args),
-            "probe_done" => self.probe_done(session_id, &state, args),
+            "probe_done" => self.probe_done(session_id, &ops, &state, args),
             "research_request" => self.research_request(session_id, args),
             "plan_change_request" => self.plan_change_request(session_id, args),
             "plugin_request" => self.plugin_request(session_id, &state, args),
             "section_done" => self.section_done(session_id, &state, args),
+            "hunt_send" => self.hunt_send(session_id, &state, call, args),
+            "debrief_record" => self.debrief_record(session_id, &ops, args),
+            "frontier_park" => self.frontier_park(session_id, &state, args),
             "session_end" => {
                 if state.phase != Phase::Close {
                     self.append(session_id, phase_op(Phase::Close, None))?;
                 }
+                // Once per session: the graph is built from the finished
+                // transcript. It never delivers anything into the
+                // conversation and never wakes the tutor.
+                self.spawn_graph_on_close(session_id);
+                // The transcript is complete: push it in the background (the
+                // graph job's own ops go out with the next trigger).
+                self.sync_in_background();
                 Ok(done("Session ended."))
             }
-            "file_find" | "file_read" => Ok(file_tool(name, args).await),
+            "file_find" | "file_read" => Ok(self.file_tool(session_id, &state, name, args).await),
+            "workspace_write" => self.workspace_write(session_id, &state, args),
             _ => Ok(self.plugin_call(session_id, &state, name, args).await),
         }
     }
@@ -707,34 +828,84 @@ impl Harness {
         state: &SessionState,
         args: &Value,
     ) -> Result<Exec, Error> {
+        let name = "goal_set";
         let goal = match req_str(args, "goal") {
             Ok(g) => g.to_owned(),
-            Err(e) => return Ok(refuse("goal_set", e)),
+            Err(e) => return Ok(refuse(name, e)),
         };
-        match opt_str(args, "purpose") {
-            Some("curiosity" | "project" | "work" | "exam") => {}
+        let purpose = match opt_str(args, "purpose") {
+            Some(p @ ("curiosity" | "project" | "work" | "exam" | "course")) => p,
             _ => {
                 return Ok(refuse(
-                    "goal_set",
-                    "`purpose` must be curiosity, project, work or exam",
+                    name,
+                    "`purpose` must be curiosity, project, work, exam or course",
                 ))
             }
+        };
+        if let Some(depth) = opt_str(args, "depth") {
+            if !matches!(depth, "pass" | "solid" | "deep") {
+                return Ok(refuse(name, "`depth` must be pass, solid or deep"));
+            }
         }
+        if let Some(explore) = opt_str(args, "explore") {
+            if !matches!(explore, "off" | "suggest" | "on") {
+                return Ok(refuse(name, "`explore` must be off, suggest or on"));
+            }
+        }
+        if let Some(point) = opt_str(args, "startingPoint") {
+            if !matches!(point, "measure" | "quick" | "new") {
+                return Ok(refuse(
+                    name,
+                    "`startingPoint` must be measure, quick or new",
+                ));
+            }
+        }
+
+        // Normalise the record so replay and the gates read one shape: the
+        // depth default, explore off (always for course and exam goals), and
+        // the learner's saved starting point when the model didn't name one.
+        let settled = matches!(purpose, "course" | "exam");
+        let explore = if settled {
+            "off"
+        } else {
+            opt_str(args, "explore").unwrap_or("off")
+        };
+        let explore_forced = settled && opt_str(args, "explore").is_some_and(|e| e != "off");
+        let depth = opt_str(args, "depth").unwrap_or("solid");
+        let saved = lock(&self.config).settings.starting_point.clone();
+        let point = opt_str(args, "startingPoint").unwrap_or(match saved.as_str() {
+            p @ ("measure" | "quick" | "new") => p,
+            _ => "measure",
+        });
+        let mut record = args.clone();
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("depth".into(), json!(depth));
+            obj.insert("explore".into(), json!(explore));
+            obj.insert("startingPoint".into(), json!(point));
+        }
+        let note = if explore_forced {
+            "\nNote: explore stays off for course and exam goals."
+        } else {
+            ""
+        };
+
         let first = state.goal.is_none();
-        self.append(session_id, Op::Goal(sessions::record(args.clone())))?;
+        self.append(session_id, Op::Goal(sessions::record(record.clone())))?;
         if first {
             let job_args = json!({
                 "kind": "scope",
                 "question": goal,
-                "context": args.to_string(),
+                "context": record.to_string(),
             });
             self.spawn_job(session_id, "research", job_args, &format!("scope: {goal}"))?;
             if state.title.is_none() {
-                self.spawn_title(session_id, args.clone());
+                self.spawn_title(session_id, record);
             }
-            Ok(done("Goal recorded. The scope research is running in the background; its brief will arrive as a message. Start probing now."))
+            Ok(done(format!(
+                "Goal recorded. The scope research is running in the background; its brief will arrive as a message. Start probing now.{note}"
+            )))
         } else {
-            Ok(done("Goal updated."))
+            Ok(done(format!("Goal updated.{note}")))
         }
     }
 
@@ -768,13 +939,57 @@ impl Harness {
         if question.get("format").and_then(Value::as_str) == Some("choice") {
             return Ok(refuse(name, "choice questions are graded by the app"));
         }
-        let _ = session_id;
+        // A known section's check was missed: code records it here (§4). The
+        // section un-greys and falls back to the normal per-node gate; the
+        // tutor teaches it on the spot, so there is no planner job and no
+        // phase change.
+        self.refute_known_section(session_id, ops, qid, &question, args)?;
         Ok(done("Verdict recorded."))
+    }
+
+    /// Append `knownRefuted` when a missed check lands on the current,
+    /// assumed-known, not-yet-refuted section (§4). Only a `check` question
+    /// counts: a prediction is not the section's exit evidence.
+    fn refute_known_section(
+        &self,
+        session_id: &str,
+        ops: &[Op],
+        question_id: &str,
+        question: &Value,
+        args: &Value,
+    ) -> Result<(), Error> {
+        if opt_str(args, "verdict") == Some("correct") {
+            return Ok(());
+        }
+        if question.get("role").and_then(Value::as_str) != Some("check") {
+            return Ok(());
+        }
+        let state = replay_state(ops);
+        let Some(section) = state.current_section() else {
+            return Ok(());
+        };
+        if !section.assumed_known || state.known_refuted.contains(&section.id) {
+            return Ok(());
+        }
+        let node = question.get("nodeId").and_then(Value::as_str).unwrap_or("");
+        if !section.node_ids.iter().any(|n| n == node) {
+            return Ok(());
+        }
+        self.append(
+            session_id,
+            Op::KnownRefuted(KnownRefutedOp {
+                op_id: op_id(),
+                at: now_iso(),
+                section_id: section.id.clone(),
+                question_id: question_id.to_owned(),
+            }),
+        )
     }
 
     fn probe_done(
         self: &Arc<Self>,
         session_id: &str,
+        ops: &[Op],
         state: &SessionState,
         args: &Value,
     ) -> Result<Exec, Error> {
@@ -788,8 +1003,55 @@ impl Harness {
                 "the scope brief hasn't arrived. Keep probing other strands, or say in one line that you're waiting and end your turn; the brief's arrival will wake you",
             ));
         }
-        if !args.get("strands").is_some_and(Value::is_array) {
+        let Some(strands) = args.get("strands").and_then(Value::as_array) else {
             return Ok(refuse(name, "`strands` must be an array"));
+        };
+        // Starting point decides how many questions the probe could have
+        // asked (§3); the strand records must match it.
+        let starting_point = state.starting_point();
+        let asked = probe_questions(ops);
+        if starting_point == "quick" && asked > QUICK_PROBE_QUESTIONS {
+            return Ok(refuse(name, "quick check: at most five probe questions"));
+        }
+        if starting_point == "new" && asked > 0 {
+            return Ok(refuse(
+                name,
+                "the learner starts new: no probe questions were asked, so there is nothing to bracket",
+            ));
+        }
+        for (i, strand) in strands.iter().enumerate() {
+            let label = strand
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("strand {}", i + 1));
+            let confidence = strand.get("confidence").and_then(Value::as_str);
+            let reason = strand.get("reason").and_then(Value::as_str);
+            if let Some(reason) = reason {
+                if !matches!(reason, "new" | "skipped") {
+                    return Ok(refuse(
+                        name,
+                        format!("strand `{label}`: `reason` must be new or skipped"),
+                    ));
+                }
+                if confidence != Some("unprobed") {
+                    return Ok(refuse(
+                        name,
+                        format!(
+                            "strand `{label}`: `reason` only goes with `confidence: \"unprobed\"`"
+                        ),
+                    ));
+                }
+            }
+            if starting_point == "new" && (confidence != Some("unprobed") || reason != Some("new"))
+            {
+                return Ok(refuse(
+                    name,
+                    format!(
+                        "the learner starts new: every strand needs `confidence: \"unprobed\"` and `reason: \"new\"`; strand `{label}` doesn't"
+                    ),
+                ));
+            }
         }
         self.append(session_id, Op::Probe(sessions::record(args.clone())))?;
         self.append(session_id, phase_op(Phase::Plan, None))?;
@@ -898,7 +1160,7 @@ impl Harness {
         let Some(section) = state.current_section.clone() else {
             return Ok(refuse(name, "no section is being taught"));
         };
-        if !lock(&self.plugins).grantable(plugin) {
+        if !self.plugin_registry().grantable(plugin) {
             return Ok(refuse(
                 name,
                 format!(
@@ -952,20 +1214,10 @@ impl Harness {
         if req_str(args, "evidence").is_err() {
             return Ok(refuse(name, "missing `evidence`"));
         }
-        let missing: Vec<&str> = section
-            .node_ids
-            .iter()
-            .filter(|n| !state.node_passed(n))
-            .map(String::as_str)
-            .collect();
-        if !missing.is_empty() {
-            return Ok(refuse(
-                name,
-                format!(
-                    "these nodes have no passing check question yet: {}",
-                    missing.join(", ")
-                ),
-            ));
+        // A known section closes on one passing check at its target level,
+        // until a miss refutes it (§4) — then every node needs one again.
+        if let Err(why) = close_problems(state, &section) {
+            return Ok(refuse(name, why));
         }
         let next = state.plan.as_ref().and_then(|p| {
             p.sections
@@ -989,6 +1241,482 @@ impl Harness {
         }
     }
 
+    // ---- hunts (§5) ---------------------------------------------------------
+
+    /// The tutor's `hunt_send` (§5): the learner goes and finds things out
+    /// before this section is taught. Refused unless the planner marked the
+    /// section's hunt available, the learner switched it on (replay carries
+    /// their toggle), it wasn't skipped, and nothing has been sent yet.
+    fn hunt_send(
+        &self,
+        session_id: &str,
+        state: &SessionState,
+        call: &ToolCall,
+        args: &Value,
+    ) -> Result<Exec, Error> {
+        let name = "hunt_send";
+        let Some(section) = state.current_section() else {
+            return Ok(refuse(name, "no section is being taught"));
+        };
+        if opt_str(args, "sectionId") != Some(section.id.as_str()) {
+            return Ok(refuse(
+                name,
+                format!("the current section is `{}`", section.id),
+            ));
+        }
+        let Some(hunt) = &section.hunt else {
+            return Ok(refuse(
+                name,
+                format!(
+                    "section `{}` has no hunt: the planner didn't mark one available",
+                    section.id
+                ),
+            ));
+        };
+        if !hunt.available {
+            return Ok(refuse(
+                name,
+                format!("section `{}` has no hunt available", section.id),
+            ));
+        }
+        if state
+            .hunt
+            .as_ref()
+            .is_some_and(|h| h.state == "skipped" && h.section_id == section.id)
+        {
+            return Ok(refuse(
+                name,
+                "the learner skipped this section's hunt: teach the section normally",
+            ));
+        }
+        if !hunt.enabled {
+            return Ok(refuse(
+                name,
+                "only the learner can enable a hunt: this section's hunt isn't switched on",
+            ));
+        }
+        if state
+            .hunt
+            .as_ref()
+            .is_some_and(|h| h.section_id == section.id)
+        {
+            let hunt_id = state
+                .hunt
+                .as_ref()
+                .map(|h| h.hunt_id.as_str())
+                .unwrap_or("");
+            return Ok(refuse(
+                name,
+                format!(
+                    "this section's hunt is already sent (`{hunt_id}`); the debrief is the next step, not a second hunt"
+                ),
+            ));
+        }
+        let question = match req_str(args, "question") {
+            Ok(q) => q.trim().to_owned(),
+            Err(e) => return Ok(refuse(name, e)),
+        };
+        let Some(look_at) = args.get("lookAt").and_then(Value::as_array) else {
+            return Ok(refuse(name, "`lookAt` must list where to look"));
+        };
+        if look_at.is_empty() {
+            return Ok(refuse(name, "`lookAt` must list at least one place"));
+        }
+        for (i, entry) in look_at.iter().enumerate() {
+            let kind = entry.get("kind").and_then(Value::as_str).unwrap_or("");
+            if !HUNT_KINDS.contains(&kind) {
+                return Ok(refuse(
+                    name,
+                    format!(
+                        "lookAt[{i}].kind `{kind}` must be one of {}",
+                        HUNT_KINDS.join(", ")
+                    ),
+                ));
+            }
+            if opt_str(entry, "why").is_none() {
+                return Ok(refuse(
+                    name,
+                    format!("lookAt[{i}] needs a `why`: one line on what to look for there"),
+                ));
+            }
+        }
+        let bring_back: Vec<String> = args
+            .get("bringBack")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if bring_back.is_empty() {
+            return Ok(refuse(name, "`bringBack` must say what to come back with"));
+        }
+        self.append(
+            session_id,
+            Op::HuntSend(HuntSendOp {
+                op_id: op_id(),
+                at: now_iso(),
+                hunt_id: call.id.clone(),
+                section_id: section.id.clone(),
+                question,
+                look_at: Value::Array(look_at.clone()),
+                bring_back,
+            }),
+        )?;
+        Ok(done(
+            "Hunt sent: the learner has the card. End your turn; they come back whenever they like, and you debrief what they found before teaching.",
+        ))
+    }
+
+    /// The debrief (§5): every claim sorted. Refused until the learner has
+    /// returned from that hunt, and refused a second time for the same hunt.
+    fn debrief_record(&self, session_id: &str, ops: &[Op], args: &Value) -> Result<Exec, Error> {
+        let name = "debrief_record";
+        let hunt_id = match req_str(args, "huntId") {
+            Ok(h) => h.to_owned(),
+            Err(e) => return Ok(refuse(name, e)),
+        };
+        let sent = ops
+            .iter()
+            .any(|o| matches!(o, Op::HuntSend(h) if h.hunt_id == hunt_id));
+        if !sent {
+            return Ok(refuse(name, format!("no hunt with huntId `{hunt_id}`")));
+        }
+        let returned = ops
+            .iter()
+            .any(|o| matches!(o, Op::HuntReturn(r) if r.hunt_id == hunt_id));
+        if !returned {
+            let skipped = ops
+                .iter()
+                .any(|o| matches!(o, Op::HuntSkip(k) if k.hunt_id == hunt_id));
+            if skipped {
+                return Ok(refuse(
+                    name,
+                    "the learner skipped this hunt; there is nothing to debrief, teach the section normally",
+                ));
+            }
+            return Ok(refuse(
+                name,
+                format!(
+                    "hunt `{hunt_id}` hasn't come back yet: debrief what the learner brought back, once they return"
+                ),
+            ));
+        }
+        if ops
+            .iter()
+            .any(|o| matches!(o, Op::Debrief(d) if d.hunt_id == hunt_id))
+        {
+            return Ok(refuse(name, "that hunt is already debriefed"));
+        }
+        let Some(claims) = args.get("claims").and_then(Value::as_array) else {
+            return Ok(refuse(
+                name,
+                "`claims` must list what the learner brought back",
+            ));
+        };
+        if claims.is_empty() {
+            return Ok(refuse(name, "`claims` must list at least one claim"));
+        }
+        for (i, claim) in claims.iter().enumerate() {
+            if opt_str(claim, "claim").is_none() {
+                return Ok(refuse(name, format!("claims[{i}] needs `claim`")));
+            }
+            let verdict = claim.get("verdict").and_then(Value::as_str).unwrap_or("");
+            if !DEBRIEF_VERDICTS.contains(&verdict) {
+                return Ok(refuse(
+                    name,
+                    format!(
+                        "claims[{i}].verdict `{verdict}` must be one of {}",
+                        DEBRIEF_VERDICTS.join(", ")
+                    ),
+                ));
+            }
+        }
+        let count = claims.len();
+        self.append(
+            session_id,
+            Op::Debrief(DebriefOp {
+                op_id: op_id(),
+                at: now_iso(),
+                hunt_id,
+                claims: Value::Array(claims.clone()),
+            }),
+        )?;
+        Ok(done(format!(
+            "Debrief recorded ({count} claims). Teaching this section can start; the hunt's findings are reference points, never evidence."
+        )))
+    }
+
+    /// `frontier_park` (§5): an off-route topic goes to `frontier.jsonl`, not
+    /// to the session's plan, so the learner can start a session from it.
+    fn frontier_park(
+        &self,
+        session_id: &str,
+        state: &SessionState,
+        args: &Value,
+    ) -> Result<Exec, Error> {
+        let name = "frontier_park";
+        let topic = match req_str(args, "topic") {
+            Ok(t) => t.trim().to_owned(),
+            Err(e) => return Ok(refuse(name, e)),
+        };
+        let why = opt_str(args, "why").unwrap_or("").trim().to_owned();
+        let hunt_id = state
+            .hunt
+            .as_ref()
+            .map(|h| h.hunt_id.as_str())
+            .filter(|id| !id.is_empty());
+        match crate::frontier::append(&self.repo, session_id, hunt_id, &topic, &why) {
+            Ok(_) => Ok(done(format!(
+                "Parked on the frontier: {topic}. The learner can start a session from it later."
+            ))),
+            Err(e) => Ok(refuse(
+                name,
+                format!("could not save the frontier item: {e}"),
+            )),
+        }
+    }
+
+    /// Answer-mode gate (W7): the referenced artifact must exist, belong to an
+    /// installed, enabled plugin that is active in the current section and
+    /// whose view declares `answer = true`, and carry a `target` that stays
+    /// in the call op.
+    fn question_view_ok(
+        &self,
+        ops: &[Op],
+        state: &SessionState,
+        args: &Value,
+    ) -> Result<(), String> {
+        let Some(view) = args.get("view") else {
+            return Ok(());
+        };
+        let Some(view) = view.as_object() else {
+            return Err("`view` must be an object".into());
+        };
+        let Some(artifact_id) = view.get("artifactId").and_then(Value::as_str) else {
+            return Err("view.artifactId is required".into());
+        };
+        if view
+            .get("task")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err("view.task is required".into());
+        }
+        if !view.get("target").is_some_and(Value::is_object) {
+            return Err("view.target must be an object".into());
+        }
+        let artifact = ops.iter().find_map(|o| match o {
+            Op::Artifact(a) if a.artifact_id == artifact_id => Some(a),
+            _ => None,
+        });
+        let Some(artifact) = artifact else {
+            return Err(format!("no artifact `{artifact_id}` in this session"));
+        };
+        let registry = self.plugin_registry();
+        let Some(plugin) = registry.by_id(&artifact.plugin_id) else {
+            return Err(format!(
+                "the plugin that made `{artifact_id}` isn't installed"
+            ));
+        };
+        if !registry.is_enabled(&artifact.plugin_id) {
+            return Err(format!(
+                "the plugin that made `{artifact_id}` is disabled; ask without the view"
+            ));
+        }
+        if !state.active_plugins.contains(&artifact.plugin_id) {
+            return Err(format!(
+                "the plugin that made `{artifact_id}` isn't active in this section; ask without the view"
+            ));
+        }
+        if !plugin.manifest().view.first().is_some_and(|v| v.answer) {
+            return Err("that artifact's view can't be an answer surface".into());
+        }
+        Ok(())
+    }
+
+    /// Grade a view submission through the plugin's `grade(answer, target)`.
+    /// The plugin never records a verdict; the tutor still calls
+    /// `verdict_record` with the `questionId`.
+    fn grade_view_answer(
+        &self,
+        session_id: &str,
+        question_id: &str,
+        view: &Value,
+        payload: &Value,
+    ) -> Result<Value, Error> {
+        let artifact_id = view
+            .get("artifactId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Invalid("the question has no artifact".into()))?;
+        let ops = self.store.ops(session_id)?;
+        let artifact = ops
+            .iter()
+            .find_map(|o| match o {
+                Op::Artifact(a) if a.artifact_id == artifact_id => Some(a.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| Error::Invalid("that artifact no longer exists".into()))?;
+        let plugin = match self.enabled_plugin(&artifact.plugin_id) {
+            Ok(plugin) => plugin,
+            Err(Error::NotFound(_)) => {
+                return Err(Error::Invalid(
+                    "the plugin that made this view isn't installed".into(),
+                ))
+            }
+            Err(_) => {
+                return Err(Error::Invalid(
+                    "the plugin that made this view is disabled; enable it in Settings → Plugins to submit this answer".into(),
+                ))
+            }
+        };
+        let answer = payload.get("answer").cloned().unwrap_or(Value::Null);
+        let target = view.get("target").cloned().unwrap_or(Value::Null);
+        let grade = plugin
+            .grade(&answer, &target)
+            .map_err(|e| Error::Invalid(format!("the plugin couldn't grade the answer: {e}")))?;
+        Ok(json!({
+            "questionId": question_id,
+            "artifactId": artifact_id,
+            "answer": answer,
+            "view": grade,
+        }))
+    }
+
+    /// Read roots for this session: home, the attached workspace, and every
+    /// path a learner attachment granted (W3/W4).
+    fn file_roots(&self, session_id: &str, state: &SessionState) -> Vec<std::path::PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(home) = files::home_dir() {
+            roots.push(home);
+        }
+        if let Some(ws) = lock(&self.workspaces).get(session_id) {
+            roots.push(ws);
+        }
+        for path in &state.file_grants {
+            roots.push(std::path::PathBuf::from(path));
+        }
+        roots
+    }
+
+    async fn file_tool(
+        &self,
+        session_id: &str,
+        state: &SessionState,
+        name: &str,
+        args: &Value,
+    ) -> Exec {
+        let roots = self.file_roots(session_id, state);
+        if roots.is_empty() {
+            return refuse(name, "no home directory on this device");
+        }
+        let args = args.clone();
+        let tool = name.to_owned();
+        let workspace = lock(&self.workspaces).get(session_id);
+        let result = tokio::task::spawn_blocking(move || match tool.as_str() {
+            "file_find" => match req_str(&args, "pattern") {
+                Ok(p) => {
+                    files::file_find_roots(&roots, workspace.as_deref(), p).map(|text| (text, None))
+                }
+                Err(e) => Err(e),
+            },
+            _ => match req_str(&args, "path") {
+                Ok(p) => {
+                    let lines = opt_str(&args, "lines");
+                    // A relative path names a workspace file first (the
+                    // paths workspace_write takes), then one under home.
+                    let relative = !p.trim().starts_with('~') && !Path::new(p.trim()).is_absolute();
+                    let in_workspace = workspace.as_deref().filter(|ws| {
+                        relative && workspace::resolve(ws, p).is_ok_and(|f| f.is_file())
+                    });
+                    let (out, full) = match in_workspace {
+                        Some(ws) => (files::file_read(ws, p, lines)?, files::resolve(ws, p)),
+                        None => (
+                            files::file_read_roots(&roots, p, lines)?,
+                            files::resolve_roots(&roots, p),
+                        ),
+                    };
+                    // Remember the hash of the workspace file the agent
+                    // actually saw, keyed by its workspace-relative path, so
+                    // workspace_write can tell learner edits from its own.
+                    let seen = workspace.as_deref().zip(full.ok()).and_then(|(ws, full)| {
+                        Some((
+                            workspace::relative(ws, &full)?,
+                            workspace::file_hash(&full)?,
+                        ))
+                    });
+                    Ok((out, seen))
+                }
+                Err(e) => Err(e),
+            },
+        })
+        .await;
+        match result {
+            Ok(Ok((text, seen))) => {
+                if let Some((path, hash)) = seen {
+                    lock(&self.workspace_hashes).insert((session_id.to_owned(), path), hash);
+                }
+                done(text)
+            }
+            Ok(Err(e)) => refuse(name, e),
+            Err(e) => refuse(name, format!("internal error ({e})")),
+        }
+    }
+
+    fn workspace_write(
+        &self,
+        session_id: &str,
+        state: &SessionState,
+        args: &Value,
+    ) -> Result<Exec, Error> {
+        let name = "workspace_write";
+        let Some(root) = lock(&self.workspaces).get(session_id) else {
+            return Ok(refuse(name, "no workspace is attached to this session"));
+        };
+        let path = match req_str(args, "path") {
+            Ok(p) => p,
+            Err(e) => return Ok(refuse(name, e)),
+        };
+        let content = match req_str(args, "content") {
+            Ok(c) => c,
+            Err(e) => return Ok(refuse(name, e)),
+        };
+        // Same key as file_read records: the workspace-relative path.
+        let rel = match workspace::resolve(&root, path) {
+            Ok(full) => workspace::relative(&root, &full).unwrap_or_else(|| path.to_owned()),
+            Err(e) => return Ok(refuse(name, e)),
+        };
+        let key = (session_id.to_owned(), rel.clone());
+        let expected = lock(&self.workspace_hashes)
+            .get(&key)
+            .cloned()
+            .or_else(|| state.workspace_writes.get(&rel).cloned());
+        let result = workspace::write(&root, path, content, expected.as_deref());
+        match result {
+            Err(e) => Ok(refuse(name, e)),
+            Ok((_, hash, size)) => {
+                lock(&self.workspace_hashes).insert(key, hash.clone());
+                self.append(
+                    session_id,
+                    Op::WorkspaceWrite(sessions::WorkspaceWriteOp {
+                        op_id: op_id(),
+                        at: now_iso(),
+                        path: rel,
+                        sha256: hash,
+                        size,
+                    }),
+                )?;
+                Ok(done(format!(
+                    "Wrote {path} ({size} bytes) in the workspace. The learner may edit it in their own editor; re-read before relying on it."
+                )))
+            }
+        }
+    }
+
     async fn plugin_call(
         &self,
         session_id: &str,
@@ -996,12 +1724,16 @@ impl Harness {
         name: &str,
         args: &Value,
     ) -> Exec {
-        let owner = lock(&self.plugins).owner(&state.active_plugins, name);
-        let Some(plugin) = owner else {
-            return refuse(name, "unknown tool");
+        let (owner, manifest, package_hash) = {
+            let registry = self.plugin_registry();
+            let Some(plugin) = registry.owner(&state.active_plugins, name) else {
+                return refuse(name, "unknown tool");
+            };
+            let manifest = plugin.manifest().clone();
+            let hash = registry.package_hash(&manifest.id).unwrap_or_default();
+            (plugin, manifest, hash)
         };
-        // The future is 'static: no lock is held while it runs.
-        let fut = plugin.call(
+        let fut = owner.call(
             name,
             args,
             PluginContext {
@@ -1010,9 +1742,46 @@ impl Harness {
             },
         );
         let out = fut.await;
+        if out.is_error {
+            return Exec::Done {
+                content: out.content,
+                is_error: true,
+            };
+        }
+        let Some(artifact) = out.artifact else {
+            return Exec::Done {
+                content: out.content,
+                is_error: false,
+            };
+        };
+        let id = ulid::Ulid::new().to_string();
+        let svg = match crate::artifacts::sanitize_svg(&artifact.svg) {
+            Ok(svg) => svg,
+            Err(e) => return refuse(name, e),
+        };
+        let op = sessions::ArtifactOp {
+            op_id: op_id(),
+            at: now_iso(),
+            artifact_id: id.clone(),
+            plugin_id: manifest.id,
+            plugin_version: manifest.version,
+            package_hash,
+            tool: name.to_owned(),
+            input: args.clone(),
+            data: artifact.data,
+            fallback_svg: svg,
+        };
+        if let Err(e) = self.append(session_id, Op::Artifact(op)) {
+            return refuse(name, format!("couldn't store the artifact ({e})"));
+        }
+        let mut content = out.content;
+        if !content.is_empty() {
+            content.push_str("\n\n");
+        }
+        content.push_str(&crate::artifacts::placement_line(&id));
         Exec::Done {
-            content: out.content,
-            is_error: out.is_error,
+            content,
+            is_error: false,
         }
     }
 
@@ -1021,10 +1790,20 @@ impl Harness {
     /// Create a Learn session from the learner's opening message and run the
     /// first tutor turn.
     pub async fn start_teaching(self: &Arc<Self>, text: &str) -> Result<SessionSummary, Error> {
+        self.start_teaching_with(text, &[]).await
+    }
+
+    /// As [`start_teaching`], with the attachments chosen on Home (W3).
+    pub async fn start_teaching_with(
+        self: &Arc<Self>,
+        text: &str,
+        attachments: &[crate::sessions::Attachment],
+    ) -> Result<SessionSummary, Error> {
         let text = text.trim();
         if text.is_empty() {
             return Err(Error::Invalid("message is empty".into()));
         }
+        self.check_vision(attachments)?;
         lock(&self.config).resolve(ModelRole::Tutor)?;
         let summary = self.store.create(Mode::Learn, text)?;
         self.emit(
@@ -1033,7 +1812,8 @@ impl Harness {
                 session: summary.clone(),
             },
         );
-        self.send_learner_message(&summary.id, text).await?;
+        self.send_learner_message_with(&summary.id, text, attachments)
+            .await?;
         self.store.summary(&summary.id)
     }
 
@@ -1043,13 +1823,24 @@ impl Harness {
         session_id: &str,
         text: &str,
     ) -> Result<(), Error> {
+        self.send_learner_message_with(session_id, text, &[]).await
+    }
+
+    pub async fn send_learner_message_with(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        attachments: &[crate::sessions::Attachment],
+    ) -> Result<(), Error> {
         let text = text.trim();
         if text.is_empty() {
             return Err(Error::Invalid("message is empty".into()));
         }
+        self.check_vision(attachments)?;
         let guard = self.turn_lock(session_id);
         let _turn = guard.lock().await;
-        let state = replay_state(&self.learn_ops(session_id)?);
+        let ops = self.learn_ops(session_id)?;
+        let state = replay_state(&ops);
         if state.pending_call.is_some() {
             return Err(Error::Invalid("answer the open question first".into()));
         }
@@ -1066,11 +1857,41 @@ impl Harness {
             }
             _ => {}
         }
-        self.append(
-            session_id,
-            Op::Message(sessions::new_message(Role::User, text.to_owned())),
-        )?;
+        self.commit_attachments(attachments)?;
+        let held = lock(&self.view_states).remove(session_id);
+        for (artifact_id, summary) in held.into_iter().flatten() {
+            self.append(
+                session_id,
+                Op::ViewState(sessions::ViewStateOp {
+                    op_id: sessions::op_id(),
+                    at: crate::now_iso(),
+                    artifact_id,
+                    summary,
+                }),
+            )?;
+        }
+        let mut message = sessions::new_message(Role::User, text.to_owned());
+        message.attachments = attachments.to_vec();
+        self.append(session_id, Op::Message(message))?;
+        if !attachments.is_empty() {
+            let grants = crate::attachments::grants_for(attachments);
+            crate::attachments::grant_roots(self, session_id, &grants)?;
+        }
         self.tutor_turn(session_id).await
+    }
+
+    /// Image attachments are refused up front when the Tutor model is known
+    /// to lack vision; the composer asks first (W2/W3).
+    fn check_vision(&self, attachments: &[crate::sessions::Attachment]) -> Result<(), Error> {
+        if attachments.iter().any(|a| a.kind == "image")
+            && self.role_vision(ModelRole::Tutor) == Some(false)
+        {
+            return Err(Error::Invalid(
+                "this model can't see images; send without them or choose another Tutor model"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// The learner answered the pending `question_ask` / `choice_ask`.
@@ -1090,7 +1911,10 @@ impl Harness {
         if pending.call_id != call_id {
             return Err(Error::Invalid("that question is no longer open".into()));
         }
-        let content = answer_result(&pending.name, call_id, &pending.args, &payload)?;
+        let content = match pending.args.get("view") {
+            Some(view) => self.grade_view_answer(session_id, call_id, view, &payload)?,
+            None => answer_result(&pending.name, call_id, &pending.args, &payload)?,
+        };
         let call = ToolCall {
             id: pending.call_id.clone(),
             name: pending.name.clone(),
@@ -1181,6 +2005,7 @@ impl Harness {
         plan: &crate::state::Plan,
         removed: &[RemovedPlugin],
     ) -> Result<(), Error> {
+        let mut dropped: Vec<String> = Vec::new();
         for s in &plan.sections {
             if state.completed_sections.contains(&s.id) {
                 continue;
@@ -1196,6 +2021,10 @@ impl Harness {
                 if is_removed || granted {
                     continue;
                 }
+                if !self.plugin_registry().grantable(p) {
+                    dropped.push(format!("{} ({})", s.title, p));
+                    continue;
+                }
                 self.append(
                     session_id,
                     Op::PluginGrant(PluginGrantOp {
@@ -1207,6 +2036,17 @@ impl Harness {
                     }),
                 )?;
             }
+        }
+        if !dropped.is_empty() {
+            let mut m = sessions::new_message(
+                Role::User,
+                format!(
+                    "[plan update] Left out until installed: {}. The section starts without it; the plan card offers Install.",
+                    dropped.join(", ")
+                ),
+            );
+            m.tag = Some("plan-notice".into());
+            self.append(session_id, Op::Message(m))?;
         }
         Ok(())
     }
@@ -1258,6 +2098,260 @@ impl Harness {
         Ok(())
     }
 
+    /// The learner sent the plan card's batched edits (§4): one `planEdit` op
+    /// and one planner job whose request spells out every edited field, the
+    /// learner's comment and the rules for applying them. No op is rewritten;
+    /// the planner revises the plan through the ordinary revision path.
+    pub async fn edit_plan(
+        self: &Arc<Self>,
+        session_id: &str,
+        edits: Value,
+        comment: Option<&str>,
+    ) -> Result<(), Error> {
+        let Some(fields) = edits.as_object() else {
+            return Err(Error::Invalid(
+                "the plan edits must be one JSON object".into(),
+            ));
+        };
+        if fields.is_empty() {
+            return Err(Error::Invalid("the plan edits are empty".into()));
+        }
+        let comment = comment.map(str::trim).filter(|c| !c.is_empty());
+        let state = replay_state(&self.learn_ops(session_id)?);
+        if state.plan.is_none() {
+            return Err(Error::Invalid("there is no plan to edit yet".into()));
+        }
+        if state.open_jobs.iter().any(|j| j.kind == "plan") {
+            return Err(Error::Invalid(
+                "the planner is already working; wait for its answer".into(),
+            ));
+        }
+        self.append(
+            session_id,
+            Op::PlanEdit(PlanEditOp {
+                op_id: op_id(),
+                at: now_iso(),
+                edits: edits.clone(),
+                comment: comment.map(str::to_owned),
+            }),
+        )?;
+        let request = plan_edit_request(&edits, comment);
+        self.spawn_job(
+            session_id,
+            "plan",
+            json!({ "request": request }),
+            "Plan changes requested",
+        )?;
+        Ok(())
+    }
+
+    /// The learner answered the planner's `plan_ask` (§4): one `planAnswer`
+    /// op, then a fresh planner run carrying the question, its options, the
+    /// answer and the edit request it was asked about. The planner always
+    /// reads the whole session, so no resume state is stored.
+    pub async fn answer_plan_question(
+        self: &Arc<Self>,
+        session_id: &str,
+        answer: &str,
+    ) -> Result<(), Error> {
+        let answer = answer.trim();
+        if answer.is_empty() {
+            return Err(Error::Invalid("write an answer".into()));
+        }
+        let ops = self.learn_ops(session_id)?;
+        let state = replay_state(&ops);
+        let Some(question) = state.pending_plan_question.clone() else {
+            return Err(Error::Invalid(
+                "the planner isn't waiting for an answer".into(),
+            ));
+        };
+        self.append(
+            session_id,
+            Op::PlanAnswer(PlanAnswerOp {
+                op_id: op_id(),
+                at: now_iso(),
+                call_id: question.call_id.clone(),
+                answer: answer.to_owned(),
+            }),
+        )?;
+        let request = plan_answer_request(&question, answer, latest_plan_edit(&ops).as_ref());
+        self.spawn_job(
+            session_id,
+            "plan",
+            json!({ "request": request }),
+            "Plan question answered",
+        )?;
+        Ok(())
+    }
+
+    /// The learner came back from a hunt (§5): one `huntReturn` op carrying
+    /// whatever they brought (notes, links and files, none required), the
+    /// return itself as a learner-side message, then a tutor turn so the
+    /// debrief happens now. The turn lock is the same one job delivery takes,
+    /// so a return never lands inside a running turn; a pending question
+    /// defers the wake, and the message is read by the next turn.
+    pub async fn hunt_return(
+        self: &Arc<Self>,
+        session_id: &str,
+        hunt_id: &str,
+        payload: Value,
+    ) -> Result<(), Error> {
+        let guard = self.turn_lock(session_id);
+        let _turn = guard.lock().await;
+        let ops = self.learn_ops(session_id)?;
+        let Some(send) = ops.iter().find_map(|o| match o {
+            Op::HuntSend(h) if h.hunt_id == hunt_id => Some(h.clone()),
+            _ => None,
+        }) else {
+            return Err(Error::NotFound(format!("hunt `{hunt_id}`")));
+        };
+        if ops.iter().any(|o| match o {
+            Op::HuntReturn(r) => r.hunt_id == hunt_id,
+            Op::HuntSkip(k) => k.hunt_id == hunt_id,
+            _ => false,
+        }) {
+            return Err(Error::Invalid(format!(
+                "hunt `{hunt_id}` is already finished"
+            )));
+        }
+        let notes = payload
+            .get("notes")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        let links = string_list(payload.get("links"));
+        let files = string_list(payload.get("files"));
+        self.append(
+            session_id,
+            Op::HuntReturn(HuntReturnOp {
+                op_id: op_id(),
+                at: now_iso(),
+                hunt_id: hunt_id.to_owned(),
+                notes: notes.clone(),
+                links: links.clone(),
+                files: files.clone(),
+            }),
+        )?;
+        let mut m =
+            sessions::new_message(Role::User, hunt_return_text(&send, &notes, &links, &files));
+        m.tag = Some("hunt-return".into());
+        self.append(session_id, Op::Message(m))?;
+        let state = replay_state(&self.store.ops(session_id)?);
+        if state.phase == Phase::Teach && state.pending_call.is_none() && !state.ended {
+            self.tutor_turn(session_id).await?;
+        }
+        Ok(())
+    }
+
+    /// The learner skipped a hunt (§5): one `huntSkip` op, then the same wake
+    /// as a return, so teaching starts normally right away. A skip also
+    /// switches the section's hunt off in replay, whatever the toggle said.
+    pub async fn hunt_skip(self: &Arc<Self>, session_id: &str, hunt_id: &str) -> Result<(), Error> {
+        let guard = self.turn_lock(session_id);
+        let _turn = guard.lock().await;
+        let ops = self.learn_ops(session_id)?;
+        let Some(send) = ops.iter().find_map(|o| match o {
+            Op::HuntSend(h) if h.hunt_id == hunt_id => Some(h.clone()),
+            _ => None,
+        }) else {
+            return Err(Error::NotFound(format!("hunt `{hunt_id}`")));
+        };
+        if ops.iter().any(|o| match o {
+            Op::HuntSkip(k) => k.hunt_id == hunt_id,
+            Op::HuntReturn(r) => r.hunt_id == hunt_id,
+            _ => false,
+        }) {
+            return Err(Error::Invalid(format!(
+                "hunt `{hunt_id}` is already finished"
+            )));
+        }
+        self.append(
+            session_id,
+            Op::HuntSkip(HuntSkipOp {
+                op_id: op_id(),
+                at: now_iso(),
+                hunt_id: hunt_id.to_owned(),
+            }),
+        )?;
+        let mut m = sessions::new_message(
+            Role::User,
+            format!(
+                "[hunt skip] The learner skipped the hunt `{hunt_id}` (section `{}`), question: {}. Teach the section normally; there is nothing to debrief.",
+                send.section_id, send.question
+            ),
+        );
+        m.tag = Some("hunt-skip".into());
+        self.append(session_id, Op::Message(m))?;
+        let state = replay_state(&self.store.ops(session_id)?);
+        if state.phase == Phase::Teach && state.pending_call.is_none() && !state.ended {
+            self.tutor_turn(session_id).await?;
+        }
+        Ok(())
+    }
+
+    /// The learner switched a section's hunt on or off (§5): one `huntToggle`
+    /// op and no turn. Replay applies it onto the plan's section, so gates and
+    /// prompts read one value from the next compose on.
+    pub fn set_hunt(&self, session_id: &str, section_id: &str, enabled: bool) -> Result<(), Error> {
+        let state = replay_state(&self.learn_ops(session_id)?);
+        let Some(plan) = &state.plan else {
+            return Err(Error::Invalid("there is no plan yet".into()));
+        };
+        let Some(section) = plan.sections.iter().find(|s| s.id == section_id) else {
+            return Err(Error::NotFound(format!("section `{section_id}`")));
+        };
+        if !section.hunt.as_ref().is_some_and(|h| h.available) {
+            return Err(Error::Invalid(format!(
+                "section `{section_id}` has no hunt the planner marked available"
+            )));
+        }
+        // A skip is the learner's last word on that hunt (§5): the toggle
+        // can't bring a skipped hunt back.
+        if enabled
+            && state
+                .hunt
+                .as_ref()
+                .is_some_and(|h| h.section_id == section_id && h.state == "skipped")
+        {
+            return Err(Error::Invalid(
+                "that hunt was skipped; it can't be switched back on".into(),
+            ));
+        }
+        self.append(
+            session_id,
+            Op::HuntToggle(HuntToggleOp {
+                op_id: op_id(),
+                at: now_iso(),
+                section_id: section_id.to_owned(),
+                enabled,
+            }),
+        )
+    }
+
+    /// The frontier list (§5): every topic parked by a hunt or debrief, in
+    /// the order it was parked. A corrupt line is skipped, never an error.
+    pub fn frontier(&self) -> Result<Vec<crate::FrontierItem>, Error> {
+        Ok(crate::frontier::items(&self.repo))
+    }
+
+    /// Start a Learn session from a frontier item (§5): the item's topic and
+    /// why are the learner's opening words, and teaching starts as usual.
+    pub async fn start_from_frontier(
+        self: &Arc<Self>,
+        item_id: &str,
+    ) -> Result<SessionSummary, Error> {
+        let item = crate::frontier::items(&self.repo)
+            .into_iter()
+            .find(|i| i.id == item_id)
+            .ok_or_else(|| Error::NotFound(format!("frontier item `{item_id}`")))?;
+        let mut text = item.topic.trim().to_owned();
+        if !item.why.trim().is_empty() {
+            text.push_str(&format!("\n\nWhy it's on my list: {}", item.why.trim()));
+        }
+        self.start_teaching(&text).await
+    }
+
     /// Run the tutor again after a failed turn (nothing pending).
     pub async fn resume_turn(self: &Arc<Self>, session_id: &str) -> Result<(), Error> {
         let guard = self.turn_lock(session_id);
@@ -1273,6 +2367,149 @@ impl Harness {
 pub(crate) const INITIAL_PLAN_REQUEST: &str =
     "Initial plan: measuring is done (probe_done). Build the plan for this learner from the whole conversation and call plan_write.";
 
+/// What the planner must do with a plan-card diff (§4, "How the planner
+/// handles edits"). The same rules are in `planner/base.md` with the
+/// `plan_controls` flag; the request repeats them so the job is
+/// self-contained.
+const PLAN_EDIT_RULES: &str = "\
+How to apply these edits (docs/learning-system.md §4):
+- \"Don't need this\" (`keep: false`): remove the section. If a later section depends on it, either fold the minimum it needs into that section's notes, or keep it and explain in `approach`, in one sentence, why it is needed. If the learner sends the same removal again, remove it and fold what you must.
+- \"Parts I already know…\" (`knownNote`): split the section in two — a known section (`assumedKnown: true`, `knownNote` = the learner's words) holding the nodes they say they know, plus the rest taught normally. If the comment covers the whole section, mark the whole section known. Don't argue with the claim: the tutor verifies it with one check.
+- How far (`targetLevel`): set the section's `targetLevel` and rewrite its `exit` at that level. If it conflicts with the goal, warn in one sentence in `approach` but apply their choice.
+- Depth, style and sitting length: re-derive the defaults only for sections the learner has not set explicitly; never override an explicit section setting.
+- Explore: apply it; if it is now `off`, remove every hunt.
+- Unclear or conflicting: ask one question on the card with plan_ask, then end your turn instead of calling plan_write.
+- Re-approval rules are unchanged: removing a section or changing the goal needs the learner's approval; other changes apply with a notice.";
+
+/// The planner request for a plan-card diff: every edited field by name, the
+/// learner's comment, the raw JSON (so nothing is lost) and the rules.
+fn plan_edit_request(edits: &Value, comment: Option<&str>) -> String {
+    format!(
+        "Plan edits from the learner (plan card). One structured diff; apply it with plan_write, or ask one question with plan_ask and end your turn.\n\n{}\n{}Edits as JSON:\n{}\n\n{}",
+        describe_plan_edits(edits),
+        comment_line(comment),
+        serde_json::to_string(edits).unwrap_or_default(),
+        PLAN_EDIT_RULES,
+    )
+}
+
+/// The planner request for an answer to `plan_ask`: the question, its
+/// options, the answer, and the edit request it was asked about (the planner
+/// reads the whole session too, but the edit is an op, not a message).
+fn plan_answer_request(
+    question: &PlanQuestion,
+    answer: &str,
+    edit: Option<&(Value, Option<String>)>,
+) -> String {
+    let options = if question.options.is_empty() {
+        "(none)".to_owned()
+    } else {
+        question.options.join(" / ")
+    };
+    let mut out = format!(
+        "The learner answered your plan question.\n\nQuestion: {}\nOptions: {options}\nLearner's answer: {answer}\n\n",
+        question.question
+    );
+    match edit {
+        Some((edits, comment)) => {
+            out.push_str("This answer settles the edit request below; apply it with plan_write now, or ask one more question with plan_ask if it left something genuinely ambiguous.\n\n");
+            out.push_str(&plan_edit_request(edits, comment.as_deref()));
+        }
+        None => out.push_str(
+            "There are no plan edits on record; revise the plan from the learner's answer and the whole session, and call plan_write.\n\n",
+        ),
+    }
+    out
+}
+
+/// The newest `planEdit` op: the edits the pending question was asked about.
+fn latest_plan_edit(ops: &[Op]) -> Option<(Value, Option<String>)> {
+    ops.iter().rev().find_map(|o| match o {
+        Op::PlanEdit(e) => Some((e.edits.clone(), e.comment.clone())),
+        _ => None,
+    })
+}
+
+/// The learner's edits as planner-readable lines: plan-level fields first,
+/// then each edited section. Unknown keys are still spelled out, so a control
+/// added later reaches the planner instead of being dropped.
+fn describe_plan_edits(edits: &Value) -> String {
+    let empty = serde_json::Map::new();
+    let fields = edits.as_object().unwrap_or(&empty);
+    let mut out = String::from("Plan-level:\n");
+    let mut any_plan = false;
+    for (key, value) in fields {
+        if key == "sections" || value.is_null() {
+            continue;
+        }
+        out.push_str(&format!("- {key}: {}\n", plan_value(key, value)));
+        any_plan = true;
+    }
+    if !any_plan {
+        out.push_str("- (unchanged)\n");
+    }
+    let Some(sections) = fields.get("sections").and_then(Value::as_array) else {
+        return out;
+    };
+    out.push_str("\nSections:\n");
+    if sections.is_empty() {
+        out.push_str("- (none)\n");
+        return out;
+    }
+    for section in sections {
+        match section
+            .get("id")
+            .or_else(|| section.get("sectionId"))
+            .and_then(Value::as_str)
+        {
+            Some(id) => out.push_str(&format!("- `{id}`:\n")),
+            None => out.push_str("- (a section without an id; match it by title):\n"),
+        }
+        let mut any = false;
+        if let Some(fields) = section.as_object() {
+            for (key, value) in fields {
+                if key == "id" || key == "sectionId" || value.is_null() {
+                    continue;
+                }
+                out.push_str(&format!("  - {key}: {}\n", plan_value(key, value)));
+                any = true;
+            }
+        }
+        if !any {
+            out.push_str("  - (unchanged)\n");
+        }
+    }
+    out
+}
+
+/// One edit value as text. The two control-shaped fields get the learner's
+/// meaning spelled out; everything else is its JSON value.
+fn plan_value(key: &str, value: &Value) -> String {
+    match value {
+        Value::Bool(keep) if key == "keep" => if *keep {
+            "true (keep this section)"
+        } else {
+            "false (remove this section)"
+        }
+        .to_owned(),
+        Value::String(s) => format!("\"{}\"", s.trim()),
+        Value::Array(items) if items.is_empty() => "(none)".to_owned(),
+        Value::Array(items) => items
+            .iter()
+            .map(|i| plan_value("", i))
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
+    }
+}
+
+fn comment_line(comment: Option<&str>) -> String {
+    match comment {
+        Some(c) => format!("Learner's comment: \"{c}\"\n"),
+        None => "Learner's comment: (none)\n".to_owned(),
+    }
+}
+
 fn is_tutor_phase(p: Phase) -> bool {
     matches!(p, Phase::Measure | Phase::Teach | Phase::Close)
 }
@@ -1285,7 +2522,51 @@ pub(crate) fn ensure_user_last(messages: &mut Vec<Message>) {
     }
 }
 
-fn gate_question(state: &SessionState, args: &Value) -> Exec {
+/// Most probe questions a `quick` starting point allows (§3).
+const QUICK_PROBE_QUESTIONS: usize = 5;
+
+/// The places a hunt can send the learner (§5).
+const HUNT_KINDS: [&str; 7] = [
+    "forum",
+    "datasheet",
+    "docs",
+    "lecture",
+    "video",
+    "paper",
+    "person",
+];
+
+/// How the debrief sorts a claim (§5): a wrong claim is still recorded, and a
+/// practitioner tip is a tip, not a law.
+const DEBRIEF_VERDICTS: [&str; 5] = ["correct", "partial", "wrong", "tip", "offroute"];
+
+/// Distinct probe `question_ask` calls the log accepted (the current call is
+/// already appended when a gate runs). A refused call spends no budget.
+fn probe_questions(ops: &[Op]) -> usize {
+    let refused: HashSet<&str> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Tool(t) if t.result.as_ref().is_some_and(|r| r.is_error) => {
+                Some(t.call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut accepted: HashSet<&str> = HashSet::new();
+    for op in ops {
+        if let Op::Tool(t) = op {
+            if t.name == "question_ask"
+                && t.args.get("role").and_then(Value::as_str) == Some("probe")
+                && !refused.contains(t.call_id.as_str())
+            {
+                accepted.insert(t.call_id.as_str());
+            }
+        }
+    }
+    accepted.len()
+}
+
+fn gate_question(ops: &[Op], state: &SessionState, args: &Value) -> Exec {
     let name = "question_ask";
     let role = opt_str(args, "role").unwrap_or("");
     let allowed: &[&str] = match state.phase {
@@ -1323,6 +2604,42 @@ fn gate_question(state: &SessionState, args: &Value) -> Exec {
             }
         }
         _ => return refuse(name, "`format` must be free or choice"),
+    }
+    // A level is what the question demands, not how hard it is (§2). Every
+    // probe and check carries one.
+    if matches!(role, "probe" | "check") {
+        let level = args
+            .get("level")
+            .and_then(Value::as_str)
+            .and_then(Level::parse);
+        if level.is_none() {
+            return refuse(
+                name,
+                format!("a {role} question needs `level`: explain, use, analyze or design"),
+            );
+        }
+    }
+    if role == "probe" {
+        match state.starting_point() {
+            "new" => {
+                return refuse(
+                    name,
+                    "the learner starts new: no probe questions; their first checks are the measurement",
+                )
+            }
+            "quick" if probe_questions(ops) > QUICK_PROBE_QUESTIONS => {
+                return refuse(name, "quick check: at most five probe questions")
+            }
+            _ => {}
+        }
+    }
+    // A hunted section is taught only after the debrief (§5): exploring first
+    // is the point, and the debrief is what corrects what the learner found.
+    if state.phase == Phase::Teach && state.hunt_blocks_teaching() {
+        return refuse(
+            name,
+            "this section's hunt isn't debriefed yet: call `hunt_send` first if you haven't, and `debrief_record` once the learner is back; teaching questions wait for the debrief",
+        );
     }
     if state.phase == Phase::Teach {
         let node = opt_str(args, "nodeId").unwrap_or("");
@@ -1365,6 +2682,50 @@ fn same_answer(a: &str, b: &str) -> bool {
             .to_lowercase()
     };
     norm(a) == norm(b)
+}
+
+/// A JSON array of strings, trimmed and without empties (a hunt return's
+/// `links` and `files`; the UI sends only non-empty ones anyway).
+fn string_list(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The learner-side message that brings a hunt's return into the conversation
+/// (§5). Everything is optional: a tip remembered without its source is still
+/// what they learned, so an empty return is a return too.
+fn hunt_return_text(send: &HuntSendOp, notes: &str, links: &[String], files: &[String]) -> String {
+    let mut text = format!(
+        "[hunt return] The learner is back from the hunt `{}` (section `{}`).\nHunt question: {}",
+        send.hunt_id, send.section_id, send.question
+    );
+    if !notes.is_empty() {
+        text.push_str(&format!("\nNotes: {notes}"));
+    }
+    if !links.is_empty() {
+        text.push_str(&format!("\nLinks: {}", links.join(", ")));
+    }
+    if !files.is_empty() {
+        text.push_str(&format!(
+            "\nFiles (names only; unreadable ones reach you by name): {}",
+            files.join(", ")
+        ));
+    }
+    if notes.is_empty() && links.is_empty() && files.is_empty() {
+        text.push_str(
+            "\nThey brought nothing written back: debrief what they found in their own words.",
+        );
+    }
+    text.push_str("\nDebrief it with `debrief_record` before teaching this section.");
+    text
 }
 
 /// Build the tool result for a learner's answer. Choice questions are graded
@@ -1430,30 +2791,6 @@ pub(crate) fn answer_result(
     Ok(out)
 }
 
-async fn file_tool(name: &str, args: &Value) -> Exec {
-    let Some(root) = files::home_dir() else {
-        return refuse(name, "no home directory on this device");
-    };
-    let args = args.clone();
-    let tool = name.to_owned();
-    let result = tokio::task::spawn_blocking(move || match tool.as_str() {
-        "file_find" => match req_str(&args, "pattern") {
-            Ok(p) => files::file_find(&root, p),
-            Err(e) => Err(e),
-        },
-        _ => match req_str(&args, "path") {
-            Ok(p) => files::file_read(&root, p, opt_str(&args, "lines")),
-            Err(e) => Err(e),
-        },
-    })
-    .await;
-    match result {
-        Ok(Ok(text)) => done(text),
-        Ok(Err(e)) => refuse(name, e),
-        Err(e) => refuse(name, format!("internal error ({e})")),
-    }
-}
-
 /// `carryOver` of the latest accepted `section_done`.
 fn carry_over(ops: &[Op]) -> String {
     let mut accepted: HashSet<&str> = HashSet::new();
@@ -1474,6 +2811,69 @@ fn carry_over(ops: &[Op]) -> String {
         }
     }
     String::new()
+}
+
+/// Why a section may not close yet, or `Ok` when its gates are met: a known
+/// section needs one passing check at its target level until a miss refutes
+/// it (§4); every other section needs every node passed *and* one passing
+/// check at the target level (§2). Older sections have no level, so the
+/// level rule can't apply to them.
+fn close_problems(state: &SessionState, section: &Section) -> Result<(), String> {
+    let known = section.assumed_known && !state.known_refuted.contains(&section.id);
+    if !known {
+        let missing: Vec<&str> = section
+            .node_ids
+            .iter()
+            .filter(|n| !state.node_passed(n))
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "these nodes have no passing check question yet: {}",
+                missing.join(", ")
+            ));
+        }
+    }
+    match section.target_level {
+        Some(target) => {
+            if !state.section_passed_at(section, target) {
+                return Err(format!(
+                    "no passing check in this section is at `{}` or above, its target level",
+                    target.as_str()
+                ));
+            }
+        }
+        None if known && !section.node_ids.iter().any(|n| state.node_passed(n)) => {
+            // A known section still needs one passing check, even when the
+            // plan predates levels.
+            return Err(
+                "a known section needs one passing check at its target level before it closes"
+                    .to_owned(),
+            );
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// The section keys the `levels`, `plan_controls` and `known_section` blocks
+/// read. Always set: a flag that is off drops its block, so nothing is
+/// evaluated, and an absent section gets empty defaults.
+fn set_section_level_values(values: &mut TemplateValues, section: Option<&Section>) {
+    values.set(
+        "section.targetLevel",
+        section
+            .and_then(|s| s.target_level)
+            .map_or("(none)", Level::as_str),
+    );
+    values.set(
+        "section.knownNote",
+        section.map(|s| s.known_note.clone()).unwrap_or_default(),
+    );
+    values.set(
+        "section.learnerNote",
+        section.map(|s| s.learner_note.clone()).unwrap_or_default(),
+    );
 }
 
 fn section_nodes(state: &SessionState, ids: &[String]) -> String {
@@ -1565,18 +2965,227 @@ mod tests {
     #[test]
     fn question_gates_follow_the_phase() {
         let measure = SessionState::default();
-        let probe = json!({"role":"probe","format":"free","prompt":"p","answer":"a"});
-        assert!(matches!(gate_question(&measure, &probe), Exec::Pause));
-        let check = json!({"role":"check","nodeId":"n","format":"free","prompt":"p","answer":"a"});
+        let ops: Vec<Op> = Vec::new();
+        let probe = json!({"role":"probe","level":"use","format":"free","prompt":"p","answer":"a"});
+        assert!(matches!(gate_question(&ops, &measure, &probe), Exec::Pause));
+        let check = json!({"role":"check","level":"use","nodeId":"n","format":"free","prompt":"p","answer":"a"});
         assert!(matches!(
-            gate_question(&measure, &check),
+            gate_question(&ops, &measure, &check),
             Exec::Done { is_error: true, .. }
         ));
-        let bad_choice =
-            json!({"role":"probe","format":"choice","options":["a","b"],"prompt":"p","answer":"c"});
+        let bad_choice = json!({"role":"probe","level":"use","format":"choice","options":["a","b"],"prompt":"p","answer":"c"});
         assert!(matches!(
-            gate_question(&measure, &bad_choice),
+            gate_question(&ops, &measure, &bad_choice),
             Exec::Done { is_error: true, .. }
         ));
+        // A probe without a level is refused, and the error names the levels.
+        let unlevelled = json!({"role":"probe","format":"free","prompt":"p","answer":"a"});
+        match gate_question(&ops, &measure, &unlevelled) {
+            Exec::Done { content, is_error } => {
+                assert!(is_error);
+                assert!(content.contains("`level`"), "{content}");
+                assert!(content.contains("analyze"), "{content}");
+            }
+            Exec::Pause => panic!("a probe without a level must be refused"),
+        }
+        // A predict question may go without one.
+        let teach = teach_state();
+        let predict =
+            json!({"role":"predict","nodeId":"n1","format":"free","prompt":"p","answer":"a"});
+        assert!(matches!(gate_question(&ops, &teach, &predict), Exec::Pause));
+        // A check question may not.
+        let check = json!({"role":"check","nodeId":"n1","format":"free","prompt":"p","answer":"a"});
+        match gate_question(&ops, &teach, &check) {
+            Exec::Done { content, is_error } => {
+                assert!(is_error);
+                assert!(content.contains("`level`"), "{content}");
+            }
+            Exec::Pause => panic!("a check without a level must be refused"),
+        }
+    }
+
+    fn test_section(target_level: Option<Level>, assumed_known: bool) -> Section {
+        Section {
+            id: "s1".into(),
+            title: "S".into(),
+            node_ids: vec!["n1".into(), "n2".into()],
+            mode: crate::state::Kind::Mechanism,
+            style: "socratic".into(),
+            plugins: vec![],
+            notes: String::new(),
+            exit: String::new(),
+            desktop_only: false,
+            needs_install: vec![],
+            target_level,
+            assumed_known,
+            known_note: String::new(),
+            learner_note: String::new(),
+            hunt: None,
+        }
+    }
+
+    /// A teach-phase state on one section with two nodes.
+    fn teach_state() -> SessionState {
+        let section = test_section(Some(Level::Use), false);
+        SessionState {
+            phase: Phase::Teach,
+            plan: Some(crate::state::Plan {
+                version: 1,
+                goal: "g".into(),
+                approach: "a".into(),
+                depth: "solid".into(),
+                explore: "off".into(),
+                minutes_per_sitting: None,
+                style: String::new(),
+                nodes: vec![],
+                sections: vec![section],
+            }),
+            current_section: Some("s1".into()),
+            ..Default::default()
+        }
+    }
+
+    /// A passing check at `level` on `node`.
+    fn passed(state: &mut SessionState, node: &str, level: Option<Level>) {
+        state
+            .checks
+            .entry(node.to_owned())
+            .or_default()
+            .push(crate::state::CheckVerdict {
+                node_id: node.to_owned(),
+                question_id: format!("q-{node}-{}", level.map_or("none", Level::as_str)),
+                verdict: "correct".into(),
+                level,
+            });
+    }
+
+    #[test]
+    fn section_done_needs_a_passing_check_at_the_target_level() {
+        let mut state = teach_state();
+        let section = state.current_section().unwrap().clone();
+        // Every node passed, but only at `explain`: the target level is `use`.
+        passed(&mut state, "n1", Some(Level::Explain));
+        passed(&mut state, "n2", Some(Level::Explain));
+        let why = close_problems(&state, &section).unwrap_err();
+        assert!(why.contains("`use`"), "the refusal names the level: {why}");
+        // One check at the target level is enough.
+        passed(&mut state, "n1", Some(Level::Use));
+        assert!(close_problems(&state, &section).is_ok());
+
+        // A wrong answer above the level doesn't count.
+        let mut wrong = teach_state();
+        wrong.checks.insert(
+            "n1".into(),
+            vec![crate::state::CheckVerdict {
+                node_id: "n1".into(),
+                question_id: "q1".into(),
+                verdict: "wrong".into(),
+                level: Some(Level::Design),
+            }],
+        );
+        assert!(
+            close_problems(&wrong, &wrong.current_section().unwrap().clone())
+                .unwrap_err()
+                .contains("no passing check")
+        );
+    }
+
+    #[test]
+    fn known_sections_close_on_one_check_until_refuted() {
+        let mut state = teach_state();
+        state.plan.as_mut().unwrap().sections[0].assumed_known = true;
+        let section = state.current_section().unwrap().clone();
+        // Nothing passed: a known section still refuses without one check.
+        assert!(close_problems(&state, &section).is_err());
+        passed(&mut state, "n2", Some(Level::Use));
+        // One node passed at the target level closes it, though n1 has none.
+        assert!(close_problems(&state, &section).is_ok());
+        // After a miss, the normal per-node rule is back.
+        state.known_refuted = vec!["s1".into()];
+        let why = close_problems(&state, &section).unwrap_err();
+        assert!(why.contains("no passing check"), "{why}");
+
+        // Older sections have no level: the level rule doesn't apply, and an
+        // older plan can't have a known section, so both nodes are needed.
+        let mut old = teach_state();
+        old.plan.as_mut().unwrap().sections[0].target_level = None;
+        passed(&mut old, "n1", None);
+        passed(&mut old, "n2", None);
+        let section = old.current_section().unwrap().clone();
+        assert!(close_problems(&old, &section).is_ok());
+    }
+
+    /// The ops a probe question leaves in the log: the call with its args.
+    fn probe_calls(n: usize) -> Vec<Op> {
+        (0..n)
+            .map(|i| {
+                Op::Tool(ToolOp {
+                    op_id: op_id(),
+                    at: now_iso(),
+                    call_id: format!("p{i}"),
+                    name: "question_ask".into(),
+                    args: json!({"role":"probe","level":"use","format":"free","prompt":"p","answer":"a"}),
+                    result: None,
+                    agent: None,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn starting_point_new_refuses_probe_questions_and_quick_limits_them() {
+        let probe = json!({"role":"probe","level":"use","format":"free","prompt":"p","answer":"a"});
+
+        let new = SessionState {
+            goal: Some(json!({ "purpose": "curiosity", "startingPoint": "new" })),
+            ..Default::default()
+        };
+        match gate_question(&[], &new, &probe) {
+            Exec::Done { content, is_error } => {
+                assert!(is_error);
+                assert!(content.contains("starts new"), "{content}");
+            }
+            Exec::Pause => panic!("new must refuse probe questions"),
+        }
+
+        let quick = SessionState {
+            goal: Some(json!({ "purpose": "curiosity", "startingPoint": "quick" })),
+            ..Default::default()
+        };
+        // Five probe calls in the log, this one being the fifth.
+        assert!(matches!(
+            gate_question(&probe_calls(5), &quick, &probe),
+            Exec::Pause
+        ));
+        // The sixth is refused.
+        match gate_question(&probe_calls(6), &quick, &probe) {
+            Exec::Done { content, is_error } => {
+                assert!(is_error);
+                assert!(content.contains("at most five"), "{content}");
+            }
+            Exec::Pause => panic!("the sixth quick probe must be refused"),
+        }
+
+        // The default starting point is unchanged: no limit.
+        assert!(matches!(
+            gate_question(&probe_calls(9), &SessionState::default(), &probe),
+            Exec::Pause
+        ));
+
+        // A refused probe (an error result) spends no budget.
+        let mut six = probe_calls(6);
+        six.push(Op::Tool(ToolOp {
+            op_id: op_id(),
+            at: now_iso(),
+            call_id: "p0".into(),
+            name: "question_ask".into(),
+            args: Value::Null,
+            result: Some(ToolResultValue {
+                content: "refused".into(),
+                is_error: true,
+            }),
+            agent: None,
+        }));
+        assert!(matches!(gate_question(&six, &quick, &probe), Exec::Pause));
     }
 }

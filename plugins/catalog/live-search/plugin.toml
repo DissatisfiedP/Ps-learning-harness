@@ -1,0 +1,46 @@
+# Catalogue entry, not built (docs/plugins.md §11). Nothing loads this
+# directory: it is not a folder plugin, not in a registry and not used by any
+# test. Native plugin: it needs the `net` permission, which no Luau api 1
+# package may declare (docs/plugins.md §8.4), so it will be an in-tree Rust
+# type implementing `plugins::Plugin` (§12) with this manifest. Tool `entry`
+# names the Rust method; there is no src/main.luau.
+id = "live-search"
+version = "0.0.0"
+api = 1
+title = "Live web and image search"
+description = "Lets the tutor search the web, fetch pages and find captioned images while teaching."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = ["net"]
+use_when = "The section needs current or visual material throughout, not one verified fact: fashion and design (reference images, current collections), fast-moving tools and threats, recent events."
+avoid_when = "Stable subjects. The standard `research_request` already verifies single facts in the background with a cited brief."
+cost = "Search results take a lot of context; each call adds several hundred tokens."
+
+# The old brief ran in measure and teach (tutor only).
+
+[[tool]]
+name = "live_search_web"
+description = "Search the web; returns titles, URLs and snippets. A snippet is not evidence: fetch the page before relying on it."
+agents = ["tutor"]
+input = "schemas/live_search_web.json"
+entry = "web"
+artifact = false
+
+[[tool]]
+name = "live_search_fetch"
+description = "Fetch a page and return its readable text."
+agents = ["tutor"]
+input = "schemas/live_search_fetch.json"
+entry = "fetch"
+artifact = false
+
+[[tool]]
+name = "live_search_images"
+description = "Search images; returns each image with its source page and caption. The app shows the images you choose to the learner."
+agents = ["tutor"]
+input = "schemas/live_search_images.json"
+entry = "images"
+artifact = false
+
+[prompts]
+tutor = "prompts/tutor.md"

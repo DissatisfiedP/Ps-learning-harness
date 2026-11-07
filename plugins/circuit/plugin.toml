@@ -1,0 +1,40 @@
+id = "circuit"
+version = "0.1.0"
+api = 1
+title = "Circuits"
+description = "Draw, solve and explore DC and AC circuits."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = []
+use_when = "The learner must reason about voltages and currents in a circuit: dividers, loading, RC/RL filters, op-amps."
+avoid_when = "The section is about circuit theory in words only, or the learner has not met Ohm's law."
+cost = "instant"
+
+[[tool]]
+name = "circuit_draw"
+description = "Draw a schematic and solve it. Returns probe values, node voltages, branch currents and warnings (AC values as magnitude ∠ phase). The figure is an artifact; place it in your reply with ![alt](artifact:<id>)."
+agents = ["tutor", "practice"]
+input = "schemas/circuit.json"
+entry = "circuit_draw"
+artifact = true
+
+[[tool]]
+name = "circuit_solve"
+description = "Solve a circuit with no figure. Returns probe values, node voltages, branch currents and warnings. Use it to check your own arithmetic."
+agents = ["tutor", "practice"]
+input = "schemas/circuit.json"
+entry = "circuit_solve"
+artifact = false
+
+[[renderer]]
+entry = "render"
+
+[[view]]
+name = "circuit"
+html = "views/circuit.html"
+calls = ["solve", "render"]
+answer = true
+
+[prompts]
+tutor = "prompts/tutor.md"
+practice = "prompts/practice.md"

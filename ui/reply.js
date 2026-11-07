@@ -2,6 +2,8 @@
 // and the live (streaming) tutor reply that renders only its open tail block
 // per frame. Nothing here scrolls: the text grows in place.
 
+import { attachmentList } from './attachment.js';
+import { enhanceLive, enhanceMessage } from './content.js';
 import { renderBlock, renderMarkdown } from './markdown.js';
 import { createSplitter } from './stream.js';
 
@@ -23,10 +25,12 @@ function el(tag, className, text) {
   return node;
 }
 
-/** A learner entry: small-caps "You", then the text as written. */
-export function userEl(text) {
+/** A learner entry: small-caps "You", then the text as written, then chips. */
+export function userEl(text, attachments = []) {
   const entry = el('div', 'entry user');
   entry.append(el('p', 'you-label', 'You'), el('p', 'you-text', text));
+  const list = attachmentList(attachments);
+  if (list) entry.append(list);
   return entry;
 }
 
@@ -42,11 +46,12 @@ function workingEl() {
 }
 
 /** A finished tutor reply. `showThinking` is false in Learn (spoiler risk). */
-export function assistantEl(msg, { showThinking = false } = {}) {
+export function assistantEl(msg, { showThinking = false, artifacts = [], ctx = {} } = {}) {
   const entry = el('div', 'entry tutor');
   const prose = el('div', 'prose');
   prose.innerHTML = renderMarkdown(msg.content ?? '');
   entry.append(prose);
+  enhanceMessage(entry, prose, artifacts, typeof ctx === 'function' ? ctx() : ctx);
   const end = endingEl(msg.ending);
   if (end) entry.append(end);
   if (showThinking && msg.thinking) {
@@ -65,9 +70,10 @@ export function assistantEl(msg, { showThinking = false } = {}) {
  * only when `showThinking` is set (Practice).
  */
 export class LiveReply {
-  constructor({ showThinking = false } = {}) {
+  constructor({ showThinking = false, ctx = {} } = {}) {
     this.el = el('div', 'entry tutor streaming');
     this.prose = el('div', 'prose');
+    this.ctx = ctx;
     this.status = el('p', 'writing', WRITING);
     this.el.append(this.status, this.prose);
     this.showThinking = showThinking;
@@ -161,6 +167,10 @@ export class LiveReply {
       let html = '';
       for (const block of completed) html += renderBlock(block);
       this.tailEl.insertAdjacentHTML('beforebegin', html);
+      // These blocks are final: diagrams and highlighting may run now. Both
+      // passes skip the open `.tail`, which may hold an unclosed fence
+      // (artifact slots wait for `finalize`, when every artifact is known).
+      enhanceLive(prose);
     }
     if (tail !== this.tailText) {
       this.tailText = tail;
@@ -173,7 +183,7 @@ export class LiveReply {
    * element. When the persisted text equals what was streamed, the rendered
    * blocks are kept and only the tail is closed.
    */
-  finalize(msg) {
+  finalize(msg, artifacts = []) {
     cancelAnimationFrame(this.frame);
     this.frame = 0;
     this.clearStatus();
@@ -187,6 +197,7 @@ export class LiveReply {
     } else {
       this.prose.innerHTML = renderMarkdown(content);
     }
+    enhanceMessage(this.el, this.prose, artifacts, typeof this.ctx === 'function' ? this.ctx() : this.ctx);
     const end = endingEl(msg.ending);
     if (end) this.prose.after(end);
     if (this.showThinking) {

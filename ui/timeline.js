@@ -11,16 +11,29 @@
 //   choice            { callId, args, answer, failed }
 //   divider           { text }                       compaction
 //   section           { sectionId, close, plan }     UI-only, from `phase` ops
+//   artifacts         { ops }                        figures with no reply block
 //
 // `tl.plan` is the latest `plan` op payload; section openers take their
 // title and goal from it. `tl.lastExercise` is the newest question or choice
 // item, so the desk can ask "is one pending?" without scanning the list.
+// `tl.artifacts` is every artifact op by id; `pendingArtifacts` are those
+// created since the last visible tutor message (they attach to it, or flush
+// as a figures block before the next learner message).
 
 const RESEARCH_PREFIX = /^\[research brief\]\s*/;
 const NOTICE_PREFIX = /^\[plan update\]\s*/;
 
 export function createTimeline() {
-  return { items: [], byKey: new Map(), seen: new Set(), plan: null, lastSection: null, lastExercise: null };
+  return {
+    items: [],
+    byKey: new Map(),
+    seen: new Set(),
+    plan: null,
+    lastSection: null,
+    lastExercise: null,
+    artifacts: new Map(),
+    pendingArtifacts: [],
+  };
 }
 
 function add(tl, item) {
@@ -84,6 +97,12 @@ export function applyOp(tl, op) {
       return null;
     case 'phase':
       return applyPhase(tl, op);
+    case 'artifact':
+      if (op.artifactId) {
+        tl.artifacts.set(op.artifactId, op);
+        tl.pendingArtifacts.push(op);
+      }
+      return null;
     default:
       return null;
   }
@@ -122,7 +141,22 @@ function applyMessage(tl, op) {
     return add(tl, { kind: 'notice', key: op.opId, text: content.replace(NOTICE_PREFIX, '') });
   }
   if (op.role === 'assistant' && !content.trim()) return null;
-  return add(tl, { kind: op.role === 'user' ? 'user' : 'assistant', key: op.opId, msg: op });
+  const kind = op.role === 'user' ? 'user' : 'assistant';
+  const item = { kind, key: op.opId, msg: op };
+  if (kind === 'assistant') {
+    // Artifacts created since the last visible tutor message belong to it.
+    if (tl.pendingArtifacts.length) item.artifacts = tl.pendingArtifacts.splice(0);
+    return add(tl, item);
+  }
+  // A learner message closes the turn: any artifact the reply never carried
+  // becomes its own figures block just before the learner speaks.
+  const extras = [];
+  if (tl.pendingArtifacts.length) {
+    const ops = tl.pendingArtifacts.splice(0);
+    extras.push(add(tl, { kind: 'artifacts', key: `artifacts:${ops[0].opId}`, ops }).added);
+  }
+  const { added } = add(tl, item);
+  return extras.length ? { added, extras } : { added };
 }
 
 function applyTool(tl, op) {
@@ -155,12 +189,72 @@ function applyTool(tl, op) {
     item.note = args.note ?? item.note;
     return { updated: item };
   }
+  if (op.name === 'hunt_send') {
+    // The hunt card sits in the flow where the tutor sent it. Its lifecycle
+    // (`out` → `returned`/`skipped`) comes from `session_state`, not from here:
+    // the hunt id is this call's id.
+    return add(tl, {
+      kind: 'hunt',
+      key: `hunt:${op.callId}`,
+      huntId: op.callId,
+      sectionId: args.sectionId ?? null,
+      args,
+      hunt: null,
+    });
+  }
   return null;
+}
+
+/**
+ * Brings one hunt card's lifecycle up to date from `session_state`. Returns the
+ * item to re-render when something changed, null otherwise; a hunt whose
+ * `hunt_send` op was never seen has no card (older logs, partial state).
+ */
+function applyHuntState(tl, hunt) {
+  if (!hunt?.huntId) return null;
+  const item = tl.byKey.get(`hunt:${hunt.huntId}`);
+  if (!item) return null;
+  const before = JSON.stringify(item.hunt);
+  item.hunt = hunt;
+  if (before === JSON.stringify(hunt)) return null;
+  return { updated: item };
+}
+
+/**
+ * Brings every hunt card up to date from `session_state.hunts`: one card per
+ * `hunt_send` op, resolved by hunt id, so a card from an earlier section keeps
+ * its own finished state once teaching has moved on (a single "current hunt"
+ * would leave it looking live). Returns the items to re-render.
+ */
+export function applyHuntStates(tl, hunts) {
+  const updated = [];
+  for (const hunt of hunts ?? []) {
+    const change = applyHuntState(tl, hunt);
+    if (change?.updated) updated.push(change.updated);
+  }
+  return updated;
 }
 
 /** Ops after which the running head, desk and plan must be refreshed. */
 export function affectsState(op) {
-  return op.op === 'phase' || op.op === 'plan' || op.op === 'approve' || op.op === 'pluginGrant' || op.op === 'tool';
+  return (
+    op.op === 'phase' ||
+    op.op === 'plan' ||
+    op.op === 'approve' ||
+    op.op === 'pluginGrant' ||
+    op.op === 'tool' ||
+    // Learning-system ops (docs/learning-system-build.md): each changes what
+    // the plan card, the desk or the close shows.
+    op.op === 'planEdit' ||
+    op.op === 'planAsk' ||
+    op.op === 'planAnswer' ||
+    op.op === 'knownRefuted' ||
+    op.op === 'huntToggle' ||
+    op.op === 'huntSend' ||
+    op.op === 'huntReturn' ||
+    op.op === 'huntSkip' ||
+    op.op === 'debrief'
+  );
 }
 
 /** Whether a question/choice item still waits for the learner. */

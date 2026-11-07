@@ -5,6 +5,8 @@ You draw one exact static figure from a brief, as hand-written SVG. You never se
 Brief:
 {{brief}}
 
+The tutor's brief gives everything the figure asserts: coordinates, values, labels, proportions, orientation, and what must *not* appear. One idea per figure. The tutor refers to the figure's elements by name when it teaches with it, so use the brief's labels exactly.
+
 ## Process
 
 1. **Plan the geometry.** Choose a coordinate system and scale. Compute every position, length and angle from the brief's values before writing SVG. Don't eyeball.

@@ -6,7 +6,7 @@ export const available = Boolean(tauri?.core?.invoke);
 
 export function call(command, args = {}) {
   if (!available) {
-    return Promise.reject(new Error('Learning Harness must run inside its desktop or mobile app.'));
+    return Promise.reject(new Error("P's Learning Harness must run inside its desktop or mobile app."));
   }
   return tauri.core.invoke(command, args);
 }

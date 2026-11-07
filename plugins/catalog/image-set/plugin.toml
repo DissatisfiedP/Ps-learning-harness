@@ -1,0 +1,39 @@
+# Catalogue entry, not built (docs/plugins.md §11). Nothing loads this
+# directory: it is not a folder plugin, not in a registry and not used by any
+# test. Native plugin: it needs the `fs-read` permission, which no Luau api 1
+# package may declare (docs/plugins.md §8.4), so it will be an in-tree Rust
+# type implementing `plugins::Plugin` (§12) with this manifest. Tool `entry`
+# names the Rust method; there is no src/main.luau.
+id = "image-set"
+version = "0.0.0"
+api = 1
+title = "Labeled image drills"
+description = "Runs classification drills over labelled image sets, including the learner's own labelled folders."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = ["fs-read"]
+use_when = "Perceptual sections that need many labeled examples: identifying eras, styles, species, materials, defects, diagram types."
+avoid_when = "No labeled set exists and none can be built from trustworthy captions."
+cost = "Low context; images load only on the learner's screen."
+
+# The old brief ran in measure, teach and practice. `fs-read` because sets
+# include the learner's labelled folders (folder name = label).
+
+[[tool]]
+name = "image_set_list"
+description = "List the available image sets: the learner's labelled folders and imported sets with captions, each with its labels and size."
+agents = ["tutor", "practice"]
+input = "schemas/image_set_list.json"
+entry = "list"
+artifact = false
+
+[[tool]]
+name = "image_set_drill"
+description = "Run a drill card over one set. Returns per-item results and the confusion pairs (which labels were mistaken for which)."
+agents = ["tutor", "practice"]
+input = "schemas/image_set_drill.json"
+entry = "drill"
+artifact = false
+
+[prompts]
+tutor = "prompts/tutor.md"

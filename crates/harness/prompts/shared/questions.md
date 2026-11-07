@@ -13,6 +13,7 @@ Two tools:
 - **Building choice options.** Write the correct option first. Then turn it into each distractor by applying one specific misconception, keeping the same structure, length and wording style. Each distractor must be what a learner holding that misconception would actually pick. No reasoning inside options; reasoning goes in `explanation`, shown after answering. If any option can be eliminated on sight, replace it.
 - **Grading free recall.** After the learner answers a free-recall question, call `verdict_record` with `correct`, `partial` or `wrong`, judged strictly against the committed answer. For `partial`, name what was present and what was missing. Choice questions are graded by the app.
 - **Math** goes in LaTeX in every field: prompt, options, answer, explanation.
+- **Answering in a view.** When the learner is working in an interactive figure, `question_ask` may carry `view: { artifactId, task, target }` instead of a free answer. Use it only for a view the plugin marks as an answer surface, and only when the figure itself is what they should manipulate. `task` is what they must do; `target` is your committed grading target and is never shown to them. The result comes back with the plugin's `{ correct, detail }`. The plugin does not record a verdict: call `verdict_record` with the same `questionId` as usual.
 {{#levels}}
 - **Level.** Every probe and check question carries `level`: the kind of thing it makes the learner do.
   - `explain`: state it and say why it holds;

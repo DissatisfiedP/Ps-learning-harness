@@ -1,0 +1,29 @@
+# Catalogue entry, not built (docs/plugins.md §11). Nothing loads this
+# directory: it is not a folder plugin, not in a registry and not used by any
+# test. Pure computation, so it can be a Luau api 1 package; it still lacks
+# src/main.luau, a renderer, a view and tests/, which `plugin validate` requires.
+id = "argument-map"
+version = "0.0.0"
+api = 1
+title = "Argument map card"
+description = "Shows an argument as a pinned card of premises, objections and replies, with parts the learner fills in."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = []
+use_when = "Argument-mode sections with more than one argument or more than two objections, where the learner benefits from seeing the structure."
+avoid_when = "A single short argument that fits in a numbered list."
+cost = "Low."
+
+# The old brief ran in teach and practice. The card is an artifact, so the
+# package needs a [[renderer]]; re-rendering after a reconstruction is a new artifact.
+
+[[tool]]
+name = "argument_map_show"
+description = "Render an argument as a structured card pinned to the lesson; `blanks` hides parts for the learner to fill in."
+agents = ["tutor", "practice"]
+input = "schemas/argument_map_show.json"
+entry = "show"
+artifact = true
+
+[prompts]
+tutor = "prompts/tutor.md"

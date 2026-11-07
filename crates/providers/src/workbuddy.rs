@@ -178,6 +178,7 @@ pub(crate) fn endpoint(
         wire: Wire::OpenaiChat,
         url: format!("{base}/v2/chat/completions"),
         headers,
+        claude_code: false,
     })
 }
 
@@ -197,6 +198,11 @@ fn client_headers(credential: &Credential) -> Result<HeaderMap, ProviderError> {
         Credential::ApiKey { key } => {
             insert(&mut headers, "Authorization", &format!("Bearer {key}"))?;
             insert(&mut headers, "X-API-Key", key)?;
+        }
+        Credential::ClaudeCode(_) => {
+            return Err(ProviderError::Config(
+                "WorkBuddy needs an API key or a WorkBuddy sign-in".into(),
+            ));
         }
     }
     for (name, value) in [

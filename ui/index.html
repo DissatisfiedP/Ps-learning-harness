@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="light dark" />
-  <title>Learning Harness</title>
+  <title>P's Learning Harness</title>
   <script src="./theme.js"></script>
   <link rel="stylesheet" href="./styles.css" />
   <script type="module" src="./app.js"></script>
@@ -14,7 +14,7 @@
     <section class="home" id="home">
       <div class="col home-col">
         <header class="home-bar">
-          <span class="wordmark">Learning Harness</span>
+          <span class="wordmark">P's Learning Harness</span>
           <span class="home-links">
             <button class="btn text" id="open-map" type="button">Map</button>
             <button class="btn text" id="open-settings" type="button">Settings</button>
@@ -23,30 +23,29 @@
         <p class="home-alert" id="live-error" role="status" hidden></p>
 
         <div class="start" id="start">
+          <button class="btn secondary resume" id="resume-session" type="button" hidden>
+            <span class="small-caps">Continue</span>
+            <span class="resume-title" id="resume-title"></span>
+            <span class="resume-place" id="resume-place"></span>
+          </button>
           <h1 class="hero" id="hero">What do you want to learn?</h1>
           <fieldset class="modes" id="mode-toggle">
             <legend class="sr-only">Mode</legend>
             <label class="mode">
-              <input type="radio" name="mode" value="learn" checked aria-describedby="mode-learn-desc" />
-              <span class="mode-text">
-                <span class="mode-name">Learn</span>
-                <span class="mode-desc" id="mode-learn-desc">The tutor finds what you know, plans, then teaches step by step.</span>
-              </span>
+              <input type="radio" name="mode" value="learn" checked />
+              <span class="mode-name">Learn</span>
             </label>
             <label class="mode">
-              <input type="radio" name="mode" value="practice" aria-describedby="mode-practice-desc" />
-              <span class="mode-text">
-                <span class="mode-name">Practice</span>
-                <span class="mode-desc" id="mode-practice-desc">Problems that hide the idea mid-solution, hints one rung at a time, honest grading.</span>
-              </span>
+              <input type="radio" name="mode" value="practice" />
+              <span class="mode-name">Practice</span>
             </label>
           </fieldset>
           <p class="setup-notice" id="setup-notice" hidden>
-            Connect a model to start. <button class="btn text" type="button" id="setup-button">Open settings</button>
+            Connect a model to start. <button class="btn text" type="button" id="setup-button">Settings</button>
           </p>
           <div class="composer-slot" id="home-composer-slot"></div>
         </div>
-        <p class="unavailable" id="unavailable" hidden>Open Learning Harness through its app to use it.</p>
+        <p class="unavailable" id="unavailable" hidden>Open this in P's Learning Harness.</p>
 
         <section class="sessions" aria-labelledby="sessions-heading">
           <h2 id="sessions-heading">Your sessions</h2>
@@ -68,8 +67,22 @@
           <h1 class="head-title" id="session-title"></h1>
           <nav class="phase" id="phase" aria-label="Session progress" hidden></nav>
           <span class="head-word" id="head-word" hidden></span>
+          <span class="workspace-chip" id="head-workspace" hidden>
+            <span class="workspace-name" id="head-workspace-name"></span>
+          </span>
           <button class="btn text" id="plan-toggle" type="button" aria-haspopup="dialog" hidden>Plan</button>
+          <div class="head-menu-wrap" id="session-menu-wrap" hidden>
+            <button class="btn text head-menu-button" id="session-menu" type="button"
+                    aria-haspopup="menu" aria-expanded="false" aria-controls="session-menu-list"
+                    aria-label="More session actions">More</button>
+            <div class="menu" id="session-menu-list" role="menu" aria-labelledby="session-menu" hidden>
+              <button class="menu-item" id="workspace-attach" type="button" role="menuitem">Attach folder…</button>
+              <button class="menu-item" id="workspace-detach" type="button" role="menuitem">Detach</button>
+              <button class="menu-item" id="fullscreen-toggle" type="button" role="menuitem">Full screen</button>
+            </div>
+          </div>
           <p class="head-status" id="head-status" role="status"></p>
+          <p class="head-status head-workspace-status" id="workspace-status" role="status"></p>
         </div>
       </header>
 
@@ -103,9 +116,7 @@
         </div>
       </header>
 
-      <div class="messages" id="map-scroller">
-        <div class="col page map-page" id="map-page"></div>
-      </div>
+      <div class="map-stage" id="map-page" role="region" aria-label="Ideas"></div>
 
       <footer class="desk">
         <div class="col desk-inner">
@@ -121,16 +132,24 @@
   </div>
 
   <form class="composer" id="composer">
+    <div class="composer-attach" id="composer-attach" hidden>
+      <ul class="chips" id="attach-chips" aria-label="Attachments"></ul>
+    </div>
     <label class="sr-only" id="prompt-label" for="prompt">Reply to the tutor</label>
     <div class="composer-row">
+      <button class="btn attach" id="add-files" type="button" aria-label="Add files"><span aria-hidden="true">+</span></button>
       <textarea id="prompt" class="input" rows="1" aria-labelledby="hero" aria-describedby="prompt-hint"></textarea>
       <button class="btn primary" id="send" type="submit">Start</button>
     </div>
+    <div class="mention-pop" id="mention-pop" hidden>
+      <ul class="mention-list" id="mention-list" role="listbox" aria-label="Files and folders"></ul>
+    </div>
+    <p class="field-error" id="attach-error" role="status" hidden></p>
     <p class="field-error" id="prompt-error" role="status"></p>
-    <span class="sr-only" id="prompt-hint">Enter to send, Shift+Enter for a new line.</span>
+    <span class="sr-only" id="prompt-hint">Enter sends. Shift+Enter: new line. @ mentions a file.</span>
   </form>
 
-  <dialog class="sheet" id="plan-panel" aria-labelledby="plan-sheet-heading"></dialog>
+  <dialog class="plan-overlay" id="plan-panel" aria-labelledby="plan-sheet-heading"></dialog>
 
   <dialog class="settings" id="settings" aria-labelledby="settings-heading">
     <div class="settings-col">
@@ -140,13 +159,70 @@
       </div>
       <section class="settings-section" aria-labelledby="roles-heading">
         <h2 id="roles-heading">Model roles</h2>
-        <p class="help">Pick a model per job. Only Tutor is required; unset roles use the Tutor model.</p>
+        <p class="help">Only Tutor is required.</p>
         <div class="model-form" id="model-form"></div>
+      </section>
+      <section class="settings-section" aria-labelledby="learning-heading">
+        <h2 id="learning-heading">Learning</h2>
+        <fieldset class="starting-point" id="starting-point">
+          <legend>Starting point for new sessions</legend>
+          <label>
+            <span class="starting-point-row"><input type="radio" name="starting-point" value="measure" /> Measure me</span>
+            <span class="help">A few questions in each area, so the plan starts where you do.</span>
+          </label>
+          <label>
+            <span class="starting-point-row"><input type="radio" name="starting-point" value="quick" /> Quick check</span>
+            <span class="help">At most five questions, on what would change the plan most.</span>
+          </label>
+          <label>
+            <span class="starting-point-row"><input type="radio" name="starting-point" value="new" /> I'm new to this</span>
+            <span class="help">No questions. The first check in each section does the measuring.</span>
+          </label>
+        </fieldset>
+        <p class="help">How much I check what you already know before planning. You can change it per session.</p>
+        <p class="status" id="starting-point-status" role="status"></p>
+      </section>
+      <section class="settings-section" aria-labelledby="focus-heading">
+        <h2 id="focus-heading">Focus</h2>
+        <div class="focus-choice" id="focus-choice">
+          <label><input type="checkbox" data-focus="fullscreen" /> Full screen in sessions</label>
+          <label id="focus-dnd-row" hidden><input type="checkbox" data-focus="dnd" /> <span id="focus-dnd-label">Silence notifications in sessions</span></label>
+          <label><input type="checkbox" data-focus="breaks" /> Break nudge every 50 min</label>
+        </div>
       </section>
       <section class="settings-section" aria-labelledby="providers-heading">
         <h2 id="providers-heading">Providers</h2>
-        <p class="help">Keys and sign-ins stay on this device, outside your synced data.</p>
+        <p class="help">Keys stay on this device.</p>
         <div class="provider-list" id="provider-list"></div>
+      </section>
+      <section class="settings-section" aria-labelledby="plugins-heading">
+        <h2 id="plugins-heading">Plugins</h2>
+        <div class="lock-list" id="plugin-lock" hidden></div>
+        <div class="plugin-list" id="plugin-list"></div>
+        <div class="actions">
+          <button class="btn secondary" id="add-folder-plugin" type="button">Add folder plugin…</button>
+          <button class="btn text" id="plugin-reload" type="button">Reload</button>
+        </div>
+        <p class="status" id="plugin-status" role="status"></p>
+      </section>
+      <section class="settings-section" aria-labelledby="registries-heading">
+        <h2 id="registries-heading">Registries</h2>
+        <div class="registry-list" id="registry-list"></div>
+        <form class="registry-form" id="registry-form">
+          <div class="field">
+            <label for="registry-name">Name</label>
+            <input class="input" id="registry-name" autocomplete="off" placeholder="e.g. My registry" />
+          </div>
+          <div class="field">
+            <label for="registry-url">Address</label>
+            <input class="input" id="registry-url" autocomplete="off" spellcheck="false" placeholder="https://example.com/index.json" />
+          </div>
+          <div class="actions">
+            <button class="btn secondary" type="submit">Add registry</button>
+            <button class="btn text" id="refresh-registries" type="button">Refresh registries</button>
+          </div>
+        </form>
+        <p class="status" id="registry-status" role="status"></p>
       </section>
       <section class="settings-section" aria-labelledby="appearance-heading">
         <h2 id="appearance-heading">Appearance</h2>
@@ -157,6 +233,34 @@
           <label><input type="radio" name="theme" value="dark" /> Dark</label>
         </fieldset>
       </section>
+    </div>
+  </dialog>
+
+  <dialog class="confirm" id="confirm" aria-labelledby="confirm-title">
+    <div class="confirm-body">
+      <h2 id="confirm-title"></h2>
+      <p class="confirm-text" id="confirm-text"></p>
+      <div class="actions">
+        <button class="btn secondary" id="confirm-cancel" type="button">Cancel</button>
+        <button class="btn primary" id="confirm-ok" type="button">Continue</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="consent" id="consent" aria-labelledby="consent-title">
+    <div class="consent-body">
+      <h2 id="consent-title"></h2>
+      <p class="consent-desc" id="consent-desc"></p>
+      <dl class="consent-meta">
+        <div><dt>Version</dt><dd id="consent-version"></dd></div>
+        <div><dt>Source</dt><dd id="consent-source"></dd></div>
+        <div><dt>Access</dt><dd id="consent-perms"></dd></div>
+      </dl>
+      <div class="actions">
+        <button class="btn primary" id="consent-install" type="button">Install</button>
+        <button class="btn text" id="consent-cancel" type="button">Cancel</button>
+      </div>
+      <p class="status" id="consent-status" role="status"></p>
     </div>
   </dialog>
 

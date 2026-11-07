@@ -10,6 +10,8 @@ thiserror.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
 base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

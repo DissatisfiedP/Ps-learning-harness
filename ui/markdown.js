@@ -21,7 +21,13 @@ const CODE = /(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g;
 // stays text).
 const MATH = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$(?=\S)((?:\\\$|[^$\n])+?)(?<=\S)\$(?!\d)/g;
 
+// `![alt](artifact:<id>)` never reaches DOMPurify: the URI scheme is unknown
+// to its allow-list, so the image is lifted out (like math) and put back as
+// a slot that artifacts.js turns into a figure.
+const ARTIFACT = /!\[([^\]]*)\]\(artifact:([A-Za-z0-9_-]+)\)/g;
+
 const token = (i) => `@@MATH${i}@@`;
+const slotToken = (i) => `@@ARTIFACT${i}@@`;
 
 /** Small LRU over a Map (insertion order = recency). */
 function lru(limit) {
@@ -108,11 +114,16 @@ function typeset(tex, display) {
 
 function renderSource(source) {
   const formulas = [];
+  const artifacts = [];
   const protectedText = source
     .split(CODE)
     .map((part, i) => {
       if (i % 2 === 1) return part;
-      return part.replace(MATH, (_, block, bracket, paren, inline) => {
+      const withArtifacts = part.replace(ARTIFACT, (_, alt, id) => {
+        artifacts.push({ alt, id });
+        return slotToken(artifacts.length - 1);
+      });
+      return withArtifacts.replace(MATH, (_, block, bracket, paren, inline) => {
         const display = block !== undefined || bracket !== undefined;
         formulas.push({ tex: block ?? bracket ?? paren ?? inline, display });
         return token(formulas.length - 1);
@@ -123,6 +134,13 @@ function renderSource(source) {
   let html = DOMPurify.sanitize(marked.parse(protectedText), {
     FORBID_TAGS: ['style', 'form', 'input', 'button'],
   });
+  if (artifacts.length) {
+    html = html.replace(/@@ARTIFACT(\d+)@@/g, (whole, i) => {
+      const a = artifacts[Number(i)];
+      if (!a) return whole;
+      return `<span class="artifact-slot" data-artifact="${escapeHtml(a.id)}" data-alt="${escapeHtml(a.alt)}"></span>`;
+    });
+  }
   let exact = true;
   if (formulas.length) {
     html = html.replace(/@@MATH(\d+)@@/g, (whole, i) => {

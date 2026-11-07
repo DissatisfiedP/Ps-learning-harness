@@ -1,0 +1,19 @@
+# Session op logs (`sessions/<yyyy>/<ulid>.jsonl`), graph ops (`nodes.jsonl`,
+# `edges.jsonl`, `checks.jsonl`, `topics.json`) and `frontier.jsonl` are append-only:
+# every line is one independent record, so a merge that keeps both sides' lines is
+# always correct. Git-based sync will rely on this; without it a branch-and-join
+# workflow conflicts on every appended record.
+*.jsonl merge=union
+
+# Docs, prompts and design notes are hand-written text: same bytes, same diff, on
+# every OS. Prompts are bundled at build time, so a CRLF checkout would also change
+# what the model is sent.
+*.md text eol=lf
+
+# Generated; never worth reading in a diff.
+Cargo.lock -diff
+
+# Icons are binary; keep them out of text diffs and merges.
+*.png binary
+*.ico binary
+*.icns binary

@@ -1,4 +1,4 @@
-// Layered layout for one plan's ideas (docs/ui-design.md §7.6): what an idea
+// Layered layout for one cluster's ideas (docs/ui-design.md §7.6): what an idea
 // needs sits above it. Pure and deterministic — the same nodes always give
 // the same picture — and it needs no measuring, because every box has the
 // same fixed size. Steps follow the classic layered method (Sugiyama 1981):

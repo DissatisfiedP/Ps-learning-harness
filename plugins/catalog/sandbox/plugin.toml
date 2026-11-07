@@ -1,0 +1,48 @@
+# Catalogue entry, not built (docs/plugins.md §11). Nothing loads this
+# directory: it is not a folder plugin, not in a registry and not used by any
+# test. Native plugin: it needs the `exec` permission, which no Luau api 1
+# package may declare (docs/plugins.md §8.4), so it will be an in-tree Rust
+# type implementing `plugins::Plugin` (§12) with this manifest. Tool `entry`
+# names the Rust method; there is no src/main.luau.
+id = "sandbox"
+version = "0.0.0"
+api = 1
+title = "Lab sandbox"
+description = "Boots a disposable local container or VM lab that the learner works in through a terminal card."
+license = "MIT"
+platforms = ["desktop"]
+permissions = ["exec"]
+use_when = "Hands-on systems or security skills that must be performed against a real target (enumeration, exploitation, hardening, log analysis, networking)."
+avoid_when = "The section is conceptual; a diagram or a worked transcript would do."
+cost = "Starts a local container or VM; needs Docker or Podman on the learner's machine."
+
+# The old brief ran in measure, teach and practice and listed scenarios
+# through {{lab_scenarios}}; the native plugin puts its scenario catalog in
+# the sandbox_start description.
+
+[[tool]]
+name = "sandbox_start"
+description = "Boot a lab from the scenario catalog; returns its targets and network."
+agents = ["tutor", "practice"]
+input = "schemas/sandbox_start.json"
+entry = "start"
+artifact = false
+
+[[tool]]
+name = "sandbox_observe"
+description = "Return the learner's commands and their output since the given point."
+agents = ["tutor", "practice"]
+input = "schemas/sandbox_observe.json"
+entry = "observe"
+artifact = false
+
+[[tool]]
+name = "sandbox_check"
+description = "Run the scenario's success check (flag found, service hardened, port closed); returns pass or fail with details."
+agents = ["tutor", "practice"]
+input = "schemas/sandbox_check.json"
+entry = "check"
+artifact = false
+
+[prompts]
+tutor = "prompts/tutor.md"

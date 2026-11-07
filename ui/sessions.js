@@ -5,7 +5,7 @@
 const GROUPS = ['Today', 'Yesterday', 'Previous 7 days', 'Older'];
 const DAY = 24 * 60 * 60 * 1000;
 const ARM_MS = 4000;
-const EMPTY = 'No sessions yet. What you start here will be listed.';
+const EMPTY = 'No sessions yet.';
 
 const time = (iso) => Date.parse(iso) || 0;
 
@@ -166,6 +166,9 @@ export function createSessionList(root, hooks) {
 
   const has = (id) => sessions.some((x) => x.id === id);
   const get = (id) => sessions.find((x) => x.id === id) ?? null;
+  const newest = () => sessions[0] ?? null;
+  /** The newest Learn session that can still be read for state (not practice, not read-only). */
+  const newestLearn = () => sessions.find((x) => x.mode === 'learn' && !x.readOnly) ?? null;
   const openButton = (id) => rows.get(id)?.querySelector('.session-open') ?? null;
 
   function setRowStatus(id, text) {
@@ -203,5 +206,5 @@ export function createSessionList(root, hooks) {
     });
   });
 
-  return { render, upsert, bump, remove, reset, has, get, openButton, setRowStatus };
+  return { render, upsert, bump, remove, reset, has, get, newest, newestLearn, openButton, setRowStatus };
 }
