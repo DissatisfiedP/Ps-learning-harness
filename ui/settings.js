@@ -6,6 +6,7 @@ import { call, message } from './api.js';
 import { escapeHtml } from './markdown.js';
 import { initPluginSettings } from './pluginui.js';
 import { dndSupport, focusPref, setFocusPref } from './focus.js';
+import { modelSearch } from './modelsearch.js';
 
 const dialog = document.getElementById('settings');
 const modelForm = document.getElementById('model-form');
@@ -22,6 +23,7 @@ let settings = {};
 let roles = []; // RoleInfo[]
 let usage = []; // RoleUsageEntry[]
 let models = new Map(); // provider id -> ModelInfo[]
+const modelFetches = new Map(); // provider id -> Promise<ModelInfo[]> while a fetch runs
 let login = null; // { state, authUrl } while WorkBuddy sign-in is pending
 let claudeLogin = null; // { state, authUrl } while Claude sign-in awaits a pasted code
 let codexLogin = null; // { state, authUrl } while ChatGPT sign-in awaits the browser redirect
@@ -184,12 +186,25 @@ function setStatus(map, key, node, text, error = false) {
 
 // ---------- model roles ----------
 
-async function fetchModels(providerId, force = false) {
-  if (!force && models.has(providerId)) return models.get(providerId);
-  const list = await call('list_models', { provider: providerId, refresh: force });
-  models.set(providerId, list);
-  return list;
+/** One fetch per provider at a time: every role picker opening at once shares it. */
+function fetchModels(providerId, force = false) {
+  if (!force && models.has(providerId)) return Promise.resolve(models.get(providerId));
+  const running = modelFetches.get(providerId);
+  if (running && !force) return running;
+  const fetch = call('list_models', { provider: providerId, refresh: force })
+    .then((list) => {
+      models.set(providerId, list);
+      return list;
+    })
+    .finally(() => {
+      if (modelFetches.get(providerId) === fetch) modelFetches.delete(providerId);
+    });
+  modelFetches.set(providerId, fetch);
+  return fetch;
 }
+
+/** A provider's known models; `null` while the first fetch is still running. */
+const knownModels = (providerId) => models.get(providerId) ?? (modelFetches.has(providerId) ? null : []);
 
 const roleChoice = (role) => settings.roles?.[role] ?? null;
 const usageFor = (role) => usage.find((u) => u.role === role)?.usage ?? { inputTokens: 0, outputTokens: 0 };
@@ -237,10 +252,9 @@ function roleFieldset(info, required) {
           : '<option value="">No provider connected</option>'}
       </select>
     </div>
-    <div class="field">
+    <div class="field model-field">
       <label for="model-${role}">Model</label>
-      <input class="input" id="model-${role}" list="models-${role}" autocomplete="off" spellcheck="false" placeholder="Type a model id" />
-      <datalist id="models-${role}"></datalist>
+      <input class="input" id="model-${role}" autocomplete="off" spellcheck="false" placeholder="Search models or type an id" />
     </div>
     <div class="field" id="effort-field-${role}" hidden>
       <label for="effort-${role}">Reasoning effort</label>
@@ -276,21 +290,26 @@ function roleFieldset(info, required) {
     warn.innerHTML = warningLines(info, modelInfo);
   };
 
+  const picker = modelSearch(modelInput, { models: () => knownModels(providerSel.value), onPick: describe });
+
   const fill = async (pid, preferred, force = false) => {
     let list = [];
     let failed = false;
+    const loading = fetchModels(pid, force);
+    picker.refresh();
     try {
-      list = await fetchModels(pid, force);
+      list = await loading;
     } catch (e) {
       failed = true;
       say(`Couldn’t load models: ${message(e)}`, true);
     }
+    // The learner switched provider while this list loaded.
+    if (providerSel.value !== pid) return list;
     if (!failed && !list.length) say('This provider listed no models; type an id instead.');
-    el.querySelector(`#models-${role}`).innerHTML = list
-      .map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}</option>`)
-      .join('');
-    modelInput.value = preferred ?? list[0]?.id ?? modelInput.value;
+    // Don't overwrite what the learner is typing while the list loaded.
+    if (document.activeElement !== modelInput) modelInput.value = preferred ?? list[0]?.id ?? modelInput.value;
     describe();
+    picker.refresh();
     return list;
   };
 

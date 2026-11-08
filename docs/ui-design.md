@@ -936,7 +936,7 @@ Settings is a modal `<dialog>` that fills the viewport (`inline-size: 100vw; blo
  Guidance (one line, e.g. "Your best model. Learning quality depends on it most.")  ← --fs-small --ink-3
  Usage: in 12,400 tok · out 3,100 tok          ← --fs-meta --ink-3
  Provider [ WorkBuddy        ▾]
- Model    [ gpt-…            ]   (datalist: the provider's own list, fetched)
+ Model    [ gpt-…            ]   (search: top 10 matches, or the provider's first 10 before typing)
  Reasoning effort [ medium ▾]                  ← only when the model lists efforts
  Note: Tool calling unverified.                ← warnings as plain lines, prefix "Note:"
  [Use this model]  Clear  Test  Reload models   Saved — Tutor uses gpt-x   ← status inline, role=status

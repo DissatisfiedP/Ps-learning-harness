@@ -1054,6 +1054,14 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
   font-size: var(--fs-meta); color: var(--ink-3);
 }
 .mention-empty { padding: var(--s2); font-size: var(--fs-small); color: var(--ink-3); }
+/* Settings model search: the mention list's look, dropped below the input. */
+.model-field { position: relative; }
+.model-pop {
+  position: absolute; inset-inline: 0; inset-block-start: 100%;
+  z-index: 6; margin-block-start: var(--s1);
+  max-block-size: min(60dvh, 480px); overflow-y: auto;
+  background: var(--paper); border: var(--line); border-radius: var(--r);
+}
 
 /* ---------- running head: workspace and menu ---------- */
 .workspace-chip {
