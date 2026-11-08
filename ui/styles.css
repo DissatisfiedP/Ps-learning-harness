@@ -434,7 +434,7 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .you-meta { margin-block-start: var(--s1); font-size: var(--fs-small); color: var(--ink-3); white-space: pre-wrap; overflow-wrap: anywhere; }
-.working { margin-block-start: var(--s4); }
+.working { margin-block-end: var(--s4); }
 .working summary, .job summary { cursor: pointer; color: var(--ink-3); font-size: var(--fs-small); }
 .working-body {
   margin-block-start: var(--s2);

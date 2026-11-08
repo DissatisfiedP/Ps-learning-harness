@@ -38,7 +38,7 @@ function endingEl(ending) {
   return ending ? el('p', 'ending', ENDINGS[ending] ?? `The reply ended early (${ending}).`) : null;
 }
 
-/** Practice only: the tutor's reasoning, closed, after the reply text. */
+/** Practice only: the tutor's reasoning, closed, before the reply text. */
 function workingEl() {
   const d = el('details', 'working');
   d.append(el('summary', '', 'Tutor’s working'), el('div', 'working-body'));
@@ -48,17 +48,17 @@ function workingEl() {
 /** A finished tutor reply. `showThinking` is false in Learn (spoiler risk). */
 export function assistantEl(msg, { showThinking = false, artifacts = [], ctx = {} } = {}) {
   const entry = el('div', 'entry tutor');
+  if (showThinking && msg.thinking) {
+    const w = workingEl();
+    w.lastChild.textContent = msg.thinking;
+    entry.append(w);
+  }
   const prose = el('div', 'prose');
   prose.innerHTML = renderMarkdown(msg.content ?? '');
   entry.append(prose);
   enhanceMessage(entry, prose, artifacts, typeof ctx === 'function' ? ctx() : ctx);
   const end = endingEl(msg.ending);
   if (end) entry.append(end);
-  if (showThinking && msg.thinking) {
-    const w = workingEl();
-    w.lastChild.textContent = msg.thinking;
-    entry.append(w);
-  }
   return entry;
 }
 
@@ -144,7 +144,8 @@ export class LiveReply {
       this.working = workingEl();
       this.thinkingNode = document.createTextNode('');
       this.working.lastChild.append(this.thinkingNode);
-      this.el.append(this.working);
+      // First child: above the status line, so `clearStatus` never removes it.
+      this.el.prepend(this.working);
     }
     this.thinkingNode.appendData(this.thinking.slice(this.thinkingShown));
     this.thinkingShown = this.thinking.length;
@@ -205,7 +206,7 @@ export class LiveReply {
       if (thinking !== this.thinking) {
         if (!this.working && thinking) {
           this.working = workingEl();
-          this.el.append(this.working);
+          this.el.prepend(this.working);
         }
         if (this.working) this.working.lastChild.textContent = thinking;
       } else this.paintThinking();

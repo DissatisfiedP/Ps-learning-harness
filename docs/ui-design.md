@@ -157,7 +157,7 @@ both lists:
 ### 3.2 Removed, hidden, peripheral
 
 - **Removed:** sidebar in sessions; avatars; per-reply model and author metadata; model pill and status dot; mode pills and dots; badges and pills; gradients; drop shadows; spinners; typing dots; caret blink; toasts; suggestion chips; the uppercase accent kickers; the second header band.
-- **Hidden until asked:** the session list (Home only), the plan (sheet), the learning map (its own page, reached from Home only), research briefs (disclosure), settings (Home only, plus a link inside model-related errors), tutor reasoning in Practice (closed disclosure after the reply).
+- **Hidden until asked:** the session list (Home only), the plan (sheet), the learning map (its own page, reached from Home only), research briefs (disclosure), settings (Home only, plus a link inside model-related errors), tutor reasoning in Practice (closed disclosure before the reply).
 - **Peripheral and static:** the running head (back, title, phase position, Plan) and the desk (composer, Stop, or the "continue" note).
 
 ---
@@ -911,7 +911,7 @@ Visual changes only:
 - The page: tutor prose and learner entries as in §6.4. Exercises are whatever the tutor writes in prose.
 - The desk: composer, or composer + Stop.
 - The streaming scroll rule is identical to Learn (§7.2.2).
-- **Reasoning** (`thinking`): rendered *after* the reply text as a closed `details` with summary "Tutor's working". It is never auto-opened, and while streaming the summary does not change text. Today it sits above the reply.
+- **Reasoning** (`thinking`): rendered *before* the reply text, in reading order with how it was produced, as a closed `details` with summary "Tutor's working". It is never auto-opened, and while streaming the summary does not change text.
 - Errors: the block from §7.2.11 with "Retry" → `runPractice(null)`.
 
 ### 7.4 Session list and navigation
@@ -1734,7 +1734,7 @@ Nothing in this table scrolls, moves focus or animates.
 | 14 | Suggestion chips | Removed; Home has no suggestions (§7.1) |
 | 15 | Icon segmented control as `role="tablist"` | Radio group with descriptions (§7.1) |
 | 16 | Toasts | Inline persistent status (§9.7) |
-| 17 | "Reasoning" disclosure above every reply | Hidden in Learn; closed "Tutor's working" after the reply in Practice (§7.2.2, §7.3) |
+| 17 | "Reasoning" disclosure above every reply | Hidden in Learn; closed "Tutor's working" before the reply in Practice (§7.2.2, §7.3) |
 | 18 | Two header bands (topbar plus phase strip) | One running head (§6.2) |
 | 19 | Bold centered sans hero | Serif display line, left-aligned in the column (§7.1) |
 | 20 | Plan side panel open by default | Plan overlay on demand (§7.2.9) |
