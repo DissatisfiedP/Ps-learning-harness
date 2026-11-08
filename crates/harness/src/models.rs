@@ -6,15 +6,19 @@
 //! request per provider, and the public models.dev metadata
 //! ([`CATALOG_TTL`]) fills the fields a listing leaves out — context window,
 //! vision, effort levels — so role warnings and compaction see real numbers.
+//! The metadata is a multi-megabyte download, so only the very first listing
+//! waits for it; a stale copy is used at once and refreshed in the background.
 //!
 //! A cached list is scoped to the base URL it came from: a proxy's list is not
 //! the real provider's, and switching overrides must not show the wrong models.
 
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use providers::{models, Catalog, ModelInfo, ProviderError, ProviderId};
+use providers::{models, Catalog, Client, ModelInfo, ProviderError, ProviderId};
 
-use crate::config::{CachedCatalog, CachedModels};
+use crate::config::{CachedCatalog, CachedModels, ModelCache};
 use crate::{lock, Error, Harness};
 
 /// How long a provider's list is reused before the picker refetches.
@@ -147,49 +151,91 @@ impl Harness {
         models::enrich(listed, provider, &catalog);
     }
 
-    /// The trimmed models.dev catalog, refreshed when it is stale. `None` when
-    /// the provider has no public catalog or no copy could be had.
+    /// The trimmed models.dev catalog. A copy of any age is used at once; a
+    /// stale one starts a background refresh. Only when there is no copy at
+    /// all does the caller wait, and concurrent callers share that one
+    /// download. `None` when the provider has no public catalog or no copy
+    /// could be had.
     async fn catalog(&self, provider: ProviderId, now: u64) -> Option<Catalog> {
         provider.catalog_key()?;
-        let cached = lock(&self.model_cache).catalog.clone();
-        if let Some(cached) = &cached {
-            if now.saturating_sub(cached.fetched_at) < CATALOG_TTL {
-                return Some(cached.providers.clone());
+        if let Some((providers, fetched_at)) = self.cached_catalog() {
+            if now.saturating_sub(fetched_at) >= CATALOG_TTL {
+                self.refresh_catalog_in_background();
+            }
+            return Some(providers);
+        }
+        let _fetching = self.catalog_fetch.lock().await;
+        // Another caller may have finished the download while this one waited.
+        if let Some((providers, _)) = self.cached_catalog() {
+            return Some(providers);
+        }
+        fetch_catalog_into(&self.client, &self.model_cache, &self.config_dir, now).await
+    }
+
+    fn cached_catalog(&self) -> Option<(Catalog, u64)> {
+        lock(&self.model_cache)
+            .catalog
+            .as_ref()
+            .map(|c| (c.providers.clone(), c.fetched_at))
+    }
+
+    /// Refreshes stale metadata off the request path. Skipped while a fetch
+    /// is already running, and outside a Tokio runtime.
+    fn refresh_catalog_in_background(&self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let Ok(fetching) = Arc::clone(&self.catalog_fetch).try_lock_owned() else {
+            return;
+        };
+        let client = self.client.clone();
+        let cache = Arc::clone(&self.model_cache);
+        let dir = self.config_dir.clone();
+        runtime.spawn(async move {
+            let _fetching = fetching;
+            fetch_catalog_into(&client, &cache, &dir, unix_now()).await;
+        });
+    }
+}
+
+/// Fetches models.dev into `cache` (conditionally, with the cached ETag) and
+/// fills the stored lists' unset fields from a new copy, so models listed
+/// under an older copy gain its metadata too. Returns the catalog in effect.
+async fn fetch_catalog_into(
+    client: &Client,
+    cache: &Mutex<ModelCache>,
+    dir: &Path,
+    now: u64,
+) -> Option<Catalog> {
+    let etag = lock(cache).catalog.as_ref().and_then(|c| c.etag.clone());
+    let fetched = models::fetch_catalog(client, etag.as_deref()).await;
+    let mut cache = lock(cache);
+    match fetched {
+        Ok(Some((catalog, etag))) => {
+            for (provider, cached) in cache.providers.iter_mut() {
+                models::enrich(&mut cached.models, *provider, &catalog);
+            }
+            cache.catalog = Some(CachedCatalog {
+                fetched_at: now,
+                etag,
+                providers: catalog,
+            });
+        }
+        // 304: the cached copy is current; restart its clock.
+        Ok(None) => {
+            if let Some(cached) = cache.catalog.as_mut() {
+                cached.fetched_at = now;
             }
         }
-        let etag = cached.as_ref().and_then(|c| c.etag.clone());
-        let dir = self.config_dir.clone();
-        match models::fetch_catalog(&self.client, etag.as_deref()).await {
-            Ok(Some((catalog, etag))) => {
-                let mut cache = lock(&self.model_cache);
-                cache.catalog = Some(CachedCatalog {
-                    fetched_at: now,
-                    etag,
-                    providers: catalog.clone(),
-                });
-                if let Err(e) = cache.save(&dir) {
-                    tracing::warn!(error = %e, "could not save the model metadata cache");
-                }
-                Some(catalog)
-            }
-            // 304: the cached copy is current; restart its clock.
-            Ok(None) => {
-                let mut cache = lock(&self.model_cache);
-                if let Some(cached) = cache.catalog.as_mut() {
-                    cached.fetched_at = now;
-                }
-                let providers = cache.catalog.as_ref().map(|c| c.providers.clone());
-                if let Err(e) = cache.save(&dir) {
-                    tracing::warn!(error = %e, "could not save the model metadata cache");
-                }
-                providers
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "model metadata unavailable");
-                cached.map(|c| c.providers)
-            }
+        Err(e) => {
+            tracing::warn!(error = %e, "model metadata unavailable");
+            return cache.catalog.as_ref().map(|c| c.providers.clone());
         }
     }
+    if let Err(e) = cache.save(dir) {
+        tracing::warn!(error = %e, "could not save the model metadata cache");
+    }
+    cache.catalog.as_ref().map(|c| c.providers.clone())
 }
 
 fn unix_now() -> u64 {

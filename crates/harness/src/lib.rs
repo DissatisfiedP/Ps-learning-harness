@@ -177,8 +177,11 @@ pub struct Harness {
     /// Device-local copy of the data repo path (plugin installs, registries).
     pub(crate) config_dir: PathBuf,
     /// Last model list per provider plus the models.dev metadata
-    /// (`models-cache.json`). Read on every turn's context lookup.
-    pub(crate) model_cache: Mutex<config::ModelCache>,
+    /// (`models-cache.json`). Read on every turn's context lookup. Shared
+    /// with the background metadata refresh.
+    pub(crate) model_cache: Arc<Mutex<config::ModelCache>>,
+    /// Held while the models.dev metadata is being fetched: one fetch at a time.
+    pub(crate) catalog_fetch: Arc<tokio::sync::Mutex<()>>,
     /// session → workspace folder mapping (device-local).
     pub(crate) workspaces: Mutex<workspace::Workspaces>,
     /// (session, workspace-relative path) → sha256 the agent last saw.
@@ -226,7 +229,8 @@ impl Harness {
             turn_locks: Mutex::new(HashMap::new()),
             plugins: Mutex::new(plugins::PluginRegistry::default()),
             config_dir: config_dir.to_owned(),
-            model_cache: Mutex::new(config::ModelCache::load(config_dir)?),
+            model_cache: Arc::new(Mutex::new(config::ModelCache::load(config_dir)?)),
+            catalog_fetch: Arc::new(tokio::sync::Mutex::new(())),
             workspaces: Mutex::new(workspace::Workspaces::load(config_dir)?),
             workspace_hashes: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
