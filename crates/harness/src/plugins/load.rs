@@ -15,15 +15,26 @@ use crate::config::ModelRole;
 use crate::replay::replay_state;
 use crate::{lock, Error, Harness};
 
-fn platform() -> &'static str {
-    if cfg!(any(target_os = "android", target_os = "ios")) {
-        "mobile"
-    } else {
-        "desktop"
-    }
-}
-
 impl Harness {
+    /// This device's platform (`desktop` | `mobile`), which plugins are
+    /// offered and whether the mobile session rules apply. The build target
+    /// decides it; tests set `mobile` to run the phone rules on a desktop
+    /// build (docs/sync-build.md, "Sessions on mobile").
+    pub fn set_platform(&self, platform: &str) -> Result<(), Error> {
+        if !matches!(platform, "desktop" | "mobile") {
+            return Err(Error::Invalid(format!(
+                "unknown platform `{platform}`; use desktop or mobile"
+            )));
+        }
+        lock(&self.plugins).set_platform(platform);
+        Ok(())
+    }
+
+    /// Whether this device is a phone or tablet.
+    pub(crate) fn is_mobile(&self) -> bool {
+        lock(&self.plugins).platform() == "mobile"
+    }
+
     /// Rebuild the registry from installed packages, folder plugins and the
     /// learner's enable/disable choices. A broken package is skipped with a
     /// warning, never crashing the app.
@@ -35,7 +46,10 @@ impl Harness {
                 config.settings.disabled_plugins.clone(),
             )
         };
-        let mut registry = PluginRegistry::new(platform());
+        // Keep the platform the registry already has (the build target's,
+        // or the one a test set).
+        let platform = lock(&self.plugins).platform().to_owned();
+        let mut registry = PluginRegistry::new(&platform);
         let lock_entries = install::read_lock(&self.repo).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "plugins.lock unreadable; loading without it");
             Vec::new()

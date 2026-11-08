@@ -374,6 +374,11 @@ pub struct ArtifactOp {
     #[serde(default)]
     pub data: Value,
     pub fallback_svg: String,
+    /// The plugin's `platforms` when the figure was made, so a device that
+    /// doesn't have the plugin knows where it runs (docs/sync-build.md,
+    /// "Sessions on mobile"). Absent on older ops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platforms: Option<Vec<String>>,
 }
 
 /// Notes from a compaction turn that stand in for every conversation op with
@@ -408,6 +413,14 @@ pub struct ToolOp {
     /// absent for the tutor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// The plugin a tutor call went to (call ops only; absent for core tools
+    /// and on older ops).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    /// That plugin's `platforms` when the call was written (see
+    /// [`ArtifactOp::platforms`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platforms: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -444,6 +457,20 @@ pub struct JobOp {
     pub error: Option<String>,
 }
 
+/// The learner chose "Continue here anyway" on a session locked on mobile
+/// because it used plugins that don't run there (docs/sync-build.md,
+/// "Sessions on mobile"). Synced, so every phone and tablet follows the one
+/// decision; desktop ignores it. `plugins` are the ids it unlocked: a
+/// desktop-only plugin first used after it locks the session again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileUnlockOp {
+    pub op_id: String,
+    pub at: String,
+    #[serde(default)]
+    pub plugins: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum Op {
@@ -476,6 +503,7 @@ pub enum Op {
     Artifact(ArtifactOp),
     FileGrant(FileGrantOp),
     ViewState(ViewStateOp),
+    MobileUnlock(MobileUnlockOp),
 }
 
 impl Op {
@@ -507,6 +535,7 @@ impl Op {
             Op::Artifact(o) => &o.at,
             Op::FileGrant(o) => &o.at,
             Op::ViewState(o) => &o.at,
+            Op::MobileUnlock(o) => &o.at,
         }
     }
 
@@ -538,6 +567,7 @@ impl Op {
             Op::Artifact(o) => &o.op_id,
             Op::FileGrant(o) => &o.op_id,
             Op::ViewState(o) => &o.op_id,
+            Op::MobileUnlock(o) => &o.op_id,
         }
     }
 
@@ -556,8 +586,23 @@ pub struct SessionSummary {
     pub created_at: String,
     pub updated_at: String,
     /// Learn sessions from before the agent runtime (no `phase` op) open
-    /// read-only.
+    /// read-only, and on mobile so does one that used a desktop-only plugin.
     pub read_only: bool,
+    /// Why `read_only` is set: [`READ_ONLY_LEGACY`] or `"desktop-plugin"`
+    /// (the mobile lock, `mobile.rs`); `None` when writable.
+    pub read_only_reason: Option<String>,
+    /// For `"desktop-plugin"`: the display names of the plugins that caused
+    /// the lock (title if known, else id). Empty otherwise.
+    pub desktop_only_plugins: Vec<String>,
+}
+
+/// [`SessionSummary::read_only_reason`] of a session from before the agent
+/// runtime (or whose `phase` op is not second).
+pub const READ_ONLY_LEGACY: &str = "legacy";
+
+/// [`SessionSummary::read_only_reason`] for the store's own rule.
+fn legacy_reason(read_only: bool) -> Option<String> {
+    read_only.then(|| READ_ONLY_LEGACY.to_owned())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -643,6 +688,8 @@ impl Store {
             created_at: at.clone(),
             updated_at: at,
             read_only: false,
+            read_only_reason: None,
+            desktop_only_plugins: Vec::new(),
         })
     }
 
@@ -1112,6 +1159,7 @@ fn session_from_ops(path: &Path, parsed: ParsedOps) -> Result<Session, Error> {
             _ => None,
         })
         .unwrap_or(header.title);
+    let read_only = header.mode == Mode::Learn && !runtime;
     Ok(Session {
         summary: SessionSummary {
             id: header.id,
@@ -1119,7 +1167,9 @@ fn session_from_ops(path: &Path, parsed: ParsedOps) -> Result<Session, Error> {
             title,
             created_at: header.at,
             updated_at,
-            read_only: header.mode == Mode::Learn && !runtime,
+            read_only,
+            read_only_reason: legacy_reason(read_only),
+            desktop_only_plugins: Vec::new(),
         },
         messages,
         ops,
@@ -1141,13 +1191,16 @@ fn read_header(path: &Path) -> Result<Option<SessionSummary>, Error> {
         .map(DateTime::<Utc>::from)
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_else(|| h.at.clone());
+    let read_only = h.mode == Mode::Learn && !runtime;
     Ok(Some(SessionSummary {
         id: h.id,
         mode: h.mode,
         title: h.title,
         created_at: h.at,
         updated_at: updated,
-        read_only: h.mode == Mode::Learn && !runtime,
+        read_only,
+        read_only_reason: legacy_reason(read_only),
+        desktop_only_plugins: Vec::new(),
     }))
 }
 
@@ -1289,7 +1342,13 @@ mod tests {
         let store = store(&repo);
         let s = store.load(&id).unwrap();
         assert!(s.summary.read_only);
-        assert!(store.list().unwrap()[0].read_only);
+        assert_eq!(
+            s.summary.read_only_reason.as_deref(),
+            Some(READ_ONLY_LEGACY)
+        );
+        let listed = &store.list().unwrap()[0];
+        assert!(listed.read_only);
+        assert_eq!(listed.read_only_reason.as_deref(), Some(READ_ONLY_LEGACY));
         fs::remove_dir_all(repo).unwrap();
     }
 

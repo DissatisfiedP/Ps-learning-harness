@@ -16,6 +16,7 @@ import { ensurePrism } from './highlight.js';
 import { ensureKatex, plainText } from './markdown.js';
 import { enterSession, initFocus, leaveSession, NUDGE_TEXT, nudgeEl, refreshFullscreen, takeNudge, toggleFullscreen } from './focus.js';
 import { initSettings, loadConfig, openSettings } from './settings.js';
+import { initSync } from './sync.js';
 import { LiveReply, assistantEl, userEl } from './reply.js';
 import { affectsState, applyHuntStates, applyOp, createTimeline, isPending } from './timeline.js';
 import { createSessionList } from './sessions.js';
@@ -139,6 +140,9 @@ function newView(summary) {
     mode: summary.mode,
     title: summary.title ?? '',
     readOnly: Boolean(summary.readOnly),
+    readOnlyReason: summary.readOnlyReason ?? null, // 'legacy' | 'desktop-plugin'
+    desktopOnlyPlugins: summary.desktopOnlyPlugins ?? [],
+    lockCheck: false, // a desktop-only plugin was used this turn (mobile lock)
     learn: summary.mode === 'learn',
     messages: [], // practice history (send_message path)
     tl: createTimeline(),
@@ -778,8 +782,10 @@ function sessionEvent(s, ev) {
       syncBusy();
       break;
     case 'turnEnd':
-      if (ev.agent === 'tutor') endLive(s, ev.error);
-      else {
+      if (ev.agent === 'tutor') {
+        endLive(s, ev.error);
+        if (s.lockCheck) recheckLock(s);
+      } else {
         s.planEditing = false;
         if (ev.error) plannerFailed(s, ev.error);
       }
@@ -838,6 +844,11 @@ function plannerFailed(s, error) {
 
 function onOp(s, op) {
   if (op.op === 'title' && op.title) setTitle(s, op.title);
+  // A plugin call or figure from a plugin that doesn't run on phones: on a
+  // phone the session locks once the turn ends (recheckLock).
+  if ((op.op === 'tool' || op.op === 'artifact') && Array.isArray(op.platforms) && !op.platforms.includes('mobile')) {
+    s.lockCheck = true;
+  }
   const free = notEngaged();
   const change = applyOp(s.tl, op);
   if (change?.added) {
@@ -1394,6 +1405,15 @@ function pendingItem(s) {
 
 /** The desk's one state: composer, or a note (with at most one button). */
 function deskState(s) {
+  if (s.readOnly && s.readOnlyReason === 'desktop-plugin') {
+    const names = s.desktopOnlyPlugins;
+    const verb = names.length === 1 ? 'runs' : 'run';
+    return {
+      note: `${joinNames(names)} only ${verb} on desktop. Continue this session on desktop.`,
+      button: 'Continue here anyway',
+      act: 'unlock',
+    };
+  }
   if (s.readOnly) return { note: READ_ONLY_NOTE, button: 'Start a new session', act: 'new', primary: true };
   if (!s.learn) return { composer: true };
   if (pendingItem(s)) return { note: 'Question waiting.', button: 'Go to question', act: 'question' };
@@ -1422,6 +1442,37 @@ function planIdeas(s) {
     title: n.title ?? n.id,
     topic: topicOf(n.id) ?? plan?.goal ?? 'this plan',
   }));
+}
+
+/** "A", "A and B", "A, B and C". */
+function joinNames(names) {
+  if (names.length < 2) return names[0] ?? 'A plugin';
+  return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+}
+
+/** "Continue here anyway": record the choice (synced) and re-open the session writable. */
+async function unlockHere(s) {
+  els.deskNoteButton.disabled = true;
+  try {
+    await cmd('mobile_unlock', { sessionId: s.id });
+  } catch (e) {
+    if (state.current === s) els.deskNoteText.textContent = `Couldn’t continue here: ${e}`;
+    return;
+  } finally {
+    els.deskNoteButton.disabled = false;
+  }
+  if (state.current !== s) return;
+  closeCurrent();
+  openSession(s.id);
+}
+
+/** After a turn that used a desktop-only plugin: on a phone the session is now locked, so re-open it. */
+async function recheckLock(s) {
+  s.lockCheck = false;
+  const data = await call('load_session', { id: s.id }).catch(() => null);
+  if (!data?.readOnly || state.current !== s) return;
+  closeCurrent();
+  openSession(s.id);
 }
 
 function practiseEnded(s) {
@@ -1462,6 +1513,10 @@ function onDeskNoteButton() {
   if (act === 'new') {
     state.mode = 'learn';
     showHome();
+    return;
+  }
+  if (act === 'unlock') {
+    unlockHere(s);
     return;
   }
   if (act === 'practise') {
@@ -1898,6 +1953,7 @@ function wire() {
   });
   els.mapPractise.addEventListener('click', practiseSelection);
   initSettings({ changed: applyConfig, pluginsChanged: onPluginsChanged });
+  initSync({ openSettings });
   initFocus({ onFullscreen: (on) => (els.fullscreenToggle.textContent = on ? 'Exit full screen' : 'Full screen') });
 }
 

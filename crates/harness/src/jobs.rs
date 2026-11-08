@@ -330,6 +330,13 @@ impl Harness {
         if state.queued_jobs.is_empty() || state.pending_call.is_some() {
             return;
         }
+        // On mobile, a session locked for a desktop-only plugin takes no
+        // turn (docs/sync-build.md, "Sessions on mobile"). The job's end op
+        // is already recorded; its result stays queued and the next turn
+        // delivers it, on desktop or after "Continue here anyway".
+        if self.check_mobile_lock(&ops).is_err() {
+            return;
+        }
         if let Err(e) = self.deliver_queued(sid) {
             tracing::warn!("delivery failed: {e}");
             return;

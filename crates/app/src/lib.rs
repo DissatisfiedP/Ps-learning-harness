@@ -98,6 +98,23 @@ async fn load_session(h: H<'_>, id: String) -> Result<Session> {
     Ok(session)
 }
 
+/// "Continue here anyway" on a session locked on mobile for a desktop-only
+/// plugin: records the choice and returns the session as `load_session` does.
+#[tauri::command]
+async fn mobile_unlock(h: H<'_>, session_id: String) -> Result<Session> {
+    let harness = Arc::clone(&h);
+    let session = blocking(&h, {
+        let id = session_id.clone();
+        move |h| h.mobile_unlock(&id)
+    })
+    .await?;
+    // Now writable: restart what a previous run left unfinished, as on open.
+    if !session.summary.read_only {
+        harness.recover_jobs(&session_id).map_err(err)?;
+    }
+    Ok(session)
+}
+
 #[tauri::command]
 async fn delete_session(h: H<'_>, id: String) -> Result<()> {
     blocking(&h, move |h| h.delete_session(&id)).await
@@ -608,7 +625,22 @@ async fn set_sync(
     .await
 }
 
-/// Runs one full sync and reports what it did.
+/// Saves the device-local WebDAV folder URL, username and app password; a
+/// blank URL disconnects WebDAV, an absent password keeps the saved one.
+#[tauri::command]
+async fn set_webdav(
+    h: H<'_>,
+    url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<harness::SyncStatus> {
+    blocking(&h, move |h| {
+        h.set_webdav(url.as_deref(), username.as_deref(), password.as_deref())
+    })
+    .await
+}
+
+/// Runs git, then WebDAV (whichever are configured) and reports what they did.
 #[tauri::command]
 async fn sync_now(h: H<'_>) -> Result<harness::SyncReport> {
     blocking(&h, |h| h.sync_now()).await
@@ -815,6 +847,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             load_session,
+            mobile_unlock,
             delete_session,
             session_state,
             knowledge_map,
@@ -854,6 +887,7 @@ pub fn run() {
             role_usage,
             sync_status,
             set_sync,
+            set_webdav,
             sync_now,
             acknowledge_conflicts,
             workbuddy_login_start,

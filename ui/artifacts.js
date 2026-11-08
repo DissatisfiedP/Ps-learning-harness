@@ -81,7 +81,9 @@ export function artifactFigure(op, alt, ctx = {}) {
   }
 
   const plugin = getPlugin(op.pluginId);
-  const canView = plugin && plugin.enabled !== false && plugin.hasView;
+  // A plugin that doesn't list this device's platform (a desktop-only one on
+  // a phone) keeps the fallback, so its answer views stay unanswerable here.
+  const canView = plugin && plugin.enabled !== false && plugin.hasView && plugin.onPlatform !== false;
   if (!canView) return figure;
 
   createViewHost({

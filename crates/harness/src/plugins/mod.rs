@@ -106,6 +106,9 @@ pub struct PluginInfo {
     pub package_hash: String,
     pub has_view: bool,
     pub tools: Vec<String>,
+    /// Its manifest lists this device's platform. When it doesn't, its tools
+    /// aren't offered here and the UI shows its figures as the fallback.
+    pub on_platform: bool,
     /// Folder plugins: why the latest edit on disk couldn't be loaded (the
     /// last good version stays in use). Absent when it loaded.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -388,6 +391,12 @@ impl PluginRegistry {
         &self.platform
     }
 
+    /// This device's platform (`desktop` | `mobile`). Startup decides it from
+    /// the build target; tests change it to run the mobile rules.
+    pub fn set_platform(&mut self, platform: &str) {
+        platform.clone_into(&mut self.platform);
+    }
+
     pub fn register(
         &mut self,
         plugin: Arc<dyn Plugin>,
@@ -497,6 +506,7 @@ impl PluginRegistry {
                     package_hash: e.package_hash.clone(),
                     has_view: !m.view.is_empty(),
                     tools: m.tool_names(),
+                    on_platform: self.on_platform(m),
                     load_error: e.watch.as_ref().and_then(|w| w.error.clone()),
                 }
             })
@@ -550,6 +560,28 @@ impl PluginRegistry {
         self.active(ids)
             .find(|e| e.plugin.tools().iter().any(|t| t.name == name))
             .map(|e| Arc::clone(&e.plugin))
+    }
+
+    /// The manifest of an installed plugin (enabled or not, any platform).
+    pub fn manifest(&self, id: &str) -> Option<&PluginManifest> {
+        self.entries
+            .iter()
+            .find(|e| e.manifest.id == id)
+            .map(|e| &e.manifest)
+    }
+
+    /// The installed plugin (enabled or not, any platform) that declares
+    /// tool `name`.
+    pub fn tool_owner(&self, name: &str) -> Option<&PluginManifest> {
+        self.entries
+            .iter()
+            .map(|e| &e.manifest)
+            .find(|m| m.tools.iter().any(|t| t.name == name))
+    }
+
+    /// Whether installed plugin `id` lists this device's platform.
+    pub fn is_on_platform(&self, id: &str) -> bool {
+        self.manifest(id).is_some_and(|m| self.on_platform(m))
     }
 
     /// The plugin that produced an artifact, if it is still installed.

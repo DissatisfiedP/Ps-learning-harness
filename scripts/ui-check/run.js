@@ -16,8 +16,13 @@
 //              sentence, A2 and A3 follow the message in creation order, and
 //              keyboard moves of A1's R2 slider re-solve through the bridge,
 //              update the probe and post a `state` line.
+//   sync       the whole app (index.html with the fake bridge) in each sync
+//              state: the Home indicator and banner, Settings → Sync (save
+//              git and WebDAV, Sync now, acknowledge, disconnect), the other
+//              Settings sections still in place, and no overflow at phone
+//              width. UI_CHECK_SHOTS=<dir> also saves screenshots there.
 //
-// Exit code 0 when every check passes. Usage: run.js [ipc|placement]...
+// Exit code 0 when every check passes. Usage: run.js [ipc|placement|sync]...
 
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,6 +69,11 @@ const server = Bun.serve({
       return html
         ? new Response(html, { headers: { 'content-type': 'text/html', 'content-security-policy': VIEW_CSP } })
         : new Response('no view', { status: 404 });
+    }
+    // The app page with the fake bridge loaded before any module.
+    if (url.pathname === '/index.html' && url.searchParams.has('check')) {
+      const html = read('ui/index.html').replace('<script src="./theme.js">', '<script src="/check/fake-tauri.js"></script>\n  <script src="./theme.js">');
+      return new Response(html, { headers: { 'content-type': 'text/html', 'content-security-policy': APP_CSP } });
     }
     const res = url.pathname.startsWith('/check/') ? file('scripts/ui-check', url.pathname.slice(7)) : file('ui', url.pathname.slice(1));
     return res ?? new Response('not found', { status: 404 });
@@ -280,7 +290,204 @@ async function placement() {
   console.log(`placement: A1 in the sentence, A2 and A3 appended in order; slider R2 → Vout ${vout.toFixed(3)} V through the bridge`);
 }
 
-const cases = { ipc, placement };
+// --- sync --------------------------------------------------------------------
+
+const SHOTS = process.env.UI_CHECK_SHOTS;
+
+/** The app page in one sync state (`?sync=`), at a viewport and colour scheme. */
+async function openApp(scenario, { width = 1440, height = 900, mobile = false, dark = false } = {}) {
+  const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
+  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
+  await send('Page.enable', {}, sessionId);
+  await send('Runtime.enable', {}, sessionId);
+  await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }, sessionId);
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: dark ? 'dark' : 'light' }] }, sessionId);
+  await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `window.__errors = [];
+      addEventListener('error', (e) => __errors.push(String(e.message)));
+      addEventListener('unhandledrejection', (e) => __errors.push(String(e.reason?.message ?? e.reason)));`,
+  }, sessionId);
+  await send('Page.navigate', { url: `http://tauri.localhost/index.html?check&sync=${scenario}` }, sessionId);
+  const evaluate = async (expression) => {
+    const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId);
+    if (r.exceptionDetails) throw new Error(`${expression}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+    return r.result.value;
+  };
+  await until(`the app (${scenario})`, () => evaluate(`document.readyState === 'complete' && Boolean(window.__bridge?.log.some((c) => c.cmd === 'sync_status'))`).catch(() => false));
+  await sleep(150);
+  const shot = async (name) => {
+    if (!SHOTS) return;
+    await sleep(400); // let the Settings sheet finish fading in
+    const { data } = await send('Page.captureScreenshot', { format: 'png' }, sessionId);
+    await Bun.write(join(SHOTS, `${name}.png`), Buffer.from(data, 'base64'));
+  };
+  const close = () => send('Target.closeTarget', { targetId });
+  return { evaluate, shot, close };
+}
+
+const HOME = `(() => {
+  const $ = (id) => document.getElementById(id);
+  const shown = (id) => !$(id).hidden && $(id).getClientRects().length > 0;
+  return {
+    indicator: shown('sync-indicator') ? $('sync-indicator').textContent : null,
+    indicatorName: $('sync-indicator').getAttribute('aria-label'),
+    syncNow: shown('sync-home-now'),
+    banner: shown('sync-banner'),
+    error: shown('sync-banner-error') ? $('sync-banner-error-text').textContent : null,
+    attention: shown('sync-banner-attention') ? $('sync-banner-attention-text').textContent : null,
+    overflow: document.documentElement.scrollWidth > innerWidth || $('home').scrollWidth > $('home').clientWidth
+      || $('sync-indicator').getBoundingClientRect().right > innerWidth,
+  };
+})()`;
+const SECTION = `(() => {
+  const $ = (id) => document.getElementById(id);
+  return {
+    git: $('sync-git-state').textContent, gitError: $('sync-git-error').hidden ? null : $('sync-git-error').textContent,
+    gitDisconnect: !$('sync-git-disconnect').hidden, tokenPlaceholder: $('sync-git-token').placeholder,
+    webdav: $('sync-webdav-state').textContent, webdavStatus: $('sync-webdav-status').textContent,
+    webdavDisconnect: !$('sync-webdav-disconnect').hidden, passwordPlaceholder: $('sync-webdav-password').placeholder,
+    syncNow: $('sync-now').textContent, syncNowDisabled: $('sync-now').disabled, status: $('sync-status').textContent,
+    paths: $('sync-attention').hidden ? [] : [...$('sync-paths').children].map((li) => li.textContent),
+    focus: document.activeElement?.id ?? null,
+  };
+})()`;
+const lastCall = (cmd) => `window.__bridge.log.filter((c) => c.cmd === '${cmd}').at(-1)?.args ?? null`;
+const fill = (id, value) => `(() => { const el = document.getElementById('${id}'); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input')); })()`;
+const click = (id) => `(document.getElementById('${id}').focus(), document.getElementById('${id}').click())`;
+const submit = (id) => `document.getElementById('${id}').requestSubmit()`;
+
+async function sync() {
+  // Nothing configured: no Home parts; Settings → Sync sits after Providers.
+  let page = await openApp('none');
+  let home = await page.evaluate(HOME);
+  expect(home.indicator === null && !home.syncNow && !home.banner, `unconfigured Home shows sync parts: ${JSON.stringify(home)}`);
+  await page.evaluate(click('open-settings'));
+  await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
+  const order = await page.evaluate(`[...document.querySelectorAll('#settings .settings-section > h2')].map((h) => h.textContent)`);
+  expect(JSON.stringify(order) === JSON.stringify(['Model roles', 'Learning', 'Focus', 'Providers', 'Sync', 'Plugins', 'Registries', 'Appearance']), `Settings sections: ${order}`);
+  const others = await page.evaluate(`({ providers: document.querySelectorAll('#provider-list .provider').length, plugins: document.querySelectorAll('#plugin-list .plugin').length, roles: document.getElementById('model-form').textContent.trim() })`);
+  expect(others.providers === 2 && others.plugins === 2 && others.roles.length > 0, `other Settings sections did not render: ${JSON.stringify(others)}`);
+  let section = await page.evaluate(SECTION);
+  expect(section.git === 'Not connected' && section.webdav === 'Not connected' && section.syncNowDisabled, `unconfigured section: ${JSON.stringify(section)}`);
+
+  // Save git, then WebDAV (a plain-http URL is refused with the backend's sentence).
+  await page.evaluate(fill('sync-git-remote', 'https://github.com/learner/notes.git'));
+  await page.evaluate(fill('sync-git-token', 'ghp-secret'));
+  await page.evaluate(submit('sync-git'));
+  await until('git saved', () => page.evaluate(`document.getElementById('sync-git-status').textContent === 'Saved.'`));
+  const gitArgs = await page.evaluate(lastCall('set_sync'));
+  expect(JSON.stringify(gitArgs) === JSON.stringify({ remote: 'https://github.com/learner/notes.git', token: 'ghp-secret', branch: 'main' }), `set_sync args: ${JSON.stringify(gitArgs)}`);
+  section = await page.evaluate(SECTION);
+  expect(section.git === 'Not synced yet · changes waiting' && section.gitDisconnect && /Saved/.test(section.tokenPlaceholder) && !section.syncNowDisabled, `after git save: ${JSON.stringify(section)}`);
+  await page.evaluate(fill('sync-webdav-url', 'http://dav.example.com/harness'));
+  await page.evaluate(fill('sync-webdav-username', 'learner'));
+  await page.evaluate(fill('sync-webdav-password', 'app-pass'));
+  await page.evaluate(submit('sync-webdav'));
+  await until('webdav refused', () => page.evaluate(`document.getElementById('sync-webdav-status').classList.contains('error')`));
+  section = await page.evaluate(SECTION);
+  expect(/https/.test(section.webdavStatus) && section.webdav === 'Not connected', `http WebDAV URL: ${JSON.stringify(section)}`);
+  await page.evaluate(fill('sync-webdav-url', 'https://dav.example.com/harness'));
+  await page.evaluate(submit('sync-webdav'));
+  await until('webdav saved', () => page.evaluate(`document.getElementById('sync-webdav-status').textContent === 'Saved.'`));
+  const davArgs = await page.evaluate(lastCall('set_webdav'));
+  expect(JSON.stringify(davArgs) === JSON.stringify({ url: 'https://dav.example.com/harness', username: 'learner', password: 'app-pass' }), `set_webdav args: ${JSON.stringify(davArgs)}`);
+  section = await page.evaluate(SECTION);
+  expect(section.webdav === 'Not synced yet · changes waiting' && /Saved/.test(section.passwordPlaceholder), `after WebDAV save: ${JSON.stringify(section)}`);
+
+  // Sync now: "Syncing…" while it runs, then the report and fresh state lines.
+  await page.evaluate(click('sync-now'));
+  section = await page.evaluate(SECTION);
+  expect(section.syncNow === 'Syncing…' && section.syncNowDisabled, `while syncing: ${JSON.stringify(section)}`);
+  home = await page.evaluate(HOME);
+  expect(home.indicator === 'Syncing…', `Home indicator while syncing: ${home.indicator}`);
+  await until('the sync report', () => page.evaluate(`document.getElementById('sync-status').textContent.startsWith('Synced')`));
+  section = await page.evaluate(SECTION);
+  expect(section.status === 'Synced. Git: 1 pulled, 1 pushed. WebDAV: 3 uploaded, 1 downloaded.' && section.git === 'Last synced just now' && section.webdav === 'Last synced just now' && section.focus === 'sync-now', `after Sync now: ${JSON.stringify(section)}`);
+  await page.shot('settings-sync-desktop');
+
+  // A saved secret is kept when its field stays empty.
+  await page.evaluate(fill('sync-git-branch', 'notes'));
+  await page.evaluate(submit('sync-git'));
+  await until('branch saved', () => page.evaluate(`${lastCall('set_sync')}?.branch === 'notes'`));
+  const kept = await page.evaluate(lastCall('set_sync'));
+  expect(kept.token === null && (await page.evaluate(`window.__bridge.sync.token`)) === 'ghp-secret', `empty token field did not keep the saved token: ${JSON.stringify(kept)}`);
+
+  // Close Settings: Home shows "Synced just now" and Sync now.
+  await page.evaluate(`document.getElementById('settings').close()`);
+  home = await page.evaluate(HOME);
+  expect(home.indicator === 'Synced just now' && home.indicatorName === 'Synced just now. Sync settings' && home.syncNow && !home.banner, `Home after sync: ${JSON.stringify(home)}`);
+
+  // Indicator opens Settings at the Sync heading; WebDAV disconnects alone.
+  await page.evaluate(click('sync-indicator'));
+  await until('Settings at Sync', () => page.evaluate(`document.activeElement?.id === 'sync-heading'`));
+  await page.evaluate(click('sync-webdav-disconnect'));
+  await until('WebDAV disconnected', () => page.evaluate(`document.getElementById('sync-webdav-state').textContent === 'Not connected'`));
+  const off = await page.evaluate(lastCall('set_webdav'));
+  section = await page.evaluate(SECTION);
+  expect(off.url === '' && section.git === 'Last synced just now' && section.focus === 'sync-webdav-url', `WebDAV disconnect: ${JSON.stringify({ off, section })}`);
+
+  // A failing sync_status hides the Home parts quietly.
+  await page.evaluate(`document.getElementById('settings').close()`);
+  await page.evaluate(`window.__bridge.sync.statusFails = true; document.getElementById('home').hidden = true`);
+  await page.evaluate(`document.getElementById('home').hidden = false`);
+  await until('the indicator to hide', () => page.evaluate(`document.getElementById('sync-indicator').hidden`), 3_000).catch(() => null);
+  home = await page.evaluate(HOME);
+  expect(home.indicator === null && !home.syncNow && !home.banner, `failing sync_status still shows: ${JSON.stringify(home)}`);
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+
+  // A recorded error: banner and "Not synced"; Try again clears both.
+  page = await openApp('error');
+  home = await page.evaluate(HOME);
+  expect(home.indicator === 'Not synced' && home.error === 'Not synced: the token was rejected; save a new one in Settings → Sync' && !home.attention, `error Home: ${JSON.stringify(home)}`);
+  await page.shot('home-error-desktop');
+  await page.evaluate(click('sync-banner-retry'));
+  await until('the banner to clear', () => page.evaluate(`document.getElementById('sync-banner').hidden`));
+  home = await page.evaluate(HOME);
+  expect(home.indicator === 'Synced just now' && (await page.evaluate(`document.activeElement?.id`)) === 'sync-indicator', `after Try again: ${JSON.stringify(home)}`);
+  await page.close();
+
+  // Needs attention: banner, Review opens the list, Acknowledge clears it.
+  page = await openApp('attention');
+  home = await page.evaluate(HOME);
+  expect(home.indicator === 'Synced 5 min ago' && home.attention === '2 files changed on two devices need a look.' && !home.error, `attention Home: ${JSON.stringify(home)}`);
+  await page.shot('home-attention-desktop');
+  await page.evaluate(click('sync-banner-review'));
+  await until('the attention list', () => page.evaluate(`document.activeElement?.id === 'sync-attention-heading'`));
+  section = await page.evaluate(SECTION);
+  expect(JSON.stringify(section.paths) === '["graph/topics.json","prompts/tutor.md"]', `attention list: ${JSON.stringify(section.paths)}`);
+  await page.shot('settings-attention-desktop');
+  await page.evaluate(click('sync-acknowledge'));
+  await until('acknowledged', () => page.evaluate(`document.getElementById('sync-attention').hidden`));
+  section = await page.evaluate(SECTION);
+  expect(section.status === 'Acknowledged.' && section.focus === 'sync-heading', `after Acknowledge: ${JSON.stringify(section)}`);
+  await page.evaluate(`document.getElementById('settings').close()`);
+  home = await page.evaluate(HOME);
+  expect(!home.banner, `banner after Acknowledge: ${JSON.stringify(home)}`);
+  await page.close();
+
+  // Phone width, both themes: the header wraps instead of overflowing.
+  for (const dark of [false, true]) {
+    const theme = dark ? 'dark' : 'light';
+    page = await openApp('error', { width: 390, height: 844, mobile: true, dark });
+    home = await page.evaluate(HOME);
+    expect(!home.overflow && home.indicator === 'Not synced', `phone Home (${theme}): ${JSON.stringify(home)}`);
+    await page.shot(`home-error-phone-${theme}`);
+    await page.evaluate(click('sync-indicator'));
+    await until('Settings at Sync', () => page.evaluate(`document.activeElement?.id === 'sync-heading'`));
+    const wide = await page.evaluate(`document.getElementById('settings').scrollWidth > document.getElementById('settings').clientWidth`);
+    expect(!wide, `phone Settings (${theme}) overflows sideways`);
+    await page.shot(`settings-sync-phone-${theme}`);
+    await page.close();
+  }
+  page = await openApp('synced', { dark: true });
+  await page.shot('home-synced-desktop-dark');
+  await page.close();
+  console.log('sync: indicator, banner, Settings → Sync (save, refuse, Sync now, keep secret, disconnect, acknowledge) and phone layout checked');
+}
+
+const cases = { ipc, placement, sync };
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases);
 try {
   for (const name of wanted) {

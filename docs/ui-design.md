@@ -438,7 +438,8 @@ state at a time:
 | **Note: plan** | `phase === "plan"` with the planner running. | "Drafting your plan…" No button. |
 | **Note: approval** | `phase === "awaitApproval"`. | "Plan ready." plus the secondary button "Go to plan". |
 | **Ended** | `session_state.ended` (Learn, not read-only). | "Session complete." plus the primary button "Practise these ideas" (§7.9). With no plan nodes: "Start a new session" instead. |
-| **Read-only** | `SessionSummary.readOnly`. | "Made with an older tutor. Read-only." plus the primary button "Start a new session" (goes to Home in Learn mode). |
+| **Read-only** | `SessionSummary.readOnly` with `readOnlyReason` `"legacy"`. | "Made with an older tutor. Read-only." plus the primary button "Start a new session" (goes to Home in Learn mode). |
+| **Read-only: desktop plugin** | `readOnly` with `readOnlyReason === "desktop-plugin"` (on a phone or tablet, the session used a plugin that only runs on desktop; `docs/sync-build.md`, "Sessions on mobile"). | "⟨names⟩ only runs on desktop. Continue this session on desktop." (`desktopOnlyPlugins` joined "A, B and C"; "run" for more than one) plus the secondary button "Continue here anyway", which calls `mobile_unlock({ sessionId })` and re-opens the session, now writable. On failure the note reads "Couldn’t continue here: ⟨error⟩". |
 
 The notes are status, not instructions: the button next to each one already says what to do, so the note only names the state (copy rule (a), §7.10).
 
@@ -486,8 +487,8 @@ Live reply (`#live`):
 Desktop:
 
 ```
- P's Learning Harness                                         Map   Settings
- (wordmark, --fs-ui 600 --ink-2, plain text)    (text buttons)
+ P's Learning Harness                  Synced 5 min ago  Sync now  Map  Settings
+ (wordmark, --fs-ui 600 --ink-2, plain text)    (text buttons; the sync pair only when a target is set)
 
             ┌────────────────────────────────────────────┐
             │ CONTINUE                                   │ ← secondary button, only when the
@@ -512,6 +513,9 @@ Desktop:
 ```
 
 - **Column:** the same `--measure` column as the session page, so it widens with it (§5.2). The top bar holds the wordmark (plain text, no logo mark) and two text buttons, "Map" (§7.6) and "Settings". "Map" is hidden when there is no app backend. Vertical offset: `--s9` above the display line on desktop, `--s7` on phone.
+- **Sync indicator** (before "Map", only when git or WebDAV is configured, §7.5.2): a text button reading "Syncing…" while a sync started from this window runs, "Not synced" when a configured target has a last error or unsent changes, otherwise "Synced ⟨just now | 5 min ago | 3 h ago | yesterday | on 3 Nov⟩" from the newest `lastSyncAt`, with the full time as its `title`. Its accessible name adds the destination ("Synced 5 min ago. Sync settings"); pressing it opens Settings scrolled to the Sync heading, which takes focus. Next to it a "Sync now" text button runs `sync_now` (disabled while it runs). Both hide when nothing is configured or `sync_status` fails; the failure is not shown. The links wrap under the wordmark on a narrow phone.
+- **Sync banner** (Home only, never in sessions): above "Your sessions", `role="status"`, in the `sessions-error` style. "Not synced: ⟨first target's last error⟩" in `--danger` with a "Try again" text button (runs `sync_now`), and/or "⟨n⟩ files changed on two devices need a look." in `--ink-2` with a "Review" text button (opens Settings at the needs-attention list). Hidden when neither applies.
+- **Sync refresh:** `sync_status` is read when Home shows, every 60 s while Home is visible and the window is in front (no timer otherwise), when Settings opens and after every sync command.
 - **Mode:** a real radio group (`fieldset` + `legend` "Mode", visually hidden legend), replacing `role="tablist"` (wrong semantics). The two options sit on one line and show their names only (`--fs-ui` 600), with no description. The display line already says what each mode is for ("What do you want to learn?" / "…to practise?"), so a description restated it (copy rule (a), §7.10); cutting it also keeps the start area to the question, the choice and the input. Switching mode updates the display line and placeholder from today's `COPY` ("A topic or goal…" / "A topic or problem set…").
 - **Continue:** see §7.9.
 - **Input:** the same `#composer` element moved into the home slot (keep today's slot mechanism). Its label is the display line (`aria-labelledby` = `#hero`). The button reads "Start" (primary).
@@ -811,12 +815,14 @@ See §6.2. In addition:
 | `load_session` failed | Home: the inline status under the clicked row, "Couldn't open this session: ⟨message⟩" | `--danger` | — |
 | Planner failed | §7.2.8 | — | — |
 
-#### 7.2.12 Read-only legacy sessions
+#### 7.2.12 Read-only sessions
 
 - The head shows back, title, and "Read-only" in `--ink-3` in place of the phase. There is no Plan button.
 - The flow renders from the ops, with unanswered exercises showing "Not answered.".
-- The desk is in the read-only state (§6.3).
-- Focus on open goes to "Start a new session" with `preventScroll`.
+- The desk is in the read-only state (§6.3): the legacy note, or the desktop-plugin note on a phone.
+- Focus on open goes to the desk note's button ("Start a new session" or "Continue here anyway") with `preventScroll`.
+- A phone session locks after a turn that used a desktop-only plugin: when a `tool` or `artifact` op whose `platforms` lacks `mobile` arrives, the tutor's `turnEnd` triggers one `load_session`, and the session is re-opened if it came back read-only. The session list keeps "Learn" for it (the list reads only each file's head).
+- A figure from a plugin that is installed but doesn't list this device's platform (`PluginInfo.onPlatform` false) shows its fallback SVG; as an answer view it adds "This figure’s plugin doesn’t run on this device." and takes no answer.
 
 #### 7.2.13 Composer: files, paste, drop, `@` mentions
 
@@ -949,6 +955,11 @@ Settings is a modal `<dialog>` that fills the viewport (`inline-size: 100vw; blo
  OpenAI           Not connected             Connect
  …
 
+ Sync                                          ← §7.5.2
+ Settings stay on this device.
+ Git      Last synced 5 min ago   …   WebDAV   Not connected   …
+ [Sync now]
+
  Focus
  [x] Full screen in sessions
  [x] Silence notifications in sessions (mako)  ← only when a backend is detected
@@ -984,6 +995,7 @@ Settings is a modal `<dialog>` that fills the viewport (`inline-size: 100vw; blo
 - **Appearance** is new and UI-only: a radio group bound to `localStorage["lh.theme"]`.
 - **Learning** is new (§7.7.7): one radio group, "Starting point for new sessions" (Measure me / Quick check / I'm new to this), read from `get_settings().startingPoint` and written with `set_starting_point({ value })`. Each option carries one help line under it; a `<p class="status" role="status">` beside the group says "Saving…" → "Saved." or the error, and the stored choice is put back on failure. It sits between Model roles and Focus.
 - **Focus** is UI-only and sits right after Model roles: three checkboxes bound to `localStorage["lh.focus.fullscreen" | "lh.focus.dnd" | "lh.focus.breaks"]` (`"on"`/`"off"`, default on). No help text: the labels say what each does (§7.8).
+- **Sync** sits right after Providers; see §7.5.2.
 - Phone: the same single column; button rows wrap.
 
 #### 7.5.1 Consent screen
@@ -1005,6 +1017,35 @@ Every install, update, reinstall from the lock and folder addition opens the sam
 - **While installing** both buttons are disabled and the status reads "Installing…". On failure (hash mismatch, invalid package, a section using the plugin) the error stays in the status line in `--danger`, both buttons come back and focus returns to Install; the dialog does not close. On success it closes and the caller's row updates (plan chip → checkbox, Settings row, missing panel); from a plan chip the announcer also says "⟨Title⟩ installed."
 - **No consent screen without a candidate:** a plan chip whose id no cached registry lists reports that in the plan card instead (§7.2.16).
 - **Reason.** D9/D10: installing runs third-party code, so the learner sees what it is, where it comes from and what it may touch, and agrees in one place that is the same everywhere. Focus on the safe action matches the other confirmations (§7.2.13's image confirmation focuses "Keep editing").
+
+#### 7.5.2 Sync
+
+The **Sync** section sits right after Providers (`#sync-section`, `ui/sync.js`). Help line: "Settings stay on this device."
+
+```
+ Sync
+ Settings stay on this device.
+ Git          Last synced 5 min ago · 2 ahead      ← h3 + state line (--fs-small --ink-3)
+ the token was rejected; …                       ← lastError, --danger, only when set
+ Remote URL   [https://github.com/you/notes.git]
+ Access token [Saved · leave empty to keep]       ← password field; placeholder only when hasToken
+ Branch       [main]
+ [Save]  Disconnect                              ← Disconnect only when configured
+ WebDAV       Not connected
+ URL [https://…]  HTTPS only, or a localhost test server.
+ Username [ ]  App password [ ]
+ [Save]
+ Needs attention                                 ← only when needsAttention is not empty
+ The other device's copy is kept in .conflicts/; this device's version was kept.
+ • graph/topics.json                             ← monospace
+ [Acknowledge]
+ [Sync now]   Synced. Git: 1 pulled, 2 pushed. WebDAV: 3 uploaded, 1 downloaded.
+```
+
+- **Two targets, one form each** (`set_sync { remote, token, branch }`, `set_webdav { url, username, password }`). Each has its state line ("Not connected", "Not synced yet", or "Last synced ⟨relative⟩", then "⟨n⟩ ahead", "⟨n⟩ behind" or "changes waiting"), its last error, an inline status ("Saving…" → "Saved." or the backend's sentence, e.g. a plain-http WebDAV URL) and Disconnect (`remote: ''` / `url: ''`; no confirmation, like removing a provider key). Focus moves to the target's first field when Disconnect hides.
+- **Secrets** are never shown. A saved token or app password shows as the placeholder "Saved · leave empty to keep"; an empty field sends `null`, which keeps it. The fields are filled from `sync_status` on each Settings open.
+- **Sync now** (secondary; enabled when a target is configured) reads "Syncing…" and is disabled while it runs, then re-reads `sync_status` so each target's error shows on its own line. The section status gives the report ("Synced. Git: … WebDAV: …") or the combined error.
+- **Needs attention** lists the parked paths with one "Acknowledge" (`acknowledge_conflicts`); afterwards the status says "Acknowledged." and focus moves to the Sync heading.
 
 ### 7.6 Learning map (its own page)
 
@@ -1752,7 +1793,8 @@ Nothing in this table scrolls, moves focus or animates.
    - the composer (§7.2.13): `pick_files() -> path[]`, `stage_image({ data, name? }) -> Attachment`, `unstage_image({ path })`, `stage_file({ sessionId?, path }) -> Attachment`, `attachment_data({ path }) -> data URL`, `mentions({ sessionId?, query }) -> Mention[]`, `vision_capabilities() -> { tutor, practice }`. An `Attachment` is `{ kind: image | file | folder, path, mediaType?, bytes?, name? }`;
    - the workspace (§7.2.14): `pick_folder() -> path`, `attach_workspace({ sessionId, path }) -> name`, `detach_workspace({ sessionId })`, `workspace_path({ sessionId }) -> path | null`;
    - plugin views (§7.2.15): `plugin_view({ pluginId })`, `plugin_view_url({ pluginId })`, `plugin_view_call({ pluginId, function, args })`, `view_state({ sessionId, artifactId, summary })`, and the shell's `pluginview` URI scheme that serves the view document (§7.2.17);
-   - plugins and registries (§7.2.16, §7.2.18, §7.5.1): `plugins()`, `set_plugin_enabled({ id, enabled })`, `install_plugin({ registry, id, version })`, `add_folder_plugin({ path })`, `remove_plugin({ id })`, `missing_locked()`, `registries()`, `add_registry({ name, url })`, `remove_registry({ url })`, `refresh_registries()`, `registry_catalog()`, `install_candidate({ id })`.
+   - plugins and registries (§7.2.16, §7.2.18, §7.5.1): `plugins()`, `set_plugin_enabled({ id, enabled })`, `install_plugin({ registry, id, version })`, `add_folder_plugin({ path })`, `remove_plugin({ id })`, `missing_locked()`, `registries()`, `add_registry({ name, url })`, `remove_registry({ url })`, `refresh_registries()`, `registry_catalog()`, `install_candidate({ id })`;
+   - sync (§7.1, §7.5.2): `sync_status()`, `set_sync({ remote, token, branch })`, `set_webdav({ url, username, password })`, `sync_now()`, `acknowledge_conflicts()`, shapes in `docs/sync-build.md`.
 
    Nothing else in Rust changes for the UI.
    - **Events:** subscribe once via `subscribe_events({ onEvent: channel })`. The event kinds are `session`, `turnStart`, `text`, `thinking`, `op` and `turnEnd(error?)`.
@@ -1789,6 +1831,7 @@ Nothing in this table scrolls, moves focus or animates.
      - `compaction` → divider; `title` → head title.
    - **Practice** keeps `send_message({ sessionId, mode:"practice", text, onEvent })` and `retry_reply` with per-call channels, and adds `attachments?` (images only, §7.3). Learn never calls `send_message`.
    - **Legacy** `readOnly` sessions: render read-only, no composer, "Start a new session" → Home.
+   - **Mobile lock** (`readOnlyReason === "desktop-plugin"`): render read-only with the desktop-plugin note; "Continue here anyway" → `mobile_unlock({ sessionId })` → re-open (§6.3, §7.2.12).
 2. **Accessibility (hard requirement):**
    - WCAG 2.2 AA at minimum: contrast as in §5.3, 1.4.11 non-text contrast for control borders and focus, 2.4.7 and 2.4.11 focus visible and not obscured (scroll-padding), 2.5.8 target size, 1.4.10 reflow at 320 px, 1.4.12 text spacing (nothing clips if line-height becomes 1.5× and paragraph spacing 2×), 2.2.2 no blinking, 4.1.3 status messages.
    - Real labelled controls only: native `button`, `input`, `textarea`, `fieldset`/`legend`, `dialog`, `details`.

@@ -90,6 +90,8 @@ pub(crate) fn tool_op(call: &ToolCall, agent: Option<&str>) -> Op {
         args: call.arguments.clone(),
         result: None,
         agent: agent.map(str::to_owned),
+        plugin: None,
+        platforms: None,
     })
 }
 
@@ -105,6 +107,8 @@ pub(crate) fn result_op(call: &ToolCall, content: &str, is_error: bool, agent: O
             is_error,
         }),
         agent: agent.map(str::to_owned),
+        plugin: None,
+        platforms: None,
     })
 }
 
@@ -144,8 +148,16 @@ impl Harness {
         )
     }
 
-    /// Ops of a writable Learn session.
+    /// Ops of a writable Learn session: one the agent runtime wrote and, on
+    /// mobile, not locked for a desktop-only plugin (`mobile.rs`).
     pub(crate) fn learn_ops(&self, session_id: &str) -> Result<Vec<Op>, Error> {
+        let ops = self.runtime_learn_ops(session_id)?;
+        self.check_mobile_lock(&ops)?;
+        Ok(ops)
+    }
+
+    /// Ops of a Learn session the agent runtime wrote (the legacy rule only).
+    pub(crate) fn runtime_learn_ops(&self, session_id: &str) -> Result<Vec<Op>, Error> {
         let parsed = self.store.parsed_ops(session_id)?;
         let mode = parsed.ops.iter().find_map(|o| match o {
             Op::Session(h) => Some(h.mode),
@@ -372,11 +384,22 @@ impl Harness {
         if workspace {
             flags.insert("workspace".to_owned());
         }
+        // What this device lacks (docs/sync-build.md, "Sessions on mobile"):
+        // desktop-only plugins the session used, and a folder attached on
+        // another device. Their lines go under the pinned state.
+        let (notes, unavailable) = self.device_notes(ops, state, workspace);
+        let mut session_state =
+            Composer::session_state_with(state, Some(&self.saved_starting_point()));
+        if !notes.is_empty() {
+            session_state.push_str("\n## This device\n");
+            for note in notes {
+                session_state.push_str("- ");
+                session_state.push_str(&note);
+                session_state.push('\n');
+            }
+        }
         let mut base = TemplateValues::new();
-        base.set(
-            "session_state",
-            Composer::session_state_with(state, Some(&self.saved_starting_point())),
-        );
+        base.set("session_state", session_state);
         base.set(
             "workspace_name",
             state
@@ -384,11 +407,17 @@ impl Harness {
                 .clone()
                 .unwrap_or_else(|| "workspace".into()),
         );
+        let active: Vec<String> = state
+            .active_plugins
+            .iter()
+            .filter(|p| !unavailable.contains(p))
+            .cloned()
+            .collect();
         let (fragments, plugin_tools) = {
             let registry = self.plugin_registry();
             (
-                registry.fragments(&state.active_plugins, "tutor"),
-                registry.tool_specs(&state.active_plugins, "tutor"),
+                registry.fragments(&active, "tutor"),
+                registry.tool_specs(&active, "tutor"),
             )
         };
         let mut values = TemplateValues::new();
@@ -648,12 +677,39 @@ impl Harness {
                 }
                 continue;
             }
+            let mobile = self.is_mobile();
             let mut paused = false;
             for call in &calls {
-                self.append(session_id, tool_op(call, None))?;
+                // A plugin call records the plugin and where it runs, so a
+                // device without it can apply the mobile rule (mobile.rs).
+                let mut op = tool_op(call, None);
+                let stamp = self.plugin_stamp(&ops, &call.name);
+                // On mobile: the desktop-only plugin this call goes to.
+                let desktop_only = stamp
+                    .as_ref()
+                    .filter(|(_, p)| {
+                        mobile && p.as_deref().is_some_and(crate::mobile::desktop_only)
+                    })
+                    .map(|(plugin, _)| plugin.clone());
+                if let (Op::Tool(t), Some((plugin, platforms))) = (&mut op, stamp) {
+                    t.plugin = Some(plugin);
+                    t.platforms = platforms;
+                }
+                self.append(session_id, op)?;
                 if paused {
                     let msg = "not run: wait for the learner's answer to your question first (one question per turn); call it again then if you still need it";
                     self.append(session_id, result_op(call, msg, true, None))?;
+                    continue;
+                }
+                // Refused here, and the turn goes on: the recorded call locks
+                // the session on this device once the turn ends (unless the
+                // learner already chose "Continue here anyway" for it).
+                if let Some(plugin) = desktop_only {
+                    let msg = format!(
+                        "{} refused: `{plugin}` only runs on desktop; teach without it",
+                        call.name
+                    );
+                    self.append(session_id, result_op(call, &msg, true, None))?;
                     continue;
                 }
                 let started = std::time::Instant::now();
@@ -765,6 +821,11 @@ impl Harness {
         let name = call.name.as_str();
         let args = &call.arguments;
         if !offered.iter().any(|t| t.name == name) {
+            // A folder attached on another device isn't one here: say that,
+            // not "wrong phase" (docs/sync-build.md, "Sessions on mobile").
+            if name == "workspace_write" && lock(&self.workspaces).get(session_id).is_none() {
+                return Ok(refuse(name, "no workspace is attached to this session"));
+            }
             let state = self.session_state(session_id)?;
             return Ok(refuse(
                 name,
@@ -1529,6 +1590,13 @@ impl Harness {
                 "the plugin that made `{artifact_id}` is disabled; ask without the view"
             ));
         }
+        // A desktop-only plugin installed on a phone still doesn't run there,
+        // so its figure stays the fallback and can't take an answer.
+        if !registry.is_on_platform(&artifact.plugin_id) {
+            return Err(format!(
+                "the plugin that made `{artifact_id}` doesn't run on this device; ask without the view"
+            ));
+        }
         if !state.active_plugins.contains(&artifact.plugin_id) {
             return Err(format!(
                 "the plugin that made `{artifact_id}` isn't active in this section; ask without the view"
@@ -1771,6 +1839,7 @@ impl Harness {
             input: args.clone(),
             data: artifact.data,
             fallback_svg: svg,
+            platforms: Some(manifest.platforms),
         };
         if let Err(e) = self.append(session_id, Op::Artifact(op)) {
             return refuse(name, format!("couldn't store the artifact ({e})"));
@@ -3128,6 +3197,8 @@ mod tests {
                     args: json!({"role":"probe","level":"use","format":"free","prompt":"p","answer":"a"}),
                     result: None,
                     agent: None,
+                    plugin: None,
+                    platforms: None,
                 })
             })
             .collect()
@@ -3186,6 +3257,8 @@ mod tests {
                 is_error: true,
             }),
             agent: None,
+            plugin: None,
+            platforms: None,
         }));
         assert!(matches!(gate_question(&six, &quick, &probe), Exec::Pause));
     }

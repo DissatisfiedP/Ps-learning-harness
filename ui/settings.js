@@ -1,12 +1,13 @@
 // Settings dialog: per-role model choices, provider connections, focus
-// mode, and the theme override. Statuses are inline (role="status") next to the control
-// that caused them and persist until the next action in that group.
+// mode, and the theme override (the Sync section lives in sync.js). Statuses are inline
+// (role="status") next to the control that caused them and persist until the next action in that group.
 
 import { call, message } from './api.js';
 import { escapeHtml } from './markdown.js';
 import { initPluginSettings } from './pluginui.js';
 import { dndSupport, focusPref, setFocusPref } from './focus.js';
 import { modelSearch } from './modelsearch.js';
+import { syncSettingsOpened } from './sync.js';
 
 const dialog = document.getElementById('settings');
 const modelForm = document.getElementById('model-form');
@@ -122,11 +123,13 @@ function setTheme(value) {
 // ---------- dialog ----------
 
 export async function openSettings() {
+  const sync = syncSettingsOpened();
   try {
     await reload();
   } catch (e) {
     modelForm.innerHTML = `<p class="status error" role="status">Couldn’t load settings: ${escapeHtml(message(e))}</p>`;
   }
+  await sync;
   if (!dialog.open) dialog.showModal();
   renderDndRow();
   try {

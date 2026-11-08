@@ -348,7 +348,9 @@ function viewAnswer(item, { onAnswer, ctx }) {
     }),
   );
   const plugin = getPlugin(artifact.pluginId);
-  if (!plugin?.hasView || plugin.enabled === false) {
+  if (plugin && plugin.onPlatform === false) {
+    figure.append(h('p', 'waiting', 'This figure’s plugin doesn’t run on this device.'));
+  } else if (!plugin?.hasView || plugin.enabled === false) {
     // The fallback picture can't take an answer; say why instead of waiting silently.
     figure.append(h('p', 'waiting', 'Plugin missing or off. Fix in Settings → Plugins.'));
   }

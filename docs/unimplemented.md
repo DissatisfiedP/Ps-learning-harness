@@ -50,8 +50,6 @@ build order these items follow.
 - **Graph**: the op log, builder job, aliases, chains, splitter and read model exist; the Map has **no**
   surface for split proposals, learner drag-to-move of a node, or a node's provenance. The builder has never
   run against a real model.
-- **Sync has no UI**: `sync_status`/`set_sync`/`sync_now`/`acknowledge_conflicts` are commands only; Settings
-  has no remote/token/status/needs-attention surface (deliberately deferred by the owner).
 - **Plan sheet during teaching**: status + free-text change, not the plan card's structured controls.
 - **Debrief**: claims are recorded and sorted by the model, but the UI has no sorted-claim list.
 - **`targetLevel`** is schema-optional, so a plan section can arrive without one.
@@ -68,5 +66,4 @@ build order these items follow.
 ## 4. Deliberately not built
 
 - **Code-execution plugins** — `sandbox`, `code-runner`, `repl`, `cas`, tree-sitter — excluded by the owner.
-- **Sync UI** — excluded by the owner for now.
 - **iOS** — blocked on hardware/account, not design.

@@ -1,6 +1,7 @@
-// Stand-in for the Tauri bridge, loaded before the UI modules by host.html.
-// It answers only the commands the artifact figures and view host use, and
-// logs every call, so run.js can prove that nothing inside a view frame
+// Stand-in for the Tauri bridge, loaded before the UI modules by host.html
+// and by the app page (index.html?check). It answers the commands the
+// artifact figures and view host use, plus sync and what the app shell reads
+// at startup, and logs every call, so run.js can prove that nothing inside a view frame
 // reached it. `window.ipc` and `window.webkit.messageHandlers.ipc` mimic the
 // platform IPC handles Tauri installs in the main frame; any use is an escape.
 (() => {
@@ -44,7 +45,115 @@
     throw new Error(`\`${fn}\` is not one of the view's callable functions`);
   };
 
+  // Sync (docs/sync-build.md) for the `sync` case, which loads the whole app
+  // (index.html?check). `?sync=` picks the starting state: none (default),
+  // synced, error or attention. A remote or URL containing "offline" fails.
+  const ago = (min) => new Date(Date.now() - min * 60_000).toISOString();
+  const sync = {
+    remote: null, token: null, branch: 'main', lastSyncAt: null, lastError: null, ahead: 0, behind: 0, unsynced: false,
+    needsAttention: [], statusFails: false, // run.js flips statusFails to prove the indicator hides quietly
+    webdav: { url: null, username: null, password: null, lastSyncAt: null, lastError: null, unsynced: false },
+  };
+  const scenario = new URLSearchParams(location.search).get('sync') ?? 'none';
+  if (scenario !== 'none') {
+    Object.assign(sync, { remote: 'https://github.com/learner/notes.git', token: 'ghp-check', lastSyncAt: ago(5) });
+    Object.assign(sync.webdav, { url: 'https://dav.example.com/harness', username: 'learner', password: 'app-pass', lastSyncAt: ago(12) });
+  }
+  if (scenario === 'error') Object.assign(sync, { lastError: 'the token was rejected; save a new one in Settings → Sync', unsynced: true, ahead: 2 });
+  if (scenario === 'attention') sync.needsAttention = ['graph/topics.json', 'prompts/tutor.md'];
+  const syncStatus = () => ({
+    configured: Boolean(sync.remote), remote: sync.remote, branch: sync.branch, lastSyncAt: sync.lastSyncAt,
+    lastError: sync.lastError, unsynced: sync.unsynced, ahead: sync.ahead, behind: sync.behind,
+    needsAttention: [...sync.needsAttention], hasToken: Boolean(sync.token),
+    webdav: {
+      configured: Boolean(sync.webdav.url), url: sync.webdav.url, username: sync.webdav.username,
+      hasPassword: Boolean(sync.webdav.password), lastSyncAt: sync.webdav.lastSyncAt,
+      lastError: sync.webdav.lastError, unsynced: Boolean(sync.webdav.url) && (sync.webdav.unsynced || !sync.webdav.lastSyncAt),
+    },
+  });
+  const davUrl = /^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$))/i;
+  const syncHandlers = {
+    sync_status: () => {
+      if (sync.statusFails) throw new Error('could not read sync.json');
+      return syncStatus();
+    },
+    set_sync: ({ remote, token, branch }) => {
+      const r = remote?.trim();
+      if (!r) Object.assign(sync, { remote: null, token: null, needsAttention: [], lastError: null, ahead: 0, behind: 0, unsynced: false });
+      else {
+        if (r !== sync.remote) sync.unsynced = true;
+        sync.remote = r;
+        if (token != null) sync.token = token.trim() || null;
+        sync.lastError = null;
+      }
+      if (branch?.trim()) sync.branch = branch.trim();
+      return syncStatus();
+    },
+    set_webdav: ({ url, username, password }) => {
+      const u = url?.trim();
+      if (!u) {
+        sync.webdav = { url: null, username: null, password: null, lastSyncAt: null, lastError: null, unsynced: false };
+        return syncStatus();
+      }
+      if (!davUrl.test(u)) throw new Error('WebDAV needs an https:// address (http only for localhost).');
+      if (u !== sync.webdav.url) Object.assign(sync.webdav, { lastSyncAt: null, unsynced: true });
+      Object.assign(sync.webdav, { url: u, username: username?.trim() || null, lastError: null });
+      if (password != null) sync.webdav.password = password || null;
+      return syncStatus();
+    },
+    sync_now: () => new Promise((resolve, reject) => {
+      setTimeout(() => {
+        if (!sync.remote && !sync.webdav.url) return reject('sync is not configured');
+        const errors = [];
+        const report = { committed: false, pulled: 0, pushed: 0, conflicts: [], needsAttention: [], webdav: null };
+        if (sync.remote) {
+          if (sync.remote.includes('offline')) {
+            sync.lastError = 'the network is unreachable; try again when you are online';
+            errors.push(sync.lastError);
+          } else {
+            Object.assign(report, { committed: true, pulled: 1, pushed: sync.ahead || 1 });
+            Object.assign(sync, { lastSyncAt: new Date().toISOString(), lastError: null, unsynced: false, ahead: 0, behind: 0 });
+          }
+        }
+        if (sync.webdav.url) {
+          if (sync.webdav.url.includes('offline')) {
+            sync.webdav.lastError = 'the WebDAV server could not be reached';
+            errors.push(`WebDAV: ${sync.webdav.lastError}`);
+          } else {
+            report.webdav = { uploaded: 3, downloaded: 1, merged: 0, deletedRemote: 0, deletedLocal: 0, skipped: 0 };
+            Object.assign(sync.webdav, { lastSyncAt: new Date().toISOString(), lastError: null, unsynced: false });
+          }
+        }
+        return errors.length ? reject(errors.join('; ')) : resolve(report);
+      }, 400);
+    }),
+    acknowledge_conflicts: () => {
+      sync.needsAttention = [];
+      return syncStatus();
+    },
+  };
+
+  // The rest of what the app shell asks for at startup and when Settings opens.
+  const appHandlers = {
+    subscribe_events: () => null,
+    list_sessions: () => [],
+    list_providers: () => [
+      { id: 'anthropic', name: 'Anthropic', source: 'saved', credential: 'api-key', keyUrl: null, defaultBaseUrl: 'https://api.anthropic.com' },
+      { id: 'openai', name: 'OpenAI', source: null, keyUrl: 'https://platform.openai.com/api-keys', defaultBaseUrl: 'https://api.openai.com/v1' },
+    ],
+    get_settings: () => ({ roles: {} }),
+    list_roles: () => [],
+    role_usage: () => [],
+    focus_dnd_support: () => null,
+    missing_locked: () => [],
+    registries: () => [],
+    registry_catalog: () => [],
+    frontier: () => [],
+  };
+
   const handlers = {
+    ...syncHandlers,
+    ...appHandlers,
     plugins: () => plugins,
     plugin_view: ({ pluginId }) => {
       if (!views[pluginId]) throw new Error(`plugin \`${pluginId}\` has no view`);
@@ -56,17 +165,24 @@
   };
 
   function invoke(cmd, args = {}) {
-    log.push({ cmd, args: structuredClone(args) });
+    let logged = args;
+    try {
+      logged = structuredClone(args);
+    } catch {
+      // A Channel carries its callback; log the argument names only.
+      logged = Object.fromEntries(Object.keys(args).map((k) => [k, typeof args[k]]));
+    }
+    log.push({ cmd, args: logged });
     const handler = handlers[cmd];
     if (!handler) return Promise.reject(`unexpected command ${cmd}`);
     try {
-      return Promise.resolve(handler(args));
+      return Promise.resolve(handler(args)).catch((err) => Promise.reject(String(err?.message ?? err)));
     } catch (err) {
       return Promise.reject(String(err.message ?? err));
     }
   }
 
-  window.__bridge = { log, forbidden };
+  window.__bridge = { log, forbidden, sync };
   window.__TAURI__ = { core: { invoke, Channel: class {} } };
   window.__TAURI_INTERNALS__ = { invoke };
   window.ipc = { postMessage: (message) => forbidden.push({ via: 'window.ipc', message: String(message) }) };

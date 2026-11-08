@@ -12,6 +12,7 @@ mod frontier;
 pub mod graph;
 mod jobs;
 pub mod knowledge;
+mod mobile;
 mod models;
 mod pdf;
 pub mod plugins;
@@ -58,7 +59,9 @@ pub use sessions::{
     RemovedPlugin, Session, SessionSummary, StoredMessage, ToolOp, ToolResultValue,
 };
 pub use state::SessionState;
-pub use sync::{ConflictPath, SyncConfig, SyncReport, SyncStatus};
+pub use sync::{
+    ConflictPath, SyncConfig, SyncReport, SyncStatus, WebdavConfig, WebdavReport, WebdavStatus,
+};
 
 const MAX_TOKENS: u32 = 8192;
 const LOGIN_POLL: Duration = Duration::from_millis(1500);
@@ -274,7 +277,21 @@ impl Harness {
         self.sync.status()
     }
 
-    /// One full sync run (commit, fetch, merge, resolve, push).
+    /// Save the device-local WebDAV folder URL, username and app password.
+    /// A blank URL disconnects WebDAV; a `None` password keeps the saved one
+    /// and `""` clears it.
+    pub fn set_webdav(
+        &self,
+        url: Option<&str>,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<SyncStatus, Error> {
+        self.sync.set_webdav(url, username, password)?;
+        self.sync.status()
+    }
+
+    /// One full sync run: git (commit, fetch, merge, resolve, push), then a
+    /// WebDAV pass, each when configured.
     pub fn sync_now(&self) -> Result<SyncReport, Error> {
         self.sync.sync()
     }
@@ -298,12 +315,20 @@ impl Harness {
 
     // ---- sessions -------------------------------------------------------
 
+    /// Every session, from each file's first two lines (M7). The mobile lock
+    /// needs the whole log, so it shows on `load_session` and the write
+    /// path, not here.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, Error> {
         self.store.list()
     }
 
+    /// A session with its ops. On mobile, a Learn session that used a
+    /// desktop-only plugin comes back read-only (docs/sync-build.md,
+    /// "Sessions on mobile").
     pub fn load_session(&self, id: &str) -> Result<Session, Error> {
-        self.store.load(id)
+        let mut session = self.store.load(id)?;
+        self.apply_mobile_lock(&mut session);
+        Ok(session)
     }
 
     pub fn delete_session(&self, id: &str) -> Result<(), Error> {

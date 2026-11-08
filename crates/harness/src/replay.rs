@@ -219,7 +219,9 @@ pub fn replay_state(ops: &[Op]) -> SessionState {
                     s.file_grants.push(g.path.clone());
                 }
             }
-            Op::ViewState(_) => {}
+            // The view summary is rendered into the conversation below; the
+            // mobile lock is read by `mobile.rs`, never by replay.
+            Op::ViewState(_) | Op::MobileUnlock(_) => {}
         }
     }
     // A `running` op carries no args; keep the ones from `queued`.
@@ -910,6 +912,8 @@ mod tests {
             args,
             result: None,
             agent: None,
+            plugin: None,
+            platforms: None,
         })
     }
 
@@ -925,6 +929,8 @@ mod tests {
                 is_error,
             }),
             agent: None,
+            plugin: None,
+            platforms: None,
         })
     }
 

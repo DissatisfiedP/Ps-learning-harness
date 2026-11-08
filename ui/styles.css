@@ -249,11 +249,11 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .home { block-size: 100%; overflow-y: auto; }
 .home-col { padding-block-end: var(--s8); }
 .home-bar {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--s4);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 var(--s4);
   min-block-size: var(--head-h);
 }
 .home-col > .home-bar .wordmark { font-weight: 600; color: var(--ink-2); }
-.home-links { display: flex; gap: var(--s4); }
+.home-links { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 var(--s4); }
 .home-alert { color: var(--danger); font-size: var(--fs-small); }
 .home-col > .start { margin-block-start: var(--s9); }
 .home-col .start > .hero {
@@ -279,6 +279,11 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 }
 .sessions h2 { font: 600 var(--fs-ui)/1.45 var(--font-ui); color: var(--ink); }
 .sessions-error { margin-block-start: var(--s2); color: var(--danger); font-size: var(--fs-small); }
+/* sync banner (§7.1): sits above "Your sessions" while it shows */
+.sync-banner { margin-block-start: var(--s8); }
+.sync-banner:not([hidden]) + .sessions { margin-block-start: var(--s5); }
+.sync-banner > p { overflow-wrap: anywhere; }
+.sync-banner-attention { margin-block-start: var(--s2); color: var(--ink-2); font-size: var(--fs-small); }
 .session-group h3 { margin-block: var(--s5) var(--s1); }
 .session-group ul { list-style: none; margin: 0; padding: 0; }
 .session {
@@ -892,6 +897,16 @@ dialog {
 .provider-body > .field { margin: 0; }
 .inline-field { display: flex; flex-wrap: wrap; gap: var(--s2); }
 .inline-field .input { flex: 1 1 14em; inline-size: auto; }
+.sync-target { padding-block: var(--s4); border-block-end: var(--hair); }
+.sync-target:first-of-type { margin-block-start: var(--s4); border-block-start: var(--hair); }
+.sync-target-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s4); }
+.sync-target-head h3, .sync-attention h3 { font: 600 var(--fs-ui)/1.45 var(--font-ui); color: var(--ink); }
+.sync-state { font-size: var(--fs-small); color: var(--ink-3); }
+.sync-target .status.error { overflow-wrap: anywhere; }
+.sync-attention { margin-block-start: var(--s5); }
+#sync-heading, #sync-attention-heading { scroll-margin-block-start: var(--s5); }
+.sync-paths { margin: var(--s2) 0 0; padding-inline-start: 1.2em; font-size: var(--fs-small); }
+.sync-paths code, .sync-attention .help code { font-family: var(--font-mono); font-size: 0.92em; overflow-wrap: anywhere; }
 .theme-choice { margin-block-start: var(--s3); display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); }
 .theme-choice > legend { inline-size: 100%; }
 .theme-choice label { display: inline-flex; align-items: center; gap: var(--s2); min-block-size: 24px; cursor: pointer; }

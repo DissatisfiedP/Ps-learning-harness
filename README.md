@@ -17,8 +17,9 @@ Early. What that means today:
   provider, and `scripts/ui-check/` drives the UI in headless Chromium against a mocked Tauri
   backend. **No run against a real model is on record** — model behaviour and output quality are
   unverified.
-- **Built:** git sync (commands `sync_status`/`set_sync`/`sync_now`, no Settings surface yet; union merges over
-  `*.jsonl`, `.conflicts/` for everything else — `docs/sync-build.md`), the knowledge graph's op log, builder job,
+- **Built:** sync to a git remote and/or a WebDAV folder (Settings → Sync, a status button and banner on Home; union
+  merges over `*.jsonl`, `.conflicts/` for everything else; sessions that used a desktop-only plugin open read-only on
+  phones until "Continue here anyway" — `docs/sync-build.md`), the knowledge graph's op log, builder job,
   alias/chain handling and topic splitter, PDF reading, the learning-system features, the Luau plugin runtime
   (host API as `@harness/*` modules) with the owner's plugin registry built in as the default, and ChatGPT
   sign-in through the Codex CLI OAuth flow.
@@ -93,10 +94,11 @@ Nothing is written into this checkout. Two locations, both outside it:
 | **Data repo** — sessions (`sessions/<yyyy>/<ulid>.jsonl`), graph files, `frontier.jsonl`, attachments | `<app data dir>/repo`; on Linux `~/.local/share/com.pslearningharness.app/repo` | `$LEARNING_HARNESS_REPO` |
 | **Device config** — `settings.json`, `credentials.json` (mode `0600`), `models-cache.json`, `session-index.json`, `workspaces.json`, installed `plugins/<id>/<sha256>/`, `registry-cache/` | `<app config dir>`; on Linux `~/.config/com.pslearningharness.app` | — (OS convention) |
 
-The data repo is a plain directory of text files. In-app sync makes it a git repository on demand
-(`sync_now`, and best effort on launch and after a session ends): it commits, merges with
-app-controlled conflict rules and pushes to the HTTPS remote you configure. Pointing
-`$LEARNING_HARNESS_REPO` at your own repository also works today, without the app's merge rules.
+The data repo is a plain directory of text files. In-app sync (Settings → Sync; `sync_now`, and best effort on launch
+and after a session ends) carries it to a git remote, a WebDAV folder, or both. Git commits, merges with app-controlled
+conflict rules and pushes to the HTTPS remote you configure; WebDAV compares each file against a device-local manifest
+and uploads, downloads or merges it with the same rules. Pointing `$LEARNING_HARNESS_REPO` at your own repository also
+works today, without the app's merge rules.
 
 ## Repository map
 

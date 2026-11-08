@@ -16,6 +16,8 @@
         <header class="home-bar">
           <span class="wordmark">P's Learning Harness</span>
           <span class="home-links">
+            <button class="btn text" id="sync-indicator" type="button" hidden></button>
+            <button class="btn text" id="sync-home-now" type="button" hidden>Sync now</button>
             <button class="btn text" id="open-map" type="button">Map</button>
             <button class="btn text" id="open-settings" type="button">Settings</button>
           </span>
@@ -46,6 +48,16 @@
           <div class="composer-slot" id="home-composer-slot"></div>
         </div>
         <p class="unavailable" id="unavailable" hidden>Open this in P's Learning Harness.</p>
+        <div class="sync-banner" id="sync-banner" role="status" hidden>
+          <p class="sessions-error" id="sync-banner-error" hidden>
+            <span id="sync-banner-error-text"></span>
+            <button class="btn text" type="button" id="sync-banner-retry">Try again</button>
+          </p>
+          <p class="sync-banner-attention" id="sync-banner-attention" hidden>
+            <span id="sync-banner-attention-text"></span>
+            <button class="btn text" type="button" id="sync-banner-review">Review</button>
+          </p>
+        </div>
 
         <section class="sessions" aria-labelledby="sessions-heading">
           <h2 id="sessions-heading">Your sessions</h2>
@@ -194,6 +206,71 @@
         <h2 id="providers-heading">Providers</h2>
         <p class="help">Keys stay on this device.</p>
         <div class="provider-list" id="provider-list"></div>
+      </section>
+      <section class="settings-section" id="sync-section" aria-labelledby="sync-heading">
+        <h2 id="sync-heading" tabindex="-1">Sync</h2>
+        <p class="help">Settings stay on this device.</p>
+        <form class="sync-target" id="sync-git" aria-labelledby="sync-git-heading" novalidate>
+          <div class="sync-target-head">
+            <h3 id="sync-git-heading">Git</h3>
+            <span class="sync-state" id="sync-git-state"></span>
+          </div>
+          <p class="status error" id="sync-git-error" hidden></p>
+          <div class="field">
+            <label for="sync-git-remote">Remote URL</label>
+            <input class="input" id="sync-git-remote" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://github.com/you/notes.git" />
+          </div>
+          <div class="field">
+            <label for="sync-git-token">Access token</label>
+            <input class="input" id="sync-git-token" type="password" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="sync-git-branch">Branch</label>
+            <input class="input" id="sync-git-branch" autocomplete="off" spellcheck="false" placeholder="main" />
+          </div>
+          <div class="actions">
+            <button class="btn secondary" type="submit">Save</button>
+            <button class="btn text" id="sync-git-disconnect" type="button" hidden>Disconnect</button>
+          </div>
+          <p class="status" id="sync-git-status" role="status"></p>
+        </form>
+        <form class="sync-target" id="sync-webdav" aria-labelledby="sync-webdav-heading" novalidate>
+          <div class="sync-target-head">
+            <h3 id="sync-webdav-heading">WebDAV</h3>
+            <span class="sync-state" id="sync-webdav-state"></span>
+          </div>
+          <p class="status error" id="sync-webdav-error" hidden></p>
+          <div class="field">
+            <label for="sync-webdav-url">URL</label>
+            <input class="input" id="sync-webdav-url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://app.koofr.net/dav/Koofr/harness" aria-describedby="sync-webdav-hint" />
+            <p class="help" id="sync-webdav-hint">HTTPS only, or a localhost test server.</p>
+          </div>
+          <div class="field">
+            <label for="sync-webdav-username">Username</label>
+            <input class="input" id="sync-webdav-username" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="sync-webdav-password">App password</label>
+            <input class="input" id="sync-webdav-password" type="password" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="actions">
+            <button class="btn secondary" type="submit">Save</button>
+            <button class="btn text" id="sync-webdav-disconnect" type="button" hidden>Disconnect</button>
+          </div>
+          <p class="status" id="sync-webdav-status" role="status"></p>
+        </form>
+        <div class="sync-attention" id="sync-attention" hidden>
+          <h3 id="sync-attention-heading" tabindex="-1">Needs attention</h3>
+          <p class="help">The other device's copy is kept in <code>.conflicts/</code>; this device's version was kept.</p>
+          <ul class="sync-paths" id="sync-paths"></ul>
+          <div class="actions">
+            <button class="btn secondary" id="sync-acknowledge" type="button">Acknowledge</button>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn secondary" id="sync-now" type="button" disabled>Sync now</button>
+        </div>
+        <p class="status" id="sync-status" role="status"></p>
       </section>
       <section class="settings-section" aria-labelledby="plugins-heading">
         <h2 id="plugins-heading">Plugins</h2>

@@ -20,6 +20,19 @@
 //! no `MERGE_HEAD` or half-merged index is ever left behind. On any error the
 //! index is reset to `HEAD` and the working tree is left byte-identical; the
 //! learner keeps working and the next run commits what accumulated.
+//!
+//! A second, independent target is WebDAV ([`webdav`]): a plain file protocol
+//! that free storage speaks. Each device configures none, git, WebDAV or both;
+//! one run does git, then WebDAV, under the same single-flight flag, and a
+//! failure in one is recorded on that target without stopping the other.
+//! Every merge is a union or local-wins, so data crossing from one target to
+//! the other converges whatever the order.
+
+mod webdav;
+#[cfg(test)]
+mod webdav_tests;
+
+pub use webdav::{WebdavConfig, WebdavReport, WebdavStatus};
 
 use std::collections::HashSet;
 use std::fs;
@@ -54,8 +67,9 @@ fn default_branch() -> String {
     DEFAULT_BRANCH.to_owned()
 }
 
-/// `sync.json`: everything sync needs that must never sync itself.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `sync.json`: everything sync needs that must never sync itself. `Debug`
+/// hides the token.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncConfig {
     /// The HTTPS URL, without any credentials in it.
@@ -76,6 +90,23 @@ pub struct SyncConfig {
     /// acknowledged yet (`acknowledge_conflicts` clears them).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<String>,
+    /// The WebDAV target's settings; absent from older files.
+    #[serde(default, skip_serializing_if = "WebdavConfig::is_unset")]
+    pub webdav: WebdavConfig,
+}
+
+impl std::fmt::Debug for SyncConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncConfig")
+            .field("remote", &self.remote)
+            .field("token", &self.token.as_ref().map(|_| "[token removed]"))
+            .field("branch", &self.branch)
+            .field("last_sync_at", &self.last_sync_at)
+            .field("last_error", &self.last_error)
+            .field("conflicts", &self.conflicts)
+            .field("webdav", &self.webdav)
+            .finish()
+    }
 }
 
 impl Default for SyncConfig {
@@ -87,6 +118,7 @@ impl Default for SyncConfig {
             last_sync_at: None,
             last_error: None,
             conflicts: Vec::new(),
+            webdav: WebdavConfig::default(),
         }
     }
 }
@@ -111,6 +143,7 @@ impl SyncConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncStatus {
+    /// The git target is configured.
     pub configured: bool,
     pub remote: Option<String>,
     pub branch: String,
@@ -120,8 +153,12 @@ pub struct SyncStatus {
     pub unsynced: bool,
     pub ahead: u32,
     pub behind: u32,
-    /// Paths parked in `.conflicts/` and not yet acknowledged.
+    /// Paths parked in `.conflicts/` and not yet acknowledged, from either
+    /// target.
     pub needs_attention: Vec<String>,
+    /// A git token is saved (never the token itself).
+    pub has_token: bool,
+    pub webdav: WebdavStatus,
 }
 
 /// One path the merge could not combine, and how it was resolved.
@@ -145,6 +182,8 @@ pub struct SyncReport {
     pub conflicts: Vec<ConflictPath>,
     /// Conflict paths from this run that need the learner's attention.
     pub needs_attention: Vec<String>,
+    /// What the WebDAV pass did, when that target ran and succeeded.
+    pub webdav: Option<WebdavReport>,
 }
 
 /// The sync engine: device-local settings plus the one data repo.
@@ -233,7 +272,10 @@ impl Sync {
                 None => {
                     config.remote = None;
                     config.token = None;
-                    config.conflicts.clear();
+                    // The list is shared: WebDAV may still own entries.
+                    if !config.webdav.configured() {
+                        config.conflicts.clear();
+                    }
                     config.last_error = None;
                 }
             }
@@ -241,6 +283,54 @@ impl Sync {
                 config.branch = branch.to_owned();
             }
         })
+    }
+
+    /// Save the WebDAV settings (docs/sync-build.md, "Settings").
+    ///
+    /// A blank URL disconnects WebDAV: the URL, username, password, error and
+    /// the manifest are forgotten. Otherwise the URL must be `https://`, or
+    /// `http://` on the loopback host. A `None` username or password keeps
+    /// the saved one and `""` clears it. A new URL starts the manifest over,
+    /// since what it recorded belongs to the old folder.
+    pub fn set_webdav(
+        &self,
+        url: Option<&str>,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<(), Error> {
+        let url = match url.map(str::trim).filter(|url| !url.is_empty()) {
+            Some(raw) => Some(webdav::normalise_url(raw)?.to_string()),
+            None => None,
+        };
+        let mut reset = false;
+        self.update(|config| match url {
+            Some(url) => {
+                let dav = &mut config.webdav;
+                if dav.url.as_deref() != Some(url.as_str()) {
+                    reset = true;
+                    dav.last_sync_at = None;
+                }
+                dav.url = Some(url);
+                if let Some(username) = username {
+                    dav.username = Some(username.trim().to_owned()).filter(|u| !u.is_empty());
+                }
+                if let Some(password) = password {
+                    dav.password = Some(password.to_owned()).filter(|p| !p.is_empty());
+                }
+                dav.last_error = None;
+            }
+            None => {
+                reset = true;
+                config.webdav = WebdavConfig::default();
+                if !config.configured() {
+                    config.conflicts.clear();
+                }
+            }
+        })?;
+        if reset {
+            webdav::delete_manifest(&self.config_dir);
+        }
+        Ok(())
     }
 
     /// Clears the "needs attention" list. The `.conflicts/` copies stay in the
@@ -254,7 +344,7 @@ impl Sync {
 
     /// Configuration plus the repo's state, with **no** network access: the
     /// ahead/behind counts come from the remote-tracking ref the last fetch or
-    /// push left behind.
+    /// push left behind, and WebDAV's `unsynced` from its manifest.
     pub fn status(&self) -> Result<SyncStatus, Error> {
         let config = self.config();
         let branch = config.branch().to_owned();
@@ -263,8 +353,25 @@ impl Sync {
             // Not a repository yet: configured but never synced.
             Err(_) => (0, 0, config.configured()),
         };
+        let dav = &config.webdav;
+        let webdav = WebdavStatus {
+            configured: dav.configured(),
+            url: dav.url.clone(),
+            username: dav.username.clone(),
+            has_password: dav.password.as_deref().is_some_and(|p| !p.is_empty()),
+            last_sync_at: dav.last_sync_at.clone(),
+            last_error: dav.last_error.clone(),
+            unsynced: dav.configured()
+                && (dav.last_sync_at.is_none()
+                    || webdav::local_changes(
+                        &self.repo,
+                        &self.config_dir,
+                        dav.url.as_deref().unwrap_or_default(),
+                    )),
+        };
         Ok(SyncStatus {
             configured: config.configured(),
+            has_token: config.token.as_deref().is_some_and(|t| !t.is_empty()),
             remote: config.remote,
             branch,
             last_sync_at: config.last_sync_at,
@@ -273,27 +380,33 @@ impl Sync {
             ahead,
             behind,
             needs_attention: config.conflicts,
+            webdav,
         })
     }
 
-    /// One full run: commit, fetch, merge, resolve, commit the merge, push.
+    /// One full run: git (commit, fetch, merge, resolve, commit the merge,
+    /// push) when configured, then a WebDAV pass when configured.
     ///
+    /// Each target's failure is kept on that target and doesn't stop the
+    /// other; the run is `Ok` only when every configured target succeeded.
     /// A second call while a run is in flight returns a readable error; the
     /// background [`Sync::trigger`] just skips it.
     pub fn sync(&self) -> Result<SyncReport, Error> {
-        if !self.config().configured() {
+        let config = self.config();
+        if !config.configured() && !config.webdav.configured() {
             return Err(Error::Sync("sync is not configured".into()));
         }
         let flight = Flight::acquire(&self.running)?;
-        let result = self.once();
+        let result = self.run_targets();
         drop(flight);
-        self.finish(result)
+        result
     }
 
     /// Best-effort background run: never blocks the caller, and a trigger while
     /// a run is in flight is dropped. Nothing happens while unconfigured.
     pub fn trigger(self: &Arc<Self>) {
-        if !self.config().configured() {
+        let config = self.config();
+        if !config.configured() && !config.webdav.configured() {
             return;
         }
         if self
@@ -308,9 +421,9 @@ impl Sync {
             .name("lh-sync".into())
             .spawn(move || {
                 let flight = Flight(&me.running);
-                let result = me.once();
+                let result = me.run_targets();
                 drop(flight);
-                if let Err(e) = me.finish(result) {
+                if let Err(e) = result {
                     tracing::debug!("background sync: {e}");
                 }
             });
@@ -319,18 +432,51 @@ impl Sync {
         }
     }
 
-    /// Persist what the run produced (success time or the error) and hand the
-    /// result back unchanged.
+    /// Git, then WebDAV, in that fixed order so the status reads predictably.
+    /// The caller holds the single-flight flag.
+    fn run_targets(&self) -> Result<SyncReport, Error> {
+        let git = self.config().configured();
+        let mut report = SyncReport::default();
+        let mut errors: Vec<String> = Vec::new();
+        if git {
+            match self.finish(self.once()) {
+                Ok(done) => report = done,
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        // Read again: the learner may have changed WebDAV while git ran.
+        let dav = self.config().webdav;
+        if dav.configured() {
+            let result = webdav::run(&self.repo, &self.config_dir, &dav);
+            match self.finish_webdav(&dav, result) {
+                Ok(outcome) => {
+                    for path in outcome.needs_attention {
+                        if !report.needs_attention.contains(&path) {
+                            report.needs_attention.push(path);
+                        }
+                    }
+                    report.conflicts.extend(outcome.conflicts);
+                    report.webdav = Some(outcome.report);
+                }
+                Err(e) if git => errors.push(format!("WebDAV: {e}")),
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        if errors.is_empty() {
+            Ok(report)
+        } else {
+            Err(Error::Sync(errors.join("; ")))
+        }
+    }
+
+    /// Persist what the git run produced (success time or the error) and hand
+    /// the result back unchanged.
     fn finish(&self, result: Result<SyncReport, Error>) -> Result<SyncReport, Error> {
         let outcome = self.update(|config| match &result {
             Ok(report) => {
                 config.last_sync_at = Some(now_iso());
                 config.last_error = None;
-                for path in &report.needs_attention {
-                    if !config.conflicts.contains(path) && config.conflicts.len() < MAX_CONFLICTS {
-                        config.conflicts.push(path.clone());
-                    }
-                }
+                note_attention(config, &report.needs_attention);
             }
             Err(e) => {
                 let token = config.token.clone();
@@ -342,6 +488,43 @@ impl Sync {
             tracing::warn!("sync settings not saved: {e}");
         }
         result
+    }
+
+    /// Persist what the WebDAV pass produced on the WebDAV target. Conflict
+    /// paths join the shared list even when some other path failed; a pass
+    /// that left paths behind is an error, so the banner shows it.
+    fn finish_webdav(
+        &self,
+        dav: &WebdavConfig,
+        result: Result<webdav::Outcome, Error>,
+    ) -> Result<webdav::Outcome, Error> {
+        let failure = match &result {
+            Ok(outcome) => outcome.failure_message(),
+            Err(e) => Some(e.to_string()),
+        }
+        .map(|message| dav.scrub(&message));
+        let saved = self.update(|config| {
+            if let Ok(outcome) = &result {
+                note_attention(config, &outcome.needs_attention);
+            }
+            if !config.webdav.configured() {
+                return; // disconnected while the pass ran
+            }
+            match &failure {
+                None => {
+                    config.webdav.last_sync_at = Some(now_iso());
+                    config.webdav.last_error = None;
+                }
+                Some(message) => config.webdav.last_error = Some(message.clone()),
+            }
+        });
+        if let Err(e) = saved {
+            tracing::warn!("sync settings not saved: {e}");
+        }
+        match failure {
+            Some(message) => Err(Error::Sync(message)),
+            None => result,
+        }
     }
 
     /// The algorithm. Split out so every failure path funnels through the
@@ -424,6 +607,15 @@ impl Sync {
             report.pushed = ahead.min(u32::MAX as usize) as u32;
         }
         Ok(report)
+    }
+}
+
+/// Add conflict paths to the shared needs-attention list (either target).
+fn note_attention(config: &mut SyncConfig, paths: &[String]) {
+    for path in paths {
+        if !config.conflicts.contains(path) && config.conflicts.len() < MAX_CONFLICTS {
+            config.conflicts.push(path.clone());
+        }
     }
 }
 
@@ -1174,16 +1366,16 @@ mod tests {
     use std::net::TcpListener;
 
     /// A temp directory removed when the test ends.
-    struct Tmp(PathBuf);
+    pub(super) struct Tmp(PathBuf);
 
     impl Tmp {
-        fn new(tag: &str) -> Self {
+        pub(super) fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("lh-sync-{tag}-{}", ulid::Ulid::new()));
             fs::create_dir_all(&dir).unwrap();
             Tmp(dir)
         }
 
-        fn path(&self) -> &Path {
+        pub(super) fn path(&self) -> &Path {
             &self.0
         }
     }
@@ -1195,15 +1387,15 @@ mod tests {
     }
 
     /// One device: its data repo, its device-local config dir, its engine.
-    struct Device {
+    pub(super) struct Device {
         _root: Tmp,
-        repo: PathBuf,
-        config: PathBuf,
-        sync: Arc<Sync>,
+        pub(super) repo: PathBuf,
+        pub(super) config: PathBuf,
+        pub(super) sync: Arc<Sync>,
     }
 
     impl Device {
-        fn new(tag: &str) -> Self {
+        pub(super) fn new(tag: &str) -> Self {
             let root = Tmp::new(tag);
             let repo = root.path().join("repo");
             let config = root.path().join("config");
@@ -1218,7 +1410,7 @@ mod tests {
             }
         }
 
-        fn connected(tag: &str, remote: &Path) -> Self {
+        pub(super) fn connected(tag: &str, remote: &Path) -> Self {
             let device = Self::new(tag);
             device
                 .sync
@@ -1227,13 +1419,13 @@ mod tests {
             device
         }
 
-        fn write(&self, rel: &str, body: &str) {
+        pub(super) fn write(&self, rel: &str, body: &str) {
             let path = self.repo.join(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, body).unwrap();
         }
 
-        fn append(&self, rel: &str, line: &str) {
+        pub(super) fn append(&self, rel: &str, line: &str) {
             let path = self.repo.join(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let mut file = fs::OpenOptions::new()
@@ -1244,36 +1436,36 @@ mod tests {
             file.write_all(format!("{line}\n").as_bytes()).unwrap();
         }
 
-        fn read(&self, rel: &str) -> String {
+        pub(super) fn read(&self, rel: &str) -> String {
             fs::read_to_string(self.repo.join(rel)).unwrap()
         }
 
-        fn run(&self) -> SyncReport {
+        pub(super) fn run(&self) -> SyncReport {
             self.sync.sync().unwrap()
         }
     }
 
     /// A bare repository standing in for any host, on the local filesystem.
-    fn bare(tag: &str) -> (Tmp, PathBuf) {
+    pub(super) fn bare(tag: &str) -> (Tmp, PathBuf) {
         let root = Tmp::new(tag);
         let path = root.path().join("remote.git");
         Repository::init_bare(&path).unwrap();
         (root, path)
     }
 
-    fn header(op_id: &str, at: &str) -> String {
+    pub(super) fn header(op_id: &str, at: &str) -> String {
         format!(
             r#"{{"op":"session","opId":"{op_id}","at":"{at}","id":"01HZZZZZZZZZZZZZZZZZZZZZZZ","mode":"learn","title":"Limits"}}"#
         )
     }
 
-    fn op(op_id: &str, at: &str, content: &str) -> String {
+    pub(super) fn op(op_id: &str, at: &str, content: &str) -> String {
         format!(
             r#"{{"op":"message","opId":"{op_id}","at":"{at}","role":"user","content":"{content}"}}"#
         )
     }
 
-    fn op_ids(text: &str) -> Vec<String> {
+    pub(super) fn op_ids(text: &str) -> Vec<String> {
         text.lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .filter_map(|value| {
@@ -1286,7 +1478,7 @@ mod tests {
     }
 
     /// Every file in the repo except `.git`, path → bytes.
-    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    pub(super) fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
         fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
             let Ok(entries) = fs::read_dir(dir) else {
                 return;
@@ -1657,6 +1849,10 @@ mod tests {
         assert!(
             settings.contains("sekret-token"),
             "the token is kept locally"
+        );
+        assert!(
+            !format!("{:?}", device.sync.config()).contains("sekret-token"),
+            "Debug output hides the token"
         );
         let git_config = fs::read_to_string(device.repo.join(".git/config")).unwrap();
         assert!(!git_config.contains("sekret-token"), "{git_config}");

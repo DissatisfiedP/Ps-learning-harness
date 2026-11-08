@@ -329,6 +329,22 @@ pub fn tutor_tools(phase: Phase, workspace: bool) -> Vec<ToolSpec> {
     t
 }
 
+/// The tutor's own tool names in every phase (anything else is a plugin's).
+static CORE_TUTOR_TOOLS: std::sync::LazyLock<HashSet<String>> = std::sync::LazyLock::new(|| {
+    [Phase::Measure, Phase::Teach, Phase::Close]
+        .into_iter()
+        .flat_map(|phase| tutor_tools(phase, true))
+        .map(|t| t.name)
+        .collect()
+});
+
+/// Whether `name` is one of the tutor's own tools in any phase, i.e. not a
+/// plugin's. Plugin tool names start with `<id>_`, so a cached registry index
+/// can only be asked about a name that isn't one of these.
+pub(crate) fn is_core_tutor_tool(name: &str) -> bool {
+    CORE_TUTOR_TOOLS.contains(name)
+}
+
 pub fn planner_tools() -> Vec<ToolSpec> {
     let mut t = vec![
         plugin_search(),

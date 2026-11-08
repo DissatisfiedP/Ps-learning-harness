@@ -488,6 +488,8 @@ impl Port<'_> {
                                                 args: question_args(role, &args),
                                                 result: None,
                                                 agent: None,
+                                                plugin: None,
+                                                platforms: None,
                                             })
                                         });
                                         // Teaching position: the source tags each
@@ -564,6 +566,8 @@ impl Port<'_> {
                                     args: Value::Null,
                                     result: Some(result),
                                     agent: None,
+                                    plugin: None,
+                                    platforms: None,
                                 })
                             });
                         }
@@ -746,6 +750,8 @@ impl Port<'_> {
                 args: json!({ "sectionId": section, "evidence": "", "carryOver": "" }),
                 result: None,
                 agent: None,
+                plugin: None,
+                platforms: None,
             })
         });
         w.emit(at, |op_id, at| {
@@ -760,6 +766,8 @@ impl Port<'_> {
                     is_error: false,
                 }),
                 agent: None,
+                plugin: None,
+                platforms: None,
             })
         });
     }
