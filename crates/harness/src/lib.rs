@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use providers::claude_oauth::{self, PendingLogin};
+use providers::codex_oauth;
 use providers::workbuddy::{self, LoginStart};
 use providers::{
     stream_chat, ChatRequest, Client, ContentBlock, Credential, CredentialKind, Message,
@@ -162,6 +163,10 @@ pub struct Harness {
     pub(crate) login_cancelled: AtomicBool,
     /// PKCE verifier/state between the two Claude subscription login steps.
     pub(crate) pending_claude_login: Mutex<Option<PendingLogin>>,
+    /// PKCE verifier/state and the bound loopback socket between ChatGPT
+    /// sign-in start and wait. Dropping it frees port 1455.
+    pub(crate) pending_codex_login: Mutex<Option<codex_oauth::PendingLogin>>,
+    pub(crate) codex_login_cancelled: AtomicBool,
     /// Input/output tokens per role, accumulated in memory.
     pub(crate) role_usage: Mutex<HashMap<ModelRole, RoleUsage>>,
     /// Per-session turn lock: tutor turns, answers and job deliveries for one
@@ -215,6 +220,8 @@ impl Harness {
             running: Mutex::new(HashMap::new()),
             login_cancelled: AtomicBool::new(false),
             pending_claude_login: Mutex::new(None),
+            pending_codex_login: Mutex::new(None),
+            codex_login_cancelled: AtomicBool::new(false),
             role_usage: Mutex::new(HashMap::new()),
             turn_locks: Mutex::new(HashMap::new()),
             plugins: Mutex::new(plugins::PluginRegistry::default()),
@@ -546,6 +553,11 @@ impl Harness {
                 let endpoint = provider.endpoint(&fresh, base.as_deref(), conversation_id)?;
                 Ok(stream_chat(&self.client, &endpoint, req, on_delta).await?)
             }
+            (Err(ProviderError::Unauthorized(_)), Credential::Codex(s)) if s.can_refresh() => {
+                let fresh = self.refresh_codex(s).await?;
+                let endpoint = provider.endpoint(&fresh, base.as_deref(), conversation_id)?;
+                Ok(stream_chat(&self.client, &endpoint, req, on_delta).await?)
+            }
             (result, _) => Ok(result?),
         }
     }
@@ -588,6 +600,7 @@ impl Harness {
                 let (source, account) = match saved {
                     Some(Credential::Workbuddy(s)) => (Some("saved"), s.account.clone()),
                     Some(Credential::ClaudeCode(s)) => (Some("saved"), s.account.clone()),
+                    Some(Credential::Codex(s)) => (Some("saved"), s.account.clone()),
                     Some(Credential::ApiKey { .. }) => (Some("saved"), None),
                     None if id.credential_from_env().is_some() => (Some("env"), None),
                     None => (None, None),
@@ -812,6 +825,41 @@ impl Harness {
         *lock(&self.pending_claude_login) = None;
     }
 
+    /// Step 1 of ChatGPT sign-in: bind localhost:1455 (fails clearly if the
+    /// port is busy) and return the URL for the learner to open.
+    pub fn codex_login_start(&self) -> Result<codex_oauth::LoginStart, Error> {
+        // Drop any earlier attempt first so its socket frees the port.
+        *lock(&self.pending_codex_login) = None;
+        self.codex_login_cancelled.store(false, Ordering::SeqCst);
+        let pending = codex_oauth::PendingLogin::new()?;
+        let start = pending.start();
+        *lock(&self.pending_codex_login) = Some(pending);
+        Ok(start)
+    }
+
+    /// Step 2: wait (up to 5 minutes) for the browser redirect, exchange the
+    /// code and save the grant. Returns the account email, if any.
+    pub async fn codex_login_wait(&self) -> Result<Option<String>, Error> {
+        let pending = lock(&self.pending_codex_login)
+            .take()
+            .ok_or_else(|| Error::Invalid("start sign-in again".into()))?;
+        let session = pending
+            .finish(&self.client, &self.codex_login_cancelled)
+            .await?;
+        let account = session.account.clone();
+        let mut config = lock(&self.config);
+        config
+            .credentials
+            .insert(ProviderId::OpenaiCodex, Credential::Codex(session));
+        config.save_credentials()?;
+        Ok(account)
+    }
+
+    pub fn codex_login_cancel(&self) {
+        self.codex_login_cancelled.store(true, Ordering::SeqCst);
+        *lock(&self.pending_codex_login) = None;
+    }
+
     // ---- learner commands: attachments, mentions, views -------------------
 
     /// Device-local folder for images that are chips but not yet sent.
@@ -965,7 +1013,7 @@ impl Harness {
     }
 
     /// The saved or environment credential; expiring sessions are refreshed
-    /// before the request (WorkBuddy: 1 day; Claude subscription: 5 minutes).
+    /// before the request (WorkBuddy: 1 day; Claude and ChatGPT: 5 minutes).
     async fn current_credential(&self, provider: ProviderId) -> Result<Credential, Error> {
         let credential = self.credential(provider)?;
         match &credential {
@@ -976,6 +1024,9 @@ impl Harness {
             }
             Credential::ClaudeCode(s) if s.needs_refresh(unix_now()) && s.can_refresh() => {
                 self.refresh_claude(s).await
+            }
+            Credential::Codex(s) if s.needs_refresh(unix_now()) && s.can_refresh() => {
+                self.refresh_codex(s).await
             }
             _ => Ok(credential),
         }
@@ -1014,6 +1065,19 @@ impl Harness {
         config
             .credentials
             .insert(ProviderId::ClaudeCode, credential.clone());
+        config.save_credentials()?;
+        Ok(credential)
+    }
+
+    /// Rotate a ChatGPT grant and persist it (including a rotated refresh
+    /// token). A failed refresh surfaces `Unauthorized` ("sign in again").
+    async fn refresh_codex(&self, session: &codex_oauth::Session) -> Result<Credential, Error> {
+        let fresh = codex_oauth::refresh(&self.client, session, unix_now()).await?;
+        let credential = Credential::Codex(fresh);
+        let mut config = lock(&self.config);
+        config
+            .credentials
+            .insert(ProviderId::OpenaiCodex, credential.clone());
         config.save_credentials()?;
         Ok(credential)
     }

@@ -7,6 +7,7 @@
 mod anthropic;
 mod catalog;
 pub mod claude_oauth;
+pub mod codex_oauth;
 pub mod models;
 mod openai_chat;
 mod openai_responses;

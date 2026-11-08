@@ -655,6 +655,29 @@ fn claude_login_cancel(h: H<'_>) {
     h.claude_login_cancel();
 }
 
+/// Starts ChatGPT sign-in: binds localhost:1455 for the redirect and opens
+/// the approval page in the system browser.
+#[tauri::command]
+fn codex_login_start(
+    app: tauri::AppHandle,
+    h: H<'_>,
+) -> Result<harness::providers::codex_oauth::LoginStart> {
+    let start = h.codex_login_start().map_err(err)?;
+    let _ = app.opener().open_url(&start.auth_url, None::<&str>);
+    Ok(start)
+}
+
+/// Waits (up to 5 minutes) for the browser redirect and saves the grant.
+#[tauri::command]
+async fn codex_login_wait(h: H<'_>) -> Result<Option<String>> {
+    h.codex_login_wait().await.map_err(err)
+}
+
+#[tauri::command]
+fn codex_login_cancel(h: H<'_>) {
+    h.codex_login_cancel();
+}
+
 /// Opens provider key pages and similar links in the system browser.
 #[tauri::command]
 fn open_external(app: tauri::AppHandle, url: String) -> Result<()> {
@@ -829,6 +852,9 @@ fn main() {
             claude_login_start,
             claude_login_submit,
             claude_login_cancel,
+            codex_login_start,
+            codex_login_wait,
+            codex_login_cancel,
             open_external,
             pick_files,
             pick_folder,

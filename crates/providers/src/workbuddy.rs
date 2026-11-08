@@ -199,7 +199,7 @@ fn client_headers(credential: &Credential) -> Result<HeaderMap, ProviderError> {
             insert(&mut headers, "Authorization", &format!("Bearer {key}"))?;
             insert(&mut headers, "X-API-Key", key)?;
         }
-        Credential::ClaudeCode(_) => {
+        Credential::ClaudeCode(_) | Credential::Codex(_) => {
             return Err(ProviderError::Config(
                 "WorkBuddy needs an API key or a WorkBuddy sign-in".into(),
             ));

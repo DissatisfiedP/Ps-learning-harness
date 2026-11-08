@@ -24,6 +24,7 @@ let usage = []; // RoleUsageEntry[]
 let models = new Map(); // provider id -> ModelInfo[]
 let login = null; // { state, authUrl } while WorkBuddy sign-in is pending
 let claudeLogin = null; // { state, authUrl } while Claude sign-in awaits a pasted code
+let codexLogin = null; // { state, authUrl } while ChatGPT sign-in awaits the browser redirect
 let hooks = { changed: () => {}, pluginsChanged: () => {} };
 let pluginSettings = null;
 
@@ -37,6 +38,7 @@ export function initSettings(h) {
   dialog.addEventListener('close', () => {
     if (login) cancelLogin();
     if (claudeLogin) cancelClaudeLogin();
+    if (codexLogin) cancelCodexLogin();
   });
   dialog.addEventListener('click', (e) => {
     if (e.target === dialog) dialog.close();
@@ -397,19 +399,19 @@ function statusText(p) {
   if (!p.source) return 'Not connected';
   if (p.source === 'env') return `From ${p.envVar}`;
   if (p.account) return `Signed in as ${p.account}`;
-  return p.credential === 'workbuddy-account' || p.credential === 'claude-subscription'
+  return p.credential === 'workbuddy-account' || p.credential === 'claude-subscription' || p.credential === 'chatgpt-subscription'
     ? 'Connected'
     : 'Key saved';
 }
 
 // Provider ids whose body is expanded. Subscription providers start open.
-const expanded = new Set(['workbuddy', 'claude-code']);
+const expanded = new Set(['workbuddy', 'claude-code', 'openai-codex']);
 
 function renderProviders() {
   const focusedId = document.activeElement?.closest?.('.provider')?.dataset.id;
   providerList.textContent = '';
   // Subscription providers first, then connected providers, then the rest.
-  const rank = (p) => (p.id === 'workbuddy' || p.id === 'claude-code' ? 0 : p.source ? 1 : 2);
+  const rank = (p) => (p.id === 'workbuddy' || p.id === 'claude-code' || p.id === 'openai-codex' ? 0 : p.source ? 1 : 2);
   const ordered = [...providers].sort((a, b) => rank(a) - rank(b));
   for (const p of ordered) providerList.append(providerRow(p));
   // Keep keyboard users on the row they were working in.
@@ -418,7 +420,7 @@ function renderProviders() {
 
 function providerRow(p) {
   const el = document.createElement('div');
-  const open = expanded.has(p.id) || (login && p.id === 'workbuddy') || (claudeLogin && p.id === 'claude-code');
+  const open = expanded.has(p.id) || (login && p.id === 'workbuddy') || (claudeLogin && p.id === 'claude-code') || (codexLogin && p.id === 'openai-codex');
   el.className = 'provider';
   el.dataset.id = p.id;
   const bodyId = `provider-body-${p.id}`;
@@ -440,6 +442,7 @@ function providerRow(p) {
     const body = el.querySelector('.provider-body');
     if (p.id === 'workbuddy') workbuddyBody(p, body, say);
     else if (p.id === 'claude-code') claudeBody(p, body, say);
+    else if (p.id === 'openai-codex') codexBody(p, body, say);
     else keyBody(p, body, say);
   }
   el.append(status);
@@ -507,17 +510,10 @@ function removeButton(p, label, say) {
 }
 
 function keyBody(p, body, say) {
-  const label = p.credential === 'chatgpt-token' ? 'ChatGPT access token' : 'API key';
   if (p.source === 'saved') {
     body.append(removeButton(p, 'Remove key', say));
   } else {
-    body.append(keyRow(p, p.source === 'env' ? `${label} (overrides ${p.envVar})` : label, say));
-    if (p.credential === 'chatgpt-token') {
-      const hint = document.createElement('p');
-      hint.className = 'help';
-      hint.textContent = 'From ~/.codex/auth.json.';
-      body.append(hint);
-    }
+    body.append(keyRow(p, p.source === 'env' ? `API key (overrides ${p.envVar})` : 'API key', say));
     const link = keyLink(p, say);
     if (link) body.append(link);
   }
@@ -684,5 +680,61 @@ async function submitClaudeCode(code, say) {
 function cancelClaudeLogin() {
   claudeLogin = null;
   call('claude_login_cancel').catch(() => {});
+  renderProviders();
+}
+
+// ---------- ChatGPT sign-in (Codex OAuth, loopback redirect) ----------
+
+function codexBody(p, body, say) {
+  if (p.source === 'saved') {
+    body.append(removeButton(p, p.account ? 'Sign out' : 'Disconnect', say));
+    return;
+  }
+  if (codexLogin) {
+    body.innerHTML = `
+      <p>Waiting for browser sign-in…</p>
+      <div class="actions">
+        <button class="btn secondary" type="button" data-act="reopen">Reopen sign-in ↗</button>
+        <button class="btn text" type="button" data-act="cancel">Cancel</button>
+      </div>`;
+    body.querySelector('[data-act="reopen"]').addEventListener('click', () =>
+      call('open_external', { url: codexLogin.authUrl }).catch((e) => say(message(e), true)));
+    body.querySelector('[data-act="cancel"]').addEventListener('click', cancelCodexLogin);
+    return;
+  }
+  const signIn = document.createElement('button');
+  signIn.type = 'button';
+  signIn.className = 'btn secondary';
+  signIn.textContent = 'Sign in with ChatGPT';
+  signIn.addEventListener('click', () => startCodexLogin(signIn, say));
+  const hint = document.createElement('p');
+  hint.className = 'help';
+  hint.textContent = 'Uses your ChatGPT Plus/Pro plan.';
+  body.append(signIn, hint);
+}
+
+async function startCodexLogin(button, say) {
+  button.disabled = true;
+  say('');
+  try {
+    codexLogin = await call('codex_login_start');
+    renderProviders();
+    const account = await call('codex_login_wait');
+    codexLogin = null;
+    await autoPick('openai-codex');
+    say(account ? `Signed in as ${account}.` : 'Signed in to ChatGPT.');
+    models.delete('openai-codex');
+    await reload();
+  } catch (e) {
+    const wasCancelled = !codexLogin;
+    codexLogin = null;
+    if (!wasCancelled) say(message(e), true);
+    renderProviders();
+  }
+}
+
+function cancelCodexLogin() {
+  codexLogin = null;
+  call('codex_login_cancel').catch(() => {});
   renderProviders();
 }

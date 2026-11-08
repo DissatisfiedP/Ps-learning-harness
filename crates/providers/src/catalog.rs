@@ -3,7 +3,7 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
-use crate::{claude_oauth, jwt_claims, workbuddy, Endpoint, ProviderError, Wire};
+use crate::{claude_oauth, codex_oauth, workbuddy, Endpoint, ProviderError, Wire};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -23,8 +23,8 @@ pub enum ProviderId {
 #[serde(rename_all = "kebab-case")]
 pub enum CredentialKind {
     ApiKey,
-    /// A ChatGPT access token (the one the Codex CLI stores).
-    ChatgptToken,
+    /// ChatGPT Plus/Pro sign-in (Codex CLI OAuth, loopback redirect).
+    ChatgptSubscription,
     /// Browser sign-in, or an API key from the account's key page.
     WorkbuddyAccount,
     /// Claude Pro/Max subscription sign-in (Claude Code OAuth).
@@ -37,6 +37,7 @@ pub enum Credential {
     ApiKey { key: String },
     Workbuddy(workbuddy::Session),
     ClaudeCode(claude_oauth::Session),
+    Codex(codex_oauth::Session),
 }
 
 #[derive(Debug, Serialize)]
@@ -86,9 +87,9 @@ const SPECS: [ProviderSpec; 8] = [
         id: ProviderId::OpenaiCodex,
         name: "ChatGPT (Codex)",
         wire: Wire::OpenaiResponses,
-        default_base_url: "https://chatgpt.com/backend-api/codex",
+        default_base_url: codex_oauth::BASE_URL,
         env_var: "OPENAI_CODEX_OAUTH_TOKEN",
-        credential: CredentialKind::ChatgptToken,
+        credential: CredentialKind::ChatgptSubscription,
         key_url: None,
     },
     ProviderSpec {
@@ -151,17 +152,27 @@ impl ProviderId {
         if key.is_empty() {
             return None;
         }
-        // ANTHROPIC_OAUTH_TOKEN is a subscription bearer, not an API key.
-        // It has no refresh token, so give it a long, non-refreshing expiry.
+        // ANTHROPIC_OAUTH_TOKEN / OPENAI_CODEX_OAUTH_TOKEN are subscription
+        // bearers, not API keys. They have no refresh token, so give them a
+        // long, non-refreshing expiry.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         if self == ProviderId::ClaudeCode {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
             return Some(Credential::ClaudeCode(claude_oauth::Session {
                 access_token: key,
                 refresh_token: String::new(),
                 expires_at: now + 30 * 24 * 3600,
+                account: None,
+            }));
+        }
+        if self == ProviderId::OpenaiCodex {
+            return Some(Credential::Codex(codex_oauth::Session {
+                access_token: key,
+                refresh_token: String::new(),
+                expires_at: now + 30 * 24 * 3600,
+                account_id: None,
                 account: None,
             }));
         }
@@ -193,9 +204,12 @@ impl ProviderId {
     }
 
     /// Auth headers for a keyed provider, without wire specifics (no
-    /// `Accept`, no path). WorkBuddy and the Claude subscription have their
-    /// own header sets in their modules.
+    /// `Accept`, no path). WorkBuddy and the Claude and ChatGPT subscriptions
+    /// have their own header sets in their modules.
     pub fn auth_headers(self, credential: &Credential) -> Result<HeaderMap, ProviderError> {
+        if self == ProviderId::OpenaiCodex {
+            return codex_oauth::headers(credential);
+        }
         let spec = self.spec();
         let Credential::ApiKey { key } = credential else {
             return Err(ProviderError::Config(format!(
@@ -208,26 +222,6 @@ impl ProviderId {
             ProviderId::Anthropic => {
                 insert(&mut headers, "x-api-key", key)?;
                 insert(&mut headers, "anthropic-version", "2023-06-01")?;
-            }
-            ProviderId::OpenaiCodex => {
-                insert(
-                    &mut headers,
-                    AUTHORIZATION.as_str(),
-                    &format!("Bearer {key}"),
-                )?;
-                let account = jwt_claims(key)
-                    .and_then(|c| {
-                        c.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned)
-                    })
-                    .ok_or_else(|| {
-                        ProviderError::Config(
-                            "this is not a ChatGPT access token (no account id claim)".into(),
-                        )
-                    })?;
-                insert(&mut headers, "chatgpt-account-id", &account)?;
-                insert(&mut headers, "OpenAI-Beta", "responses=experimental")?;
             }
             ProviderId::Openrouter => {
                 insert(
@@ -314,26 +308,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_requires_account_claim() {
-        use base64::Engine;
-        let enc = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
-        let token = format!(
-            "{}.{}.sig",
-            enc("{}"),
-            enc(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct_1"}}"#)
-        );
-        let ep = ProviderId::OpenaiCodex
-            .endpoint(&Credential::ApiKey { key: token }, None, "c")
-            .unwrap();
-        assert_eq!(ep.headers["chatgpt-account-id"], "acct_1");
-        assert!(ProviderId::OpenaiCodex
-            .endpoint(
-                &Credential::ApiKey {
-                    key: "sk-plain".into()
-                },
-                None,
-                "c"
-            )
-            .is_err());
+    fn codex_env_token_becomes_a_session() {
+        std::env::set_var("OPENAI_CODEX_OAUTH_TOKEN", " tok ");
+        let cred = ProviderId::OpenaiCodex.credential_from_env();
+        std::env::remove_var("OPENAI_CODEX_OAUTH_TOKEN");
+        let Some(Credential::Codex(s)) = cred else { panic!("{cred:?}") };
+        assert_eq!(s.access_token, "tok");
+        assert!(!s.can_refresh());
     }
 }

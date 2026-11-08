@@ -201,6 +201,7 @@ impl Harness {
                         .filter_map(|p| match p.credential_from_env() {
                             Some(providers::Credential::ApiKey { key }) => Some(key),
                             Some(providers::Credential::ClaudeCode(s)) => Some(s.access_token),
+                            Some(providers::Credential::Codex(s)) => Some(s.access_token),
                             _ => None,
                         }),
                 )

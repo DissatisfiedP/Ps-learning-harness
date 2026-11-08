@@ -166,7 +166,7 @@ docs/               architecture.md (source of truth), plugins.md (authoring spe
 
 - **Providers** (`crates/providers`):
   - Anthropic, OpenAI and OpenRouter, DeepSeek and Z.AI use an API key.
-  - ChatGPT/Codex uses an access token.
+  - ChatGPT/Codex uses the Codex CLI OAuth sign-in (`providers::codex_oauth`: PKCE, loopback redirect to `localhost:1455/auth/callback`), stores access/refresh token, expiry and account id, and refreshes 5 minutes before expiry; `OPENAI_CODEX_OAUTH_TOKEN` still overrides with a non-refreshing token.
   - WorkBuddy uses browser sign-in or an API key; details in `docs/workbuddy-provider.md`.
   - Claude Pro/Max (subscription) uses the Claude Code OAuth sign-in (PKCE, paste-the-code) and a `Bearer` token against `/v1/messages`, with the "You are Claude Code" identity prefix and `oauth-2025-04-20` beta; details in `docs/claude-subscription.md`.
   - All of them stream.

@@ -81,6 +81,7 @@ impl Harness {
                 Ok(Some(self.refresh_workbuddy(s).await?))
             }
             Credential::ClaudeCode(s) if s.can_refresh() => Ok(Some(self.refresh_claude(s).await?)),
+            Credential::Codex(s) if s.can_refresh() => Ok(Some(self.refresh_codex(s).await?)),
             _ => Ok(None),
         }
     }
