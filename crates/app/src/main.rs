@@ -766,6 +766,14 @@ fn main() {
             // Undo do-not-disturb left behind by a crash.
             let focus = Arc::new(focus::Focus::new(&config));
             let _ = focus.restore();
+            // Indexes the plugin browser and `plugin_search` read from cache:
+            // fetch the default registry (and any other) at most once a day.
+            let registries = Arc::clone(&harness);
+            tauri::async_runtime::spawn(async move {
+                registries
+                    .refresh_stale_registries(Duration::from_secs(24 * 60 * 60))
+                    .await;
+            });
             app.manage(harness);
             app.manage(events);
             app.manage(focus);

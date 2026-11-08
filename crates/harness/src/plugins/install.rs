@@ -70,12 +70,33 @@ pub enum LockSource {
     Folder { folder: String },
 }
 
-/// A registry configured on this device (`settings.json`).
+/// The owner's registry (the `Ps-learning-harness-plugins` repository),
+/// listed on every device unless the learner removes it.
+pub const DEFAULT_REGISTRY_NAME: &str = "P's Learning Harness plugins";
+pub const DEFAULT_REGISTRY_URL: &str =
+    "https://dissatisfiedp.github.io/Ps-learning-harness-plugins/index.json";
+
+/// A registry this device lists: the built-in default, or one the learner
+/// added (`settings.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Registry {
     pub name: String,
     pub url: String,
+    /// The built-in default. Never stored: settings hold only the learner's
+    /// own registries.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub builtin: bool,
+}
+
+impl Registry {
+    pub fn default_registry() -> Self {
+        Self {
+            name: DEFAULT_REGISTRY_NAME.to_owned(),
+            url: DEFAULT_REGISTRY_URL.to_owned(),
+            builtin: true,
+        }
+    }
 }
 
 /// A development plugin loaded from a folder.

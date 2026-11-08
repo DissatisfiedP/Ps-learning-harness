@@ -373,22 +373,40 @@ impl Harness {
             ));
         }
         let mut config = lock(&self.config);
+        if url == install::DEFAULT_REGISTRY_URL {
+            // The built-in default comes back; it is never stored as a row.
+            config.settings.hide_default_registry = false;
+            config.settings.registries.retain(|r| r.url != url);
+            return config.save_settings();
+        }
         config.settings.registries.retain(|r| r.url != url);
         config.settings.registries.push(Registry {
             name: name.trim().to_owned(),
             url: url.to_owned(),
+            builtin: false,
         });
         config.save_settings()
     }
 
     pub fn remove_registry(&self, url: &str) -> Result<(), Error> {
         let mut config = lock(&self.config);
+        if url == install::DEFAULT_REGISTRY_URL {
+            config.settings.hide_default_registry = true;
+        }
         config.settings.registries.retain(|r| r.url != url);
         config.save_settings()
     }
 
+    /// The built-in default (first, unless the learner removed it), then the
+    /// learner's own registries.
     pub fn registries(&self) -> Vec<Registry> {
-        lock(&self.config).settings.registries.clone()
+        let config = lock(&self.config);
+        let settings = &config.settings;
+        let default = (!settings.hide_default_registry).then(Registry::default_registry);
+        default
+            .into_iter()
+            .chain(settings.registries.iter().cloned())
+            .collect()
     }
 
     /// The cached index for `url`, fetched (and cached) when there is none.
@@ -416,46 +434,59 @@ impl Harness {
 
     /// Fetch every configured registry and cache its index (W8 Settings).
     pub async fn refresh_registries(&self) -> Vec<RegistryStatus> {
-        let registries = self.registries();
-        let mut out = Vec::with_capacity(registries.len());
-        for registry in registries {
-            match install::fetch_index(&self.client, &registry.url).await {
-                Ok(text) => match install::parse_index(&text) {
-                    Ok(index) => {
-                        let cache = install::cache_path(&self.config_dir, &registry.url);
-                        if let Some(dir) = cache.parent() {
-                            let _ = std::fs::create_dir_all(dir);
-                        }
-                        let _ = std::fs::write(&cache, &text);
-                        out.push(RegistryStatus {
-                            name: registry.name,
-                            url: registry.url,
-                            ok: true,
-                            error: None,
-                            fetched_at: Some(crate::now_iso()),
-                            plugins: index.plugins.len(),
-                        });
-                    }
-                    Err(e) => out.push(RegistryStatus {
-                        name: registry.name,
-                        url: registry.url,
-                        ok: false,
-                        error: Some(e.to_string()),
-                        fetched_at: Some(crate::now_iso()),
-                        plugins: 0,
-                    }),
-                },
-                Err(e) => out.push(RegistryStatus {
-                    name: registry.name,
-                    url: registry.url,
-                    ok: false,
-                    error: Some(e.to_string()),
-                    fetched_at: Some(crate::now_iso()),
-                    plugins: 0,
-                }),
-            }
+        let mut out = Vec::new();
+        for registry in self.registries() {
+            out.push(self.refresh_registry(registry).await);
         }
         out
+    }
+
+    /// At startup: fetch the registries whose cached index is missing or
+    /// older than `max_age`, so the Settings browser and `plugin_search`
+    /// (which read only the cache) see the default registry without the
+    /// learner pressing Refresh. Failures are logged; the cache stays as it was.
+    pub async fn refresh_stale_registries(&self, max_age: std::time::Duration) {
+        for registry in self.registries() {
+            let cache = install::cache_path(&self.config_dir, &registry.url);
+            let fresh = std::fs::metadata(&cache)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < max_age);
+            if fresh {
+                continue;
+            }
+            let status = self.refresh_registry(registry).await;
+            if let Some(error) = status.error {
+                tracing::warn!(registry = %status.url, %error, "registry refresh failed");
+            }
+        }
+    }
+
+    async fn refresh_registry(&self, registry: Registry) -> RegistryStatus {
+        let fetched = match install::fetch_index(&self.client, &registry.url).await {
+            Ok(text) => install::parse_index(&text).map(|index| (text, index)),
+            Err(e) => Err(e),
+        };
+        let (ok, error, plugins) = match fetched {
+            Ok((text, index)) => {
+                let cache = install::cache_path(&self.config_dir, &registry.url);
+                if let Some(dir) = cache.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&cache, &text);
+                (true, None, index.plugins.len())
+            }
+            Err(e) => (false, Some(e.to_string()), 0),
+        };
+        RegistryStatus {
+            name: registry.name,
+            url: registry.url,
+            ok,
+            error,
+            fetched_at: Some(crate::now_iso()),
+            plugins,
+        }
     }
 
     /// Cached index contents, for the Settings browser and the consent screen.
@@ -636,4 +667,54 @@ pub fn install_candidate(harness: &Harness, id: &str) -> Option<InstallCandidate
         }
     }
     None
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use crate::plugins::install::{Registry, DEFAULT_REGISTRY_URL};
+    use crate::Harness;
+
+    #[test]
+    fn the_default_registry_is_listed_until_removed_and_returns_when_re_added() {
+        let dir = std::env::temp_dir().join(format!("lh-registries-{}", ulid::Ulid::new()));
+        let open = || Harness::open(&dir.join("repo"), &dir.join("config")).unwrap();
+        let urls = |h: &Harness| {
+            h.registries()
+                .into_iter()
+                .map(|r| r.url)
+                .collect::<Vec<_>>()
+        };
+        let settings = || std::fs::read_to_string(dir.join("config/settings.json")).unwrap();
+
+        let h = open();
+        assert_eq!(h.registries(), vec![Registry::default_registry()]);
+        h.add_registry("Mine", "https://example.org/index.json")
+            .unwrap();
+        assert_eq!(
+            urls(&h),
+            [DEFAULT_REGISTRY_URL, "https://example.org/index.json"]
+        );
+        // Only the learner's own registry is stored.
+        assert!(!settings().contains(DEFAULT_REGISTRY_URL), "{}", settings());
+
+        h.remove_registry(DEFAULT_REGISTRY_URL).unwrap();
+        drop(h);
+        let h = open();
+        assert_eq!(
+            urls(&h),
+            ["https://example.org/index.json"],
+            "removal survives a restart"
+        );
+
+        h.add_registry("Again", DEFAULT_REGISTRY_URL).unwrap();
+        let listed = h.registries();
+        assert_eq!(listed[0], Registry::default_registry());
+        assert_eq!(
+            listed.len(),
+            2,
+            "re-adding restores the default, not a second row"
+        );
+        assert!(!settings().contains(DEFAULT_REGISTRY_URL), "{}", settings());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

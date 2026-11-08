@@ -706,6 +706,9 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
     let (repo, config) = temp_dirs("plugin-registry");
     let h = harness(&repo, &config, &base).await;
     let registry = local_registry(repo.parent().unwrap());
+    // Offline: the built-in default registry would be fetched from the network.
+    h.remove_registry(harness::plugins::install::DEFAULT_REGISTRY_URL)
+        .unwrap();
     h.add_registry("Test", &registry).unwrap();
     let fetched = h.refresh_registries().await;
     assert!(fetched[0].ok && fetched[0].plugins == 1, "{fetched:?}");

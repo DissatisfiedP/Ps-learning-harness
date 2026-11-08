@@ -497,6 +497,12 @@ async function renderRegistries() {
     const name = document.createElement('p');
     name.className = 'registry-name';
     name.textContent = registry.name || registry.url;
+    if (registry.builtin) {
+      const tag = document.createElement('span');
+      tag.className = 'role-tag';
+      tag.textContent = 'default';
+      name.append(tag);
+    }
     const url = document.createElement('p');
     url.className = 'meta';
     url.textContent = registry.url;
@@ -541,7 +547,11 @@ async function renderRegistries() {
           // Fine: the row is gone anyway.
         }
         catalogCache = null;
-        registryStatus(`Removed ${registry.name || registry.url}.`);
+        registryStatus(
+          registry.builtin
+            ? `Removed ${registry.name}. Add ${registry.url} to bring it back.`
+            : `Removed ${registry.name || registry.url}.`,
+        );
         await renderRegistries();
       } catch (e) {
         registryStatus(message(e), true);

@@ -163,10 +163,15 @@ pub struct Settings {
     /// written after load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelChoice>,
-    /// Plugin registries (W8). Empty by default: no public registry ships
-    /// until the owner publishes one.
+    /// Plugin registries the learner added (W8). The built-in default
+    /// (`install::DEFAULT_REGISTRY_URL`) is not stored here; see
+    /// `hide_default_registry`.
     #[serde(default)]
     pub registries: Vec<crate::plugins::install::Registry>,
+    /// The learner removed the built-in default registry. Adding its URL
+    /// again clears this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_default_registry: bool,
     /// Development plugins added by folder.
     #[serde(default)]
     pub plugin_folders: Vec<crate::plugins::install::FolderPlugin>,
