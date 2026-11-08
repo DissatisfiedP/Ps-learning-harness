@@ -18,7 +18,8 @@ build order these items follow.
 - **No green Android CI run is on record yet.** The bundle jobs now run on every push, and `release.yml`
   publishes what a push run built. The Android job has been fixed run by run: the `android-37.0` platform
   package, a library target for `crates/app`, the r29 NDK, OpenSSL (vendored, then the NDK's `llvm-ranlib`),
-  and a desktop-only `pick_folder`. No APK has been installed on a device.
+  a desktop-only `pick_folder`, and Luau integers that are `i32` on the 32-bit ABIs. No APK has been
+  installed on a device.
 
 ## 2. Designed, not built
 

@@ -127,7 +127,7 @@ fn to_json(value: &Value, path: &mut Vec<*const std::ffi::c_void>) -> LuaResult<
             for pair in t.clone().pairs::<Value, Value>() {
                 let (k, v) = pair?;
                 match k {
-                    Value::Integer(i) => indexed.push((i, v)),
+                    Value::Integer(i) => indexed.push((int_to_i64(i), v)),
                     Value::Number(n) if n.fract() == 0.0 && n.abs() < 9.0e15 => {
                         indexed.push((n as i64, v))
                     }
@@ -167,12 +167,26 @@ fn to_json(value: &Value, path: &mut Vec<*const std::ffi::c_void>) -> LuaResult<
     })
 }
 
+// mlua's Luau `Integer` is `i32` on 32-bit targets (armv7, i686 Android) and
+// `i64` elsewhere, so these conversions are identities on 64-bit hosts.
+#[allow(clippy::useless_conversion)]
+fn int_to_i64(i: mlua::Integer) -> i64 {
+    i64::from(i)
+}
+
+/// `None` when the value doesn't fit the target's `Integer`; the caller then
+/// passes it as a float, which is what a Luau number is anyway.
+#[allow(clippy::useless_conversion)]
+fn i64_to_int(i: i64) -> Option<mlua::Integer> {
+    mlua::Integer::try_from(i).ok()
+}
+
 pub fn json_to_lua(lua: &Lua, value: &Json) -> LuaResult<Value> {
     Ok(match value {
         Json::Null => Value::Nil,
         Json::Bool(b) => Value::Boolean(*b),
         Json::Number(n) => {
-            if let Some(i) = n.as_i64() {
+            if let Some(i) = n.as_i64().and_then(i64_to_int) {
                 Value::Integer(i)
             } else {
                 Value::Number(n.as_f64().unwrap_or(0.0))
