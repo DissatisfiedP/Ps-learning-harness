@@ -26,8 +26,13 @@ pdf-extract = "0.12.1"
 lopdf = "0.42.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # Sync (docs/sync-build.md): libgit2 from source so no system libgit2 is needed;
-# HTTPS goes through the system OpenSSL, and SSH is out of scope.
+# HTTPS goes through OpenSSL, and SSH is out of scope.
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https"] }
+
+# Android has no system OpenSSL to link (git2's HTTPS transport needs one), so
+# build it from source there. Desktop keeps the system library.
+[target.'cfg(target_os = "android")'.dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }
 
 [lints]
 workspace = true
