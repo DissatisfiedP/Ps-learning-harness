@@ -312,7 +312,9 @@ mod tests {
         std::env::set_var("OPENAI_CODEX_OAUTH_TOKEN", " tok ");
         let cred = ProviderId::OpenaiCodex.credential_from_env();
         std::env::remove_var("OPENAI_CODEX_OAUTH_TOKEN");
-        let Some(Credential::Codex(s)) = cred else { panic!("{cred:?}") };
+        let Some(Credential::Codex(s)) = cred else {
+            panic!("{cred:?}")
+        };
         assert_eq!(s.access_token, "tok");
         assert!(!s.can_refresh());
     }

@@ -29,9 +29,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      # Expected to FAIL until the pending formatting pass lands: today
-      # `cargo fmt --all --check` rewrites 35 files. The gate is committed now so
-      # that pass is verified when it lands and cannot regress afterwards.
       - name: Check formatting
         run: cargo fmt --all --check
 

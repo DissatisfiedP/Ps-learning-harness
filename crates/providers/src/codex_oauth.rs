@@ -161,8 +161,7 @@ fn bind(port: u16) -> Result<std::net::TcpListener, ProviderError> {
     Ok(listener)
 }
 
-const DONE_PAGE: &str =
-    "<html><body><p>Login complete. Return to the app.</p></body></html>";
+const DONE_PAGE: &str = "<html><body><p>Login complete. Return to the app.</p></body></html>";
 
 /// Serve `CALLBACK_PATH` until a request carries `code` (with the expected
 /// `state`) or `error`. Other paths get 404 and the wait continues.
@@ -186,7 +185,9 @@ async fn wait_for_code(
             a = listener.accept() => a,
             () = tokio::time::sleep(Duration::from_millis(250)) => continue,
         };
-        let Ok((mut stream, _)) = accepted else { continue };
+        let Ok((mut stream, _)) = accepted else {
+            continue;
+        };
         let target = match read_target(&mut stream).await {
             Some(t) => t,
             None => continue,
@@ -328,7 +329,10 @@ fn session_from(data: &serde_json::Value, now: i64) -> Result<Session, ProviderE
         .ok_or_else(|| ProviderError::Protocol("token response has no access_token".into()))?
         .to_owned();
     let claims = data["id_token"].as_str().and_then(crate::jwt_claims);
-    let expires_in = data["expires_in"].as_i64().filter(|&s| s > 0).unwrap_or(3600);
+    let expires_in = data["expires_in"]
+        .as_i64()
+        .filter(|&s| s > 0)
+        .unwrap_or(3600);
     Ok(Session {
         account_id: claims.as_ref().and_then(account_id),
         account: claims
@@ -362,7 +366,11 @@ pub(crate) fn headers(credential: &crate::Credential) -> Result<HeaderMap, Provi
     let account = session
         .account_id
         .clone()
-        .or_else(|| crate::jwt_claims(&session.access_token).as_ref().and_then(account_id))
+        .or_else(|| {
+            crate::jwt_claims(&session.access_token)
+                .as_ref()
+                .and_then(account_id)
+        })
         .ok_or_else(|| {
             ProviderError::Config("this is not a ChatGPT access token (no account id)".into())
         })?;
@@ -478,7 +486,9 @@ mod tests {
         assert_eq!(h["originator"], ORIGINATOR);
         assert_eq!(h["openai-beta"], "responses=experimental");
         let env = Session {
-            access_token: jwt(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct_env"}}"#),
+            access_token: jwt(
+                r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct_env"}}"#,
+            ),
             refresh_token: String::new(),
             expires_at: 0,
             account_id: None,
@@ -486,7 +496,10 @@ mod tests {
         };
         let h = headers(&Credential::Codex(env.clone())).unwrap();
         assert_eq!(h["chatgpt-account-id"], "acct_env");
-        let plain = Session { access_token: "sk-plain".into(), ..env };
+        let plain = Session {
+            access_token: "sk-plain".into(),
+            ..env
+        };
         assert!(headers(&Credential::Codex(plain)).is_err());
         assert!(headers(&Credential::ApiKey { key: "k".into() }).is_err());
     }
@@ -524,7 +537,11 @@ mod tests {
         let client = reqwest::Client::new();
         let base = format!("http://127.0.0.1:{port}");
         let hits = async {
-            let r = client.get(format!("{base}/favicon.ico")).send().await.unwrap();
+            let r = client
+                .get(format!("{base}/favicon.ico"))
+                .send()
+                .await
+                .unwrap();
             assert_eq!(r.status(), 404);
             let r = client
                 .get(format!("{base}/auth/callback?code=abc&state=st"))
