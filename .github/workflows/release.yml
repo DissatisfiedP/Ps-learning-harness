@@ -1,0 +1,68 @@
+# Publishes the bundles CI already built for a commit as a GitHub Release: no
+# rebuild, no local download/upload. Run it from Actions → Release → "Run
+# workflow". It creates the tag on the chosen commit, so no release commit is
+# needed; an existing tag is reused as-is.
+#
+# The bundles come from the newest completed `push` run of ci.yml for that
+# commit (pull_request runs build the PR's merge ref, not the commit itself).
+# Artifacts expire (90 days by default); after that, re-run the commit's CI
+# first.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create, e.g. v0.1.0'
+        required: true
+      ref:
+        description: 'Commit SHA, branch or tag whose CI bundles to release'
+        required: true
+        default: master
+      prerelease:
+        description: 'Mark as a pre-release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # create the tag and the release
+  actions: read # find the CI run and download its artifacts
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+      REF: ${{ inputs.ref }}
+      PRERELEASE: ${{ inputs.prerelease }}
+    steps:
+      - name: Resolve the commit and its CI run
+        id: ci
+        run: |
+          sha=$(gh api "repos/$GH_REPO/commits/$REF" --jq .sha)
+          run_id=$(gh run list --workflow ci.yml --commit "$sha" --event push \
+            --status completed --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -z "$run_id" ]; then
+            echo "::error::no completed push run of ci.yml for $sha"
+            exit 1
+          fi
+          echo "commit $sha, CI run $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run_id"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+      # Fails if either bundle job did not upload (failed, skipped or cancelled).
+      - name: Download the bundles
+        run: gh run download "$RUN_ID" --name appimage --name android-apk --dir dist
+        env:
+          RUN_ID: ${{ steps.ci.outputs.run_id }}
+      - name: Create the release
+        env:
+          SHA: ${{ steps.ci.outputs.sha }}
+        run: |
+          mapfile -t files < <(find dist -type f \( -name '*.AppImage' -o -name '*.apk' \))
+          printf 'asset: %s\n' "${files[@]}"
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${files[@]}" --target "$SHA" --title "$TAG" \
+            --generate-notes "${flags[@]}"

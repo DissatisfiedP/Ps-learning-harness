@@ -161,9 +161,18 @@ jobs:
       # Installs cmdline-tools, accepts the SDK licences and downloads the
       # platform tauri-cli 2.12's template compiles against (compileSdk 37,
       # read from the CLI binary); AGP fetches the matching build-tools itself.
+      # From API 37 Google publishes platforms with a minor version: the package
+      # is `platforms;android-37.0` (there is no `platforms;android-37`), and it
+      # installs to platforms/android-37.0.
       - uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-37'
+          packages: 'platforms;android-37.0'
+      # The template's `compileSdk = 37` makes AGP look the platform up by the
+      # hash string `android-37`, which can fail against a directory named
+      # android-37.0 ("Failed to find target with hash string 'android-37'",
+      # actions/runner-images#13859); the alias is the reported workaround.
+      - name: Alias platforms/android-37 to android-37.0
+        run: ln -sfn android-37.0 "$ANDROID_HOME/platforms/android-37"
       # NDK r29: tauri-cli 2.12.4 carries 29.0.13846066 — the only Android NDK
       # version literal in the binary — and refuses an older `NDK_HOME`.
       - uses: nttld/setup-ndk@v1
