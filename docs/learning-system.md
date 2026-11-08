@@ -1,6 +1,6 @@
 # Learning system: target levels, starting point, plan controls, hunts, field guide, calibration
 
-Status: **built 2026-11-07.** Written 2026-11-06 as the design; the code now exists in `crates/harness` (records, ops, tools, gates), `crates/harness/prompts` (each feature behind a template flag, all on) and `ui/`. This document is still the source of truth for behaviour. §10 records the closing review and what remains open; `docs/learning-system-build.md` records the mechanism choices the design left open.
+Status: **built 2026-11-07.** Written 2026-11-06 as the design; the code now exists in `crates/harness` (records, ops, tools, gates), `crates/harness/prompts` (each feature behind a template flag, all on) and `ui/`. This document is still the source of truth for behaviour. §10 records the closing review and what remains open.
 
 ## 0. Scope: learning system, not technical architecture
 
@@ -378,7 +378,7 @@ At session close the learner gets a **field guide**: the venues useful now, and 
 - **The record** lives on **topics** in the knowledge graph: the builder job submits a `venue` op naming the topic
   whose material the venue serves (`crates/harness/prompts/jobs/graph-builder.md` §6), and the read model aggregates
   each topic's own venues with its descendants'. A second session on the same topic refines the row instead of
-  copying it, so the guide grows across sessions (`docs/graph-build.md`).
+  copying it, so the guide grows across sessions (`crates/harness/src/graph/`).
 - **The Map** shows it from the graph, not from a session: a closed "Where the field lives" panel lists the topics
   that have venues (row → jump to the topic), and an idea's card lists its topic's own plus descendants' venues
   grouped Ask / Discussion / Reference (`docs/ui-design.md` §7.6, §7.7.6). With no venues in the graph, neither
@@ -593,7 +593,7 @@ new evidence.
    exists and its builder job runs, but the `heuristic` node kind with `attribution`/`scope`,
    `hunt` provenance on nodes (and its `unverified` state until the debrief) and calibration per
    topic are not built, and the coach's critique and design-to-constraints problems wait for the
-   coach. **Venues are built**: the builder submits a `venue` op per topic (`docs/graph-build.md`),
+   coach. **Venues are built**: the builder submits a `venue` op per topic (`crates/harness/src/graph/`),
    the read model aggregates own plus descendants, and the Map shows them. The honest residue is
    the builder's judgement — a venue only reaches its topic because the model named one, and no
    code checks that the topic is the right one — and the learner cannot edit or remove a venue in

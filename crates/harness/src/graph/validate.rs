@@ -1,4 +1,4 @@
-//! What a `graph_submit` must get right (`docs/graph-build.md`).
+//! What a `graph_submit` must get right (architecture §4.3, §4.6).
 //!
 //! The code owns these rules, not the prompt: a refused submit returns every
 //! problem at once, in the style of `plan_write`, and the builder run carries

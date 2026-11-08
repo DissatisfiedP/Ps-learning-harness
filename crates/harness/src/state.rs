@@ -44,7 +44,7 @@ pub enum Kind {
     Argument,
     /// A practitioner's rule of thumb: useful and true enough, not a law. It
     /// carries `attribution` and `scope` on the graph node that holds it
-    /// (`docs/graph-build.md`). A plan node never uses it.
+    /// (`docs/learning-system.md` §5). A plan node never uses it.
     Heuristic,
 }
 

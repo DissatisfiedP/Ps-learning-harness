@@ -344,7 +344,7 @@ impl Harness {
         proposals::decide(&self.repo, accept, dismiss)
     }
 
-    /// Start the graph builder for this session (`docs/graph-build.md`). Runs
+    /// Start the graph builder for this session (architecture §4.7). Runs
     /// in the background on the Librarian role, appends ops, and never
     /// delivers anything into the conversation. Refuses with a readable
     /// message while one is already open for the session.

@@ -1243,7 +1243,7 @@ derives a per-claim state from them. `venues` is one row per venue, and each row
 topic whose material it serves; `topicVenues` is the read model the UI uses — every topic's own
 venues **plus its descendants'**, so `Mathematics` also carries what was recorded under
 `Mathematics › Calculus`. Both are sorted ask → discussion → reference, then by name. The graph
-builder is their only writer today (the `venue` op; `docs/graph-build.md`). The command reads
+builder is their only writer today (the `venue` op in `graph/ops.jsonl`). The command reads
 `<repo>/graph/` and nothing else — no session replay, no cache of open sessions to disturb.
 
 **Where the field lives is on the map (`ui/map.js`).** Because a venue belongs to a topic, the Map
@@ -1461,7 +1461,7 @@ Details and the two gaps:
 - The returned block shows the notes, then the links, then that phrase per file, and "Debrief in
   progress." — or "Debriefed. Teaching continues." once `hunt.debriefed` is true.
 - **Not shipped:** the sorted-claim list from `debrief_record`. `session_state` carries no claims, and
-  the `debrief` op's payload is not part of the UI contract (`docs/learning-system-build.md`), so
+  the `debrief` op's payload is not part of the UI contract, so
   rendering them would mean a second width of backend change. The debrief's prose reply is where the
   learner sees the sort for now.
 

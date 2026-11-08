@@ -1,4 +1,4 @@
-//! End-to-end proof of the graph core (`docs/graph-build.md`): a session is
+//! End-to-end proof of the graph core (architecture §4.2–§4.7): a session is
 //! closed, the graph builder runs on the scripted provider, a refused
 //! `graph_submit` is fixed in the next call, the ops land in
 //! `graph/ops.jsonl`, and `knowledge_map` reads them back — with the builder's

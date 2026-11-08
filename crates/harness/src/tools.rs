@@ -591,7 +591,7 @@ pub fn researcher_tools() -> Vec<ToolSpec> {
     ]
 }
 
-/// The graph builder's tools (`docs/graph-build.md`): search the graph, then
+/// The graph builder's tools (`jobs/graph-builder.md`): search the graph, then
 /// submit what the session established. `graph_submit` is validated by code
 /// (`graph::check`) and the run continues on a refusal.
 pub fn graph_tools() -> Vec<ToolSpec> {

@@ -1,4 +1,4 @@
-//! The knowledge graph as an append-only op log (`docs/graph-build.md`).
+//! The knowledge graph as an append-only op log (architecture §4.2–§4.7).
 //!
 //! Structure lives in `graph/ops.jsonl`: one JSON object per line, every op
 //! carrying `op`, `opId` (ULID) and `at` (ISO-8601). Folding the log, ordered

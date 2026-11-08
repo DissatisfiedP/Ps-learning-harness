@@ -342,7 +342,7 @@ impl Harness {
         let composer = Composer::new(&self.repo);
         let mut flags = HashSet::new();
         flags.insert("mermaid".to_owned());
-        // Learning-system flags (docs/learning-system-build.md): each is on
+        // Learning-system flags (docs/learning-system.md, "Feature flags"): each is on
         // when the data its blocks need can exist.
         flags.insert("levels".to_owned());
         flags.insert("starting_point".to_owned());

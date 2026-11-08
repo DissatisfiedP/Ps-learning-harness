@@ -1,6 +1,6 @@
 //! The knowledge graph read model: a topic tree with proposition nodes, typed
 //! edges, argument chains and split proposals, folded from the data repo's
-//! append-only op log (`docs/graph-build.md`, architecture §4.2, §4.5).
+//! append-only op log (architecture §4.2, §4.5).
 //!
 //! On disk (plain files, git-friendly, arch §4.17):
 //! - `graph/ops.jsonl` — the structure, one op per line, never rewritten.

@@ -167,7 +167,7 @@ pub fn replay_state(ops: &[Op]) -> SessionState {
                     }
                     // A graph build is not conversation material: its result
                     // is the counts it appended, and delivering it would wake
-                    // the tutor for nothing (`docs/graph-build.md`).
+                    // the tutor for nothing (architecture §4.7).
                     "done" | "failed" if !j.blocking && j.kind != "graph" => {
                         let result = match (&j.result, &j.error) {
                             (_, Some(e)) if j.state == "failed" => {

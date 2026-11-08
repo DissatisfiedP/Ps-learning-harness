@@ -17,7 +17,7 @@
 //! (`from\0to\0relation`), because the file predates the rows having ids.
 //!
 //! Accepting appends to `graph/ops.jsonl` — the graph has one writer shape
-//! (`docs/graph-build.md`) — and never rewrites `nodes.jsonl` or
+//! (`crate::graph`) — and never rewrites `nodes.jsonl` or
 //! `edges.jsonl`; those are only read once, by the migration.
 
 use std::collections::{BTreeMap, HashSet};

@@ -14,7 +14,7 @@
 //! persisted (tagged `agent: "planner"`) for the record and the UI, but are
 //! not part of the tutor's messages.
 //!
-//! The graph builder (`docs/graph-build.md`) is stranger still: it reads a
+//! The graph builder (architecture §4.7) is stranger still: it reads a
 //! session's transcript and appends ops to `<repo>/graph/ops.jsonl`. Its result
 //! is never delivered and never wakes the tutor — the graph is not
 //! conversation material — so the job op is the only trace, and its tool calls
@@ -63,7 +63,7 @@ const SALVAGE_NOTE: &str =
     "answered in prose without the structured brief; fields the tutor may need are missing";
 
 /// Most characters of a session's transcript the graph builder reads
-/// (`docs/graph-build.md`): a long session is clipped at the end, because the
+/// (architecture §4.7): a long session is clipped at the end, because the
 /// goal, the plan and the first teaching are what most of the extraction rests
 /// on.
 const MAX_GRAPH_TRANSCRIPT: usize = 24_000;

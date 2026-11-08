@@ -1,6 +1,6 @@
 # What is not implemented
 
-Status: 2026-11-07. This is a one-page inventory; `docs/agent-system-plan.md` is the detailed record
+Status: 2026-11-08. This is a one-page inventory; `docs/agent-system-plan.md` is the detailed record
 (what is built, why, and the numbered known gaps this file condenses). `docs/architecture.md` §8 is the
 build order these items follow.
 
@@ -13,9 +13,12 @@ build order these items follow.
 - **The UI is verified in headless Chromium only**, against a mocked Tauri bridge — never in WebKitGTK and
   never on a device. Plugin-view isolation likewise: Chromium, not WebKitGTK.
 - **Sync is proven against local bare repositories only.** No real host, no token flow, no two devices, no
-  phone. libgit2 cross-compiling to Android is unproven.
-- **The CI bundle jobs (AppImage, APK) have never run.** They were written from the Tauri CLI's help text and
-  embedded mobile template.
+  phone. On Android, libgit2 and OpenSSL are built from source (`openssl-sys/vendored`), but nothing has
+  synced from a phone.
+- **No green Android CI run is on record yet.** The bundle jobs now run on every push, and `release.yml`
+  publishes what a push run built. The Android job has been fixed run by run: the `android-37.0` platform
+  package, a library target for `crates/app`, the r29 NDK, and OpenSSL (vendored, then the NDK's
+  `llvm-ranlib`). No APK has been installed on a device.
 
 ## 2. Designed, not built
 
@@ -24,15 +27,19 @@ build order these items follow.
 - **Practice** (arch §4.11–4.13): the coach, the problem checker job, problem generation with committed
   answers, stream/set formats, and **exam mode** (papers, coverage scheduling, simulation). Practice today is
   one prompt with no tools, and "Practise n ideas" on the Map persists nothing.
-- **Mobile runtime** (arch §8.7): CI now produces an APK, but the app has never run on Android; iOS has no
-  project at all (needs a Mac and a developer account).
+- **WebDAV sync target** (`docs/sync-build.md`, decided 2026-11-08): a second sync target, independent of
+  git (none, git, WebDAV or both per device), with an ETag/`If-Match` three-way pass and the same union merges.
+- **Mobile session lock** (`docs/sync-build.md`): a session turns read-only on a phone only once the tutor
+  has used, or tries to use, a plugin whose `platforms` lacks `mobile`; a synced `mobileUnlock` op lets the
+  learner continue without those tools. Plugin tool calls and `artifact` ops do not record `platforms` yet.
+- **Mobile runtime** (arch §8.7): the app has never run on Android; iOS has no project at all (needs a Mac
+  and a developer account).
 - **Native plugins** (`sandbox`, `code-runner`, `repl`, `cas`, `live-search`, `image-set`) and the seven
-  catalogue manifests: none is implemented or loadable. The Luau runtime, registry, install/lock, views and
-  the reference `circuit` package are real; the catalogue is not. `argument-map` (the one Luau candidate) is
-  not written either.
-- **Public plugin registry**: registries are supported, but the owner has published none, so a fresh install
-  has zero plugins.
-- **Secure OS storage for credentials**: still a `0600` file; no keychain/keystore.
+  catalogue manifests: none is implemented or loadable. The Luau runtime (host API as `@harness/*` modules),
+  registry, install/lock, views and the reference `circuit` package are real; the catalogue is not.
+  `argument-map` (the one Luau candidate) is not written either.
+- **Secure OS storage for credentials**: still a `0600` file; no keychain/keystore. The ChatGPT OAuth
+  tokens (access, refresh, expiry) are stored there too.
 - **Tree-sitter plugin**, **Typst artifact renderer**, **plugin-builder agent**: designed/rejected/optional,
   all absent.
 

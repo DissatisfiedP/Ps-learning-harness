@@ -2,7 +2,7 @@
 
 Status: **built 2026-11-07.** What shipped, the deviations and what is unproven are recorded in
 `docs/agent-system-plan.md` ("Decisions in the graph, sync, plan-card and CI build", and gaps 13 and 16).
-Deviations from the text below: `git2` 0.21 with `vendored-libgit2` and the system OpenSSL, a `conflicts` ledger kept
+Deviations from the text below: `git2` 0.21 with `vendored-libgit2` and the system OpenSSL (built from source on Android), a `conflicts` ledger kept
 in `sync.json` for the needs-attention list, and no UI yet (the commands exist; Settings does not).
 
 **Planned, not built (decided 2026-11-08):** WebDAV as a second sync target next to git; see
@@ -20,9 +20,9 @@ any host. **Device-local state never syncs**: `settings.json`, `credentials.json
 
 ## Crate and auth
 
-- `git2` (libgit2) with `vendored-libgit2`; HTTPS remotes use the system OpenSSL (`libssl`). Add it to
-  `crates/harness/Cargo.toml`; the workspace already builds offline against the local registry cache, and CI installs
-  `libssl-dev`.
+- `git2` (libgit2) with `vendored-libgit2`; HTTPS remotes use the system OpenSSL (`libssl`) on desktop and OpenSSL
+  built from source (`openssl-sys/vendored`) on Android. Add it to `crates/harness/Cargo.toml`; the workspace already
+  builds offline against the local registry cache, and CI installs `libssl-dev`.
 - Remote: an HTTPS URL plus a personal access token, stored **device-locally** in `<config>/sync.json` (mode 0600,
   never in the repo, never synced): `{ remote, token, branch, lastSyncAt, lastError }`. SSH keys are out of scope.
 - The repo's `.gitattributes` is written on first use when missing: `*.jsonl merge=union` (sessions, graph ops,

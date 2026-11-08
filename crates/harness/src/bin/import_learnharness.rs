@@ -11,7 +11,7 @@
 //! provenance `{"type":"import"}` — plus `graph/checks.jsonl` for the learner
 //! evidence. It never writes the legacy `topics.json` / `nodes.jsonl` /
 //! `edges.jsonl` files; those are only read once, by the migration
-//! (`docs/graph-build.md`).
+//! (`graph::migrate`).
 //!
 //! Usage: `cargo run -p harness --bin import_learnharness -- <learnharness-data-dir> <repo-dir>`
 //!
