@@ -5,6 +5,9 @@ Status: **built 2026-11-07.** What shipped, the deviations and what is unproven 
 Deviations from the text below: `git2` 0.21 with `vendored-libgit2` and the system OpenSSL, a `conflicts` ledger kept
 in `sync.json` for the needs-attention list, and no UI yet (the commands exist; Settings does not).
 
+**Planned, not built (decided 2026-11-08):** WebDAV as a second sync target next to git; see
+[WebDAV target](#webdav-target-planned-not-built) at the end.
+
 Source of truth for behaviour: `docs/architecture.md` §4.18 (algorithm, layout, what is not synced) and §6.4 (why `git2`).
 This file fixes the interfaces.
 
@@ -98,3 +101,82 @@ the session keeps working read-write (the "not synced" state is what the UI bann
   duplicate `opId` and no lost op; a conflicting `graph/topics.json` produces local-wins plus a `.conflicts/` file plus
   `needsAttention`; a rejected token and an unreachable remote give readable errors and leave the tree unchanged.
 - `cargo test --workspace --offline`, `cargo clippy --workspace --all-targets --offline`, `scripts/ui-check/run.sh ipc placement`.
+
+## WebDAV target (planned, not built)
+
+Decided 2026-11-08; nothing below exists in code yet.
+
+### Why
+
+Git needs a git host and a personal access token, and libgit2's HTTPS transport needs OpenSSL, which Android doesn't
+ship. WebDAV is a plain file protocol that free storage already speaks: [Koofr](https://koofr.eu/) gives 10 GB free with
+per-app passwords, and a self-hosted Nextcloud works the same way. Joplin offers the same family of targets
+(WebDAV, Nextcloud, S3, Dropbox, OneDrive). The data is small: one real session is 264 KB, so even 250 MB is roughly a
+thousand sessions of that size.
+
+### Git and WebDAV are independent
+
+Each device chooses **none, git, WebDAV, or both**. Each target has its own device-local settings, status and last
+error, and either can be turned off without touching the other.
+
+Running both is safe because every merge here is a union: `*.jsonl` lines are deduplicated by `opId`, and the other
+file types follow the step-5 rules. Data that arrives through one target and leaves through the other converges to the
+same files, whatever the order. One `sync()` run stays single-flight and runs the configured targets in a fixed order
+(git, then WebDAV) so the status reads predictably. A failure in one target is recorded on that target and doesn't stop
+the other. Conflict copies from either target go to the same `.conflicts/` folder and `needsAttention` list.
+
+### Settings
+
+`sync.json` (mode 0600, never synced) gains a `webdav` object next to the git fields:
+`{ url, username, password, lastSyncAt, lastError }`. The password is an app password, stored like the git token and
+never logged. Only `https://` URLs are accepted (plus `http://localhost` for a local test server). The data lives under
+one folder at that URL, with the same relative paths as the data repo and no `.git/`. The device-local files listed in
+"What sync is" are excluded exactly as for git.
+
+### Algorithm (one WebDAV pass)
+
+WebDAV has no history, so the pass is a three-way comparison against a device-local manifest,
+`<config>/webdav-state.json`. For every path it holds the remote ETag and the local content hash recorded at the last
+successful sync.
+
+1. List the remote folder with `PROPFIND` (`Depth: 1`, walked recursively; many servers refuse `Depth: infinity`),
+   keeping each file's ETag.
+2. Per path, compare local (hash vs manifest) with remote (ETag vs manifest):
+   - **only local changed or new:** `PUT` with `If-Match: <manifest ETag>`, or `If-None-Match: *` for a new file;
+   - **only remote changed or new:** `GET` and write locally;
+   - **both changed:** `GET`, merge by file type (same rules as git step 5), write locally, then `PUT` with
+     `If-Match: <the ETag just read>`;
+   - **gone locally, still in the manifest, remote unchanged:** `DELETE` remote with `If-Match` (deleted sessions
+     must not come back);
+   - **gone remotely, still in the manifest, local unchanged:** delete locally;
+   - **gone on one side but changed on the other:** keep the changed copy (a change beats a delete).
+3. A `412 Precondition Failed` means another device wrote in between: re-read, re-merge and retry (bounded, e.g.
+   three times), then record an error and leave the file for the next run.
+4. Create missing folders with `MKCOL`. Write the manifest only for paths that succeeded, so an interrupted pass
+   resumes instead of redoing everything or losing a change.
+
+### Client
+
+Use `reqwest` (already a dependency, `rustls`, so no OpenSSL on any platform). The client issues `PROPFIND`, `GET`,
+`PUT`, `DELETE` and `MKCOL` directly. Apache OpenDAL's `services-webdav` is the alternative if its writes support
+`If-Match`; check that before choosing it, because conditional writes are what make step 3 safe.
+
+### Sessions that used desktop-only plugins
+
+Sync carries every session to every device. A session whose plugins don't all list `mobile` in `platforms` opens
+**read-only on mobile**, with a note naming the plugin and saying to continue on desktop. It stays fully writable on
+desktop. The existing `read_only` path is reused, with its own reason so the note differs from the legacy one.
+
+The `pluginGrant` and `artifact` ops record only the plugin id, version and hash, and a desktop-only plugin is never
+installed on a phone. So the plugin's `platforms` must be stored in those ops when they are written (a new field,
+defaulting to absent). For older ops without it, mobile falls back to the cached registry index. **Open:** whether a
+plugin found in neither place locks the session (safe) or leaves it writable.
+
+### Verification (when built)
+
+- Tests against a local WebDAV server in a temp dir, e.g. `rclone serve webdav`, with no network: first upload;
+  pulling another device's write; both sides appending to one session merge by union; a concurrent write produces a
+  412, then a re-merge and success; a deleted session stays deleted on the other device; a wrong password gives a
+  readable error and leaves local files untouched.
+- Git and WebDAV both on: a change made on device A with git only and device B with WebDAV only reaches both through
+  a third device that has both targets, with no duplicate `opId`.

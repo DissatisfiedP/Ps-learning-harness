@@ -691,6 +691,9 @@ On mobile, the OS suspends backgrounded apps, including the Rust core. Jobs ther
 
 **Chosen:** git with **app-controlled merges**.
 
+**Planned (not built):** WebDAV as a second, independent target. A device may use none, git, WebDAV or both; both
+use the same merge rules. Design: `docs/sync-build.md`, "WebDAV target".
+
 Algorithm (on launch, after each session, and on close/background):
 1. Commit local changes.
 2. Fetch.
