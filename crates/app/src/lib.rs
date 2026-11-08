@@ -337,6 +337,9 @@ async fn pick_files(app: tauri::AppHandle) -> Result<Vec<String>> {
     .map_err(err)?
 }
 
+/// Native folder picker. tauri-plugin-dialog has folder picking on desktop
+/// only; on mobile the command refuses, and the UI shows the message.
+#[cfg(desktop)]
 #[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Result<String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -349,6 +352,12 @@ async fn pick_folder(app: tauri::AppHandle) -> Result<String> {
     })
     .await
     .map_err(err)?
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+async fn pick_folder() -> Result<String> {
+    Err("Folders can't be picked on this device.".to_owned())
 }
 
 #[tauri::command]

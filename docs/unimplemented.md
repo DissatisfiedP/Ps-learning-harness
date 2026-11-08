@@ -17,8 +17,8 @@ build order these items follow.
   synced from a phone.
 - **No green Android CI run is on record yet.** The bundle jobs now run on every push, and `release.yml`
   publishes what a push run built. The Android job has been fixed run by run: the `android-37.0` platform
-  package, a library target for `crates/app`, the r29 NDK, and OpenSSL (vendored, then the NDK's
-  `llvm-ranlib`). No APK has been installed on a device.
+  package, a library target for `crates/app`, the r29 NDK, OpenSSL (vendored, then the NDK's `llvm-ranlib`),
+  and a desktop-only `pick_folder`. No APK has been installed on a device.
 
 ## 2. Designed, not built
 
@@ -33,7 +33,8 @@ build order these items follow.
   has used, or tries to use, a plugin whose `platforms` lacks `mobile`; a synced `mobileUnlock` op lets the
   learner continue without those tools. Plugin tool calls and `artifact` ops do not record `platforms` yet.
 - **Mobile runtime** (arch §8.7): the app has never run on Android; iOS has no project at all (needs a Mac
-  and a developer account).
+  and a developer account). On mobile `pick_folder` refuses (tauri-plugin-dialog picks folders on desktop
+  only), so workspaces and folder plugins can't be attached from a phone.
 - **Native plugins** (`sandbox`, `code-runner`, `repl`, `cas`, `live-search`, `image-set`) and the seven
   catalogue manifests: none is implemented or loadable. The Luau runtime (host API as `@harness/*` modules),
   registry, install/lock, views and the reference `circuit` package are real; the catalogue is not.
