@@ -193,12 +193,13 @@ jobs:
           echo "TARGET_RANLIB=$ranlib" >> "$GITHUB_ENV"
         env:
           NDK_PATH: ${{ steps.ndk.outputs.ndk-path }}
+      # No i686: 32-bit x86 Android is emulator-only in practice, and building it
+      # costs a quarter of the job. The build step's --target list matches.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: |
             aarch64-linux-android
             armv7-linux-androideabi
-            i686-linux-android
             x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
@@ -219,9 +220,10 @@ jobs:
       # keystore (and this repo has none), while Gradle's debug build type signs
       # with the standard debug key, so the artifact actually installs
       # (`adb install app-universal-debug.apk`). Gradle writes it under the
-      # generated project, app/build/outputs/apk/universal/debug/.
+      # generated project, app/build/outputs/apk/universal/debug/. --target
+      # limits the universal APK to arm64, 32-bit ARM and x86_64 (no i686).
       - name: Build the APK
-        run: cargo tauri android build --apk --debug --ci
+        run: cargo tauri android build --apk --debug --ci --target aarch64 armv7 x86_64
       - name: Upload the APK
         uses: actions/upload-artifact@v4
         with:

@@ -76,7 +76,7 @@ request, and adds two bundles that the commands above do not build:
 | Artifact | Built with | Notes |
 |---|---|---|
 | `appimage` — Linux `*.AppImage` | `cargo tauri build --bundles appimage` on ubuntu-22.04 | built against glibc 2.35 so it runs on older distributions than the runner |
-| `android-apk` — `*.apk` | `cargo tauri android init` + `cargo tauri android build --apk --debug` with NDK r29 | **debug**-signed, because a release APK is unsigned without a keystore and an unsigned APK will not install; the generated project lands in the git-ignored `crates/app/gen/android/`. OpenSSL (for git sync's HTTPS) is built from source for Android, with the NDK's `llvm-ranlib` as `TARGET_RANLIB` |
+| `android-apk` — `*.apk` | `cargo tauri android init` + `cargo tauri android build --apk --debug --target aarch64 armv7 x86_64` with NDK r29 | **debug**-signed, because a release APK is unsigned without a keystore and an unsigned APK will not install; no 32-bit x86 (`i686`) build, which is emulator-only in practice; the generated project lands in the git-ignored `crates/app/gen/android/`. OpenSSL (for git sync's HTTPS) is built from source for Android, with the NDK's `llvm-ranlib` as `TARGET_RANLIB` |
 
 Both are uploaded as workflow artifacts, with `if-no-files-found: error` so an empty bundle fails
 the run. Neither is built locally by anything above.
