@@ -18,7 +18,7 @@ Plugins are written in **Luau** and run in a sandboxed `mlua` VM with a small pu
   plugin.toml          manifest (§2); required
   prompts/<agent>.md   one fragment per agent that uses the plugin; ≤ 250 words
   src/main.luau        entry module; required; must return a table of functions
-  src/*.luau           the plugin's own modules, loaded with require
+  src/**/*.luau        the plugin's own modules, loaded with require (§3)
   schemas/*.json       JSON Schema for each tool's input; required per tool
   views/*.html|js|css  optional interactive view (one per plugin)
   tests/*.luau         required by `plugin test`; at least one file
@@ -27,7 +27,7 @@ Plugins are written in **Luau** and run in a sandboxed `mlua` VM with a small pu
 - Paths in the manifest are relative to the package root and must name an existing file inside it (`check_file` canonicalises both, so `..` and symlink escapes are refused).
 - A `.tar.gz` archive may put `plugin.toml` at its root or inside one top-level directory. Entries with absolute paths or `..` are refused.
 - Everything the plugin needs at runtime must be in the package: there is no network, filesystem, clock or process access.
-- A plugin may ship its own `host.d.luau` type definitions; otherwise `cargo run -p harness --bin plugin -- test` type-checks against the bundled `crates/harness/plugin-api/host.d.luau` when `luau-analyze` is installed.
+- Plugins have no host globals: the host API is modules required as `@harness/<name>` (§4). Their types live in `crates/harness/plugin-api/` (one type-only `.luau` file per module); `cargo run -p harness --bin plugin -- test` type-checks against them when `luau-analyze` is installed (§9), and an editor (luau-lsp) finds them through a `.luaurc` alias: this repo's root `.luaurc` maps `harness` to `./crates/harness/plugin-api`, and a package kept elsewhere adds `{ "aliases": { "harness": "<relative path to crates/harness/plugin-api>" } }` in a `.luaurc` at or above it (the registry repo does).
 
 ## 2. Manifest (`plugin.toml`)
 
@@ -107,18 +107,20 @@ return {
 
 `src/main.luau` is evaluated once per VM; its exports table is cached and reused by every later tool, renderer, view and `grade` call on that VM, so module-level state in `main.luau` lives as long as the VM. Modules loaded with `require` are cached per VM the same way. Any Lua error (a syntax error, a missing export, a runtime error, a limit hit) becomes a tool error and the VM is thrown away; the next call starts clean and re-reads `src/main.luau`. A folder plugin whose files change gets a new VM (§8.6).
 
-Modules are loaded with a restricted `require`:
+`require` follows Luau's require-by-string rules (the runtime drives Luau's own resolver through mlua, the same one `luau-analyze` uses), so the editor, the type check and the runtime resolve a path identically:
 
-- `require("host.json")`, `"host.svg"`, `"host.num"`, `"host.rand"`, `"host.log"` return the matching host table;
-- any other name resolves inside the package's `src/`: `<name>.luau`, `<name>/init.luau`, or `<name>` exactly;
-- names containing `..`, a leading `/` or a backslash are refused, and the resolved file (after following symlinks) must stay inside the package's `src/`;
-- the result is cached per name; a module returning nothing is cached as `true`.
+- `require("@harness/json")`, `"@harness/svg"`, `"@harness/num"`, `"@harness/rand"`, `"@harness/log"` return the host module (§4); `"@harness/test"` exists only under `plugin test` (§9) and is otherwise an error (``@harness/test is only available under `plugin test` ``). Any other `@harness/<name>` is an error naming it (``@harness/<name> is not a harness module (json, svg, num, rand, log)``).
+- `./x` and `../x` are relative to the **requiring file**: `src/a/b.luau` reaches `src/a/x.luau` with `./x` and `src/x.luau` with `../x`; a test file reaches the entry module with `require("../src/main")`. An `init.luau` file is its folder's module, so from `src/a/init.luau`, `./x` is `src/x` (the folder's sibling) and `@self/x` is `src/a/x`. From any other file, `@self/x` is the file's own child (`src/b.luau` → `src/b/x`).
+- A module path `p` is the file `p.luau` or `p/init.luau`; when both `p.luau` and a folder `p/` exist the require is ambiguous and fails. A folder without `init.luau` is only a step on the way. Only `.luau` files load.
+- No other forms: a bare name (`require("util")`) or an absolute path is refused (`require path must start with a valid prefix: ./, ../, or @`), and no alias other than `@harness` and `@self` exists at runtime (`@<alias> is not a require alias here: …`); a package's own `.luaurc` is not read.
+- Sandbox: a path never steps above the package root (`<file>: a require path can't leave the plugin package`), and the file a module resolves to, after following symlinks, must lie inside the package's `src/` (``module `<path>` resolves outside the plugin's src/``); under `plugin test`, `tests/` is allowed too.
+- The result is cached per resolved file for the VM's life, however the path reached it; a module returning nothing is cached as `true`.
 
 Removed globals: `io`, `os`, `debug`, `package`, `dofile`, `loadfile`, `loadstring`, `load`, `collectgarbage`. The VM is built with `StdLib::ALL_SAFE` and `sandbox(true)`.
 
 ### 3.1 Tool calls
 
-Arguments arrive as the JSON value converted to Lua: objects become tables, arrays become 1-based tables, `null` becomes `nil`, numbers stay numbers. Return values (and `host.json.encode`, `host.log.debug`, `artifact.data`, view call and `grade` results) convert back the other way: a table whose keys are exactly the integers `1..n` becomes an array; any other table becomes an object (integer keys written as strings, in sorted order before string keys; other key types are dropped). A table that contains itself, or nesting deeper than 64 tables, is a Lua error ("…refers to itself…", "…nests deeper than 64 tables…"). The return value:
+Arguments arrive as the JSON value converted to Lua: objects become tables, arrays become 1-based tables, `null` becomes `nil`, numbers stay numbers. Return values (and `json.encode`, `log.debug`, `artifact.data`, view call and `grade` results) convert back the other way: a table whose keys are exactly the integers `1..n` becomes an array; any other table becomes an object (integer keys written as strings, in sorted order before string keys; other key types are dropped). A table that contains itself, or nesting deeper than 64 tables, is a Lua error ("…refers to itself…", "…nests deeper than 64 tables…"). The return value:
 
 - **Non-artifact tool:** a string is the result. A table with a `text` string uses that; any other table is JSON-encoded; `nil` gives an empty result.
 - **Artifact tool (`artifact = true`):** a table `{ text?, artifact = { kind = "svg", svg, data? } }` (§6.1). Any other shape is a tool error that names the problem (each after `plugin error: `): ``the result has no `artifact`; …`` or ``` `artifact` must be a table; … ``` (both followed by the expected shape), `artifact.kind is required ("svg")`, ``artifact.kind `<kind>` is not supported (only "svg")``, `artifact.svg is required (the static SVG figure)`, and for a non-table return the shape alone: `an artifact tool must return { text = "…", artifact = { kind = "svg", svg = "<svg…>", data = {…} } }`.
@@ -127,41 +129,43 @@ A Lua error becomes a tool error whose text starts `plugin error:`. The model ma
 
 ## 4. Host API, api 1
 
-The `host` global is pure: JSON, SVG building, real/complex arithmetic and a dense solve, a seeded PRNG and a debug log. No I/O, no clock, no randomness from the environment.
+The host API is five modules, each required by name (there are no host globals): `local json = require("@harness/json")`. They are pure: JSON, SVG building, real/complex arithmetic and a dense solve, a seeded PRNG and a debug log. No I/O, no clock, no randomness from the environment. Their types are `crates/harness/plugin-api/<name>.luau` (§1). The tables below name each module by the local it is usually bound to.
 
-### 4.1 `host.json`
+### 4.1 `@harness/json`
 
 | Signature | Result |
 |---|---|
-| `host.json.encode(value) -> string` | Compact JSON. A non-empty table whose keys are all positive integers encodes as an array (values in iteration order); any other table encodes as an object with its string keys only (integer keys in a mixed table are dropped); an empty table is `{}`; functions and other unsupported values become `null`. Object keys come out sorted |
-| `host.json.decode(text) -> value` | Parses JSON; invalid JSON raises an error (`invalid JSON: …`) |
+| `json.encode(value) -> string` | Compact JSON. A non-empty table whose keys are all positive integers encodes as an array (values in iteration order); any other table encodes as an object with its string keys only (integer keys in a mixed table are dropped); an empty table is `{}`; functions and other unsupported values become `null`. Object keys come out sorted |
+| `json.decode(text) -> value` | Parses JSON; invalid JSON raises an error (`invalid JSON: …`) |
 
 Examples:
 
 ```lua
-local payload = host.json.decode(args.text)
-host.log.debug(host.json.encode({ ok = true, n = 3 }))  -- {"n":3,"ok":true}
+local json = require("@harness/json")
+local log = require("@harness/log")
+local payload = json.decode(args.text)
+log.debug(json.encode({ ok = true, n = 3 }))  -- {"n":3,"ok":true}
 ```
 
-### 4.2 `host.svg`
+### 4.2 `@harness/svg`
 
 Strings are escaped; attributes are emitted in sorted key order so output is deterministic.
 
 | Signature | Notes |
 |---|---|
-| `host.svg.document(width, height, content) -> string` | Wraps `content` (not escaped: it is markup) in `<svg xmlns=… width height viewBox="0 0 w h" fill="none" stroke="currentColor">`, so strokes follow the UI theme |
-| `host.svg.group(attrs?, content) -> string` | `<g>` |
-| `host.svg.path(d, attrs?) -> string` | `<path d=…>` |
-| `host.svg.line(x1, y1, x2, y2, attrs?) -> string` | |
-| `host.svg.rect(x, y, w, h, attrs?) -> string` | |
-| `host.svg.circle(cx, cy, r, attrs?) -> string` | |
-| `host.svg.text(x, y, text, attrs?) -> string` | Text is escaped; useful attrs: `text-anchor`, `font-size`, `fill`, `stroke`, `class` |
-| `host.svg.escape(text) -> string` | Escapes `&`, `<`, `>` |
+| `svg.document(width, height, content) -> string` | Wraps `content` (not escaped: it is markup) in `<svg xmlns=… width height viewBox="0 0 w h" fill="none" stroke="currentColor">`, so strokes follow the UI theme |
+| `svg.group(attrs?, content) -> string` | `<g>` |
+| `svg.path(d, attrs?) -> string` | `<path d=…>` |
+| `svg.line(x1, y1, x2, y2, attrs?) -> string` | |
+| `svg.rect(x, y, w, h, attrs?) -> string` | |
+| `svg.circle(cx, cy, r, attrs?) -> string` | |
+| `svg.text(x, y, text, attrs?) -> string` | Text is escaped; useful attrs: `text-anchor`, `font-size`, `fill`, `stroke`, `class` |
+| `svg.escape(text) -> string` | Escapes `&`, `<`, `>` |
 
 Attribute values may be strings, numbers or booleans. An attribute whose name starts with `on` raises an error; the builder accepts `href` and `xlink:href` only when they start with `#` or `data:image/`. The core sanitizer (§6.2) then applies its own rules to the finished figure, which are stricter: it keeps a link only for `#…` or `data:image/png|jpeg|gif|webp;base64,…`, so anything else the builder let through (e.g. `data:image/svg+xml`) is dropped before storage, and a plugin cannot smuggle a script.
 
 ```lua
-local svg = host.svg
+local svg = require("@harness/svg")
 local parts = {
   svg.rect(0, 0, 40, 12, { fill = "currentColor", ["fill-opacity"] = "0.2" }),
   svg.text(44, 10, "R₁ = 1 kΩ"),
@@ -169,36 +173,36 @@ local parts = {
 local figure = svg.document(200, 40, table.concat(parts))
 ```
 
-### 4.3 `host.num`
+### 4.3 `@harness/num`
 
 Every `Number` below is a plain Lua number (real part; imaginary part 0) or a **complex** `{ re = <number>, im = <number> }`. Functions return a plain number when the imaginary part is below `1e-12`, otherwise a complex table.
 
 | Signature | Notes |
 |---|---|
-| `host.num.c(re, im?) -> Number` | `im` defaults to 0 |
-| `host.num.add(a, b) -> Number` / `sub` / `div` | |
-| `host.num.mul(a, b) -> Number \| Vector \| Matrix` | number × number (real or complex), matrix × flat vector → vector, or matrix × matrix → matrix. A matrix is a table of rows; a flat vector is a table of numbers. A ragged matrix, a number times a matrix or mismatched shapes raise `mul: …` with the problem named |
-| `host.num.abs(a) -> number` | magnitude |
-| `host.num.phaseDeg(a) -> number` | argument in degrees |
-| `host.num.conj(a) -> Number` | |
-| `host.num.real(a) -> number` / `imag(a) -> number` | |
-| `host.num.linsolve(a, b) -> Vector` | `a` is an `n×n` matrix (rows of `Number`), `b` an `n` vector; partial-pivoting LU. Shapes must match; a singular matrix raises "the matrix is singular (no unique solution)" |
+| `num.c(re, im?) -> Number` | `im` defaults to 0 |
+| `num.add(a, b) -> Number` / `sub` / `div` | |
+| `num.mul(a, b) -> Number \| Vector \| Matrix` | number × number (real or complex), matrix × flat vector → vector, or matrix × matrix → matrix. A matrix is a table of rows; a flat vector is a table of numbers. A ragged matrix, a number times a matrix or mismatched shapes raise `mul: …` with the problem named |
+| `num.abs(a) -> number` | magnitude |
+| `num.phaseDeg(a) -> number` | argument in degrees |
+| `num.conj(a) -> Number` | |
+| `num.real(a) -> number` / `imag(a) -> number` | |
+| `num.linsolve(a, b) -> Vector` | `a` is an `n×n` matrix (rows of `Number`), `b` an `n` vector; partial-pivoting LU. Shapes must match; a singular matrix raises "the matrix is singular (no unique solution)" |
 
 Pass a table to these functions only as a complex number (`{re, im}`) or as a matrix/vector where one is expected: a table without `re`/`im` reads as complex zero.
 
 ```lua
-local num = host.num
+local num = require("@harness/num")
 local jw = num.mul(num.c(0, 1), num.c(2 * math.pi * 50))   -- jω
 local zc = num.div(num.c(1), num.mul(jw, num.c(1e-6)))     -- 1/(jωC)
 local z = num.add(num.c(1000), zc)                          -- R + 1/(jωC)
 local magnitude = num.abs(z)
 ```
 
-### 4.4 `host.rand`
+### 4.4 `@harness/rand`
 
 | Signature | Notes |
 |---|---|
-| `host.rand.seeded(seed) -> Rng` | Deterministic xorshift64; the seed (a non-negative integer) comes from the caller, never the clock; `0` is treated as `1` |
+| `rand.seeded(seed) -> Rng` | Deterministic xorshift64; the seed (a non-negative integer) comes from the caller, never the clock; `0` is treated as `1` |
 | `rng.next() -> number` | Uniform in `[0, 1)` |
 | `rng.range(lo, hi) -> number` | Uniform real in `[lo, hi)` |
 | `rng.int(lo, hi) -> integer` | Integer in `[lo, hi]`, inclusive (modulo reduction, so very slightly biased for huge spans) |
@@ -207,9 +211,9 @@ Call the generator's functions with `.` (`rng.int(1, 6)`), not `:`; a method cal
 
 Use a seed derived from the task (for example the problem number) when a figure must be reproducible across replays and devices.
 
-### 4.5 `host.log`
+### 4.5 `@harness/log`
 
-`host.log.debug(value) -> ()` writes one line to the app's `tracing` log with target `plugin`. It is never shown to the model or the learner; use it for development, not as a result channel.
+`log.debug(value) -> ()` writes one line to the app's `tracing` log with target `plugin`. It is never shown to the model or the learner; use it for development, not as a result channel.
 
 ## 5. Limits
 
@@ -225,11 +229,11 @@ All enforced by the host, not the plugin.
 | Wall time per view bridge call | 200 ms | `VIEW_TIMEOUT_MS` |
 | Tool result text | 16 KiB; longer text is cut at a character boundary and marked `[result truncated at 16 KiB]` | `MAX_RESULT_BYTES` |
 | Artifact `data`, serialized as JSON | 256 KiB; more is a tool error (`artifact.data is <n> KiB, over the 256 KiB limit; ask for less data …`) | `MAX_ARTIFACT_DATA_BYTES` |
-| Matrix/vector side in `host.num.mul` / `linsolve` | 400; larger is a Lua error | `host::MAX_DIM` |
+| Matrix/vector side in `num.mul` / `linsolve` (`@harness/num`) | 400; larger is a Lua error | `host::MAX_DIM` |
 | Fallback SVG per artifact | 256 KiB | `MAX_SVG_BYTES` |
 | Wall time per test file | 10 000 ms | `TEST_TIMEOUT_MS` |
 
-A call that exceeds memory or time, or raises any other Lua error, returns a tool error and the VM is discarded; the next call builds a fresh VM. A plugin gets one VM, created lazily and shared by its tool calls, renderer, view calls and `grade`. The time limit is measured on a monotonic clock from the start of the call and checked by the Luau interrupt; a limit hit reads `plugin time limit (2000 ms) exceeded` or `plugin memory limit: …`. Host functions are Rust and not interruptible, which is why `host.num` caps matrix sizes.
+A call that exceeds memory or time, or raises any other Lua error, returns a tool error and the VM is discarded; the next call builds a fresh VM. A plugin gets one VM, created lazily and shared by its tool calls, renderer, view calls and `grade`. The time limit is measured on a monotonic clock from the start of the call and checked by the Luau interrupt; a limit hit reads `plugin time limit (2000 ms) exceeded` or `plugin memory limit: …`. Host functions are Rust and not interruptible, which is why `@harness/num` caps matrix sizes.
 
 ## 6. Artifacts
 
@@ -430,7 +434,9 @@ A registry is an HTTPS URL (or a `file://` URL, or an absolute local path) servi
 - Keys are snake_case where they have two words (`use_when`, `avoid_when`), matching `plugin.toml`. `id` and `title` are required per plugin; `description`, `use_when`, `avoid_when`, `platforms`, `permissions` and `versions` default to empty; `published` is optional. Each version needs `version`, `api`, `url` and `sha256`. The index's `api` is informational: install validates the unpacked manifest's `api` instead.
 - `url` may be `https://`, `http://`, `file://` or a local path. `sha256` is the hex digest of the archive bytes (compared case-insensitively). An index whose plugin `id` is not a valid plugin id (§2), or whose `sha256` is not 64 hex digits, is refused: both become path segments under `<config>/plugins/`.
 - Indexes are cached at `<config>/registry-cache/<sha256 of the URL>.json`. Install reads the cache and fetches only when there is no parseable cached copy; `plugin_search`, the Settings browser and the consent screen read only the cache. "Refresh registries" fetches every configured registry, rewrites each cache that parses, and reports `{ name, url, ok, error, fetchedAt, plugins }` per registry.
-- **No default public registry ships.** The learner adds one in Settings; the list is device-local `settings.json` → `registries: [{ name, url }]`. Adding refuses any URL that is not `https://`, `file://` or an absolute path.
+- **The default registry** is the owner's, `https://dissatisfiedp.github.io/Ps-learning-harness-plugins/index.json` (`install::DEFAULT_REGISTRY_URL`), listed first on every device. It is built in, never written to `settings.json`: removing it sets `hideDefaultRegistry: true`, and adding its URL again clears that. The learner's own registries are device-local `settings.json` → `registries: [{ name, url }]`; adding refuses any URL that is not `https://`, `file://` or an absolute path. `registries` returns `{ name, url, builtin }`, and Settings tags the built-in row "default".
+- **At startup** the app fetches every listed registry whose cached index is missing or more than a day old (`refresh_stale_registries`, in the background; a failure is logged and the old cache kept), so the browser and `plugin_search` see the default registry without the learner pressing Refresh.
+- **The owner's registry** is a separate repository, [`DissatisfiedP/Ps-learning-harness-plugins`](https://github.com/DissatisfiedP/Ps-learning-harness-plugins) (checked out beside this one): plugin sources under `plugins/<id>/`, packed reproducibly by its GitHub Actions into Release assets, with `index.json` deployed to GitHub Pages. Its README covers publishing. `plugins/circuit/` here is the app's test fixture; the registry holds its own copy, which is the published one.
 
 ### 8.2 Install
 
@@ -500,9 +506,9 @@ cargo run -p harness --bin plugin -- test <dir>
 
 `test` runs `validate`, then:
 
-- a Luau type check with `luau-analyze --mode=nonstrict` when a `luau-analyze` binary is on `PATH`, passing the package's own `host.d.luau` if present, otherwise `crates/harness/plugin-api/host.d.luau`, plus every `src/*.luau` (not subfolders). A non-zero exit fails the run with `luau-analyze failed:` and its stderr. If the binary is missing, the CLI prints `luau-analyze: not installed (install the Luau CLI to type-check; tests still run)` and runs the tests anyway; it is not in the dev shell today.
-- every `tests/*.luau` file, sorted by name, in one sandboxed VM with the same host library and `require` (so `require("main")` loads `src/main.luau`). A missing `tests/` or one with no `.luau` file fails the run. A test file is evaluated; it must return a function, a table of named functions (run in sorted key order), or `nil` (nothing runs). The first failing `assert` or error stops the run. Each file has 10 s.
-- test VMs also get `host.test.golden(name, text)` (nil at runtime): it compares `text` with `tests/golden/<name>` and fails naming the first differing line (`got:` / `want:`), or `golden file tests/golden/<name> missing`. Run with `PLUGIN_UPDATE_GOLDEN=1` to write the file instead. `name` must stay inside `tests/golden/` (no `..`, leading `/` or backslash).
+- a Luau type check when a `luau-analyze` binary is on `PATH`: every `.luau` file under `src/` and `tests/` (subfolders included), in luau-analyze's default mode (nonstrict; a file opts into `--!strict` itself) and default (new) type solver. luau-analyze resolves `@harness/*` through a `.luaurc` above the requiring file, so the check runs on a copy of those files in a temporary folder next to the bundled type modules and a generated `.luaurc` (`harness` → the type modules); it works the same for a package anywhere on disk, and reports paths in the package. A non-zero exit fails the run with `luau-analyze failed:` and its report. If the binary is missing, the CLI prints `luau-analyze: not installed (install the Luau CLI to type-check; tests still run)` and runs the tests anyway; it is not in the dev shell today (`nix shell nixpkgs#luau` provides it).
+- every `tests/*.luau` file, sorted by name, in one sandboxed VM with the same host modules and `require` (§3), so a test reaches the package with `require("../src/main")`; test files may also require helpers inside `tests/`. A missing `tests/` or one with no `.luau` file fails the run. A test file is evaluated; it must return a function, a table of named functions (run in sorted key order), or `nil` (nothing runs). The first failing `assert` or error stops the run. Each file has 10 s.
+- test VMs also have `require("@harness/test")` (an error at runtime). Its `golden(name, text)` compares `text` with `tests/golden/<name>` and fails naming the first differing line (`got:` / `want:`), or `golden file tests/golden/<name> missing`. Run with `PLUGIN_UPDATE_GOLDEN=1` to write the file instead. `name` must stay inside `tests/golden/` (no `..`, leading `/` or backslash).
 
 ```console
 $ cargo run -q -p harness --bin plugin -- test plugins/circuit
@@ -604,7 +610,7 @@ Draw a chart when the point is a comparison: which source is largest, how far ap
 `src/main.luau`:
 
 ```lua
-local svg = host.svg
+local svg = require("@harness/svg")
 
 local BAR = 24
 local GAP = 8
@@ -665,7 +671,7 @@ return {
 `tests/bars.luau`:
 
 ```lua
-local api = require("main")
+local api = require("../src/main")
 
 return {
   sums = function()

@@ -5,12 +5,12 @@
 //! A call that hits a limit is answered as a tool error and the VM is thrown
 //! away so the next call starts clean.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use mlua::luau::{NavigateError, Require};
 use mlua::{Lua, LuaOptions, StdLib, Table, Value, VmState};
 use serde_json::Value as Json;
 
@@ -44,7 +44,7 @@ struct Vm {
 pub struct LuauRuntime {
     dir: PathBuf,
     vm: Arc<Mutex<Option<Vm>>>,
-    /// `plugin test` VMs also get `host.test` (golden-file compare).
+    /// `plugin test` VMs: `@harness/test` exists and tests/ files may require.
     test: bool,
 }
 
@@ -104,16 +104,19 @@ impl LuauRuntime {
                 let _ = globals.set(name, Value::Nil);
             }
         }
-        host::install(&lua).map_err(|e| format!("host library: {e}"))?;
+        let modules = host::modules(&lua).map_err(|e| format!("host library: {e}"))?;
         if self.test {
-            host::install_test(&lua, &self.dir).map_err(|e| format!("host.test: {e}"))?;
+            let test =
+                host::test_module(&lua, &self.dir).map_err(|e| format!("@harness/test: {e}"))?;
+            modules
+                .set("test", test)
+                .map_err(|e| format!("@harness/test: {e}"))?;
         }
-        lua.set_named_registry_value(
-            "__plugin_modules",
-            lua.create_table().map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        let require = make_require(&lua, self.dir.clone()).map_err(|e| format!("require: {e}"))?;
+        lua.set_named_registry_value(HARNESS_MODULES, &modules)
+            .map_err(|e| e.to_string())?;
+        let require = lua
+            .create_require_function(PackageRequire::new(&self.dir, self.test))
+            .map_err(|e| format!("require: {e}"))?;
         lua.globals()
             .set("require", require)
             .map_err(|e| e.to_string())?;
@@ -148,7 +151,7 @@ impl LuauRuntime {
                     .map_err(|e| format!("can't read src/main.luau ({e})"))?;
                 let t: Table = lua
                     .load(&source)
-                    .set_name("src/main.luau")
+                    .set_name("@src/main.luau")
                     .eval()
                     .map_err(|e| format!("src/main.luau: {e}"))?;
                 lua.set_named_registry_value(KEY, &t)
@@ -317,8 +320,13 @@ impl LuauRuntime {
         let source = std::fs::read_to_string(path)
             .map_err(|e| format!("can't read {} ({e})", path.display()))?;
         let name = path.display().to_string();
+        // Named by its place in the package, so its requires resolve from it.
+        let chunk = match path.strip_prefix(&self.dir) {
+            Ok(rel) => format!("@{}", rel.display()),
+            Err(_) => format!("={name}"),
+        };
         self.with_vm(TEST_TIMEOUT_MS, |lua| {
-            let value: Value = lua.load(&source).set_name(&name).eval()?;
+            let value: Value = lua.load(&source).set_name(&chunk).eval()?;
             let mut ran = Vec::new();
             match value {
                 Value::Function(f) => {
@@ -353,32 +361,98 @@ impl LuauRuntime {
         })
     }
 
-    /// Run a package type check when `luau-analyze` is installed. Returns
-    /// `None` when the binary is absent (documented in docs/plugins.md).
+    /// Type-check the package (`src/` and `tests/`, recursively) when
+    /// `luau-analyze` is installed. Returns `None` when the binary is absent
+    /// (documented in docs/plugins.md).
+    ///
+    /// luau-analyze resolves `@harness/*` through a `.luaurc` above the
+    /// requiring file, and a package may sit anywhere on disk, so the check
+    /// runs on a copy: the package's `.luau` files plus the bundled type
+    /// modules (crates/harness/plugin-api/) under a generated `.luaurc`.
+    /// No flags: luau-analyze's default nonstrict mode (a file opts into
+    /// `--!strict`) and default (new) solver; 0.738 rejects `--mode=nonstrict`.
+    /// The copy is real files: through symlinked folders luau-analyze can't
+    /// resolve requires.
     pub fn analyze(&self) -> Option<Result<String, String>> {
         let bin = which("luau-analyze")?;
-        let mut cmd = std::process::Command::new(bin);
-        cmd.arg("--mode=nonstrict");
-        // A package may ship its own definitions; otherwise use the api-1
-        // file bundled with the harness (crates/harness/plugin-api/).
-        let local = self.dir.join("host.d.luau");
-        let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin-api/host.d.luau");
-        if local.is_file() {
-            cmd.arg(local);
-        } else if shipped.is_file() {
-            cmd.arg(shipped);
-        }
-        for entry in std::fs::read_dir(self.dir.join("src")).ok()?.flatten() {
-            if entry.path().extension().is_some_and(|e| e == "luau") {
-                cmd.arg(entry.path());
-            }
-        }
-        Some(match cmd.output() {
-            Ok(out) if out.status.success() => Ok(String::new()),
-            Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
-            Err(e) => Err(format!("can't run luau-analyze ({e})")),
-        })
+        let work = std::env::temp_dir().join(format!("lh-analyze-{}", ulid::Ulid::new()));
+        let result = self.analyze_in(&bin, &work);
+        let _ = std::fs::remove_dir_all(&work);
+        Some(result)
     }
+
+    fn analyze_in(&self, bin: &Path, work: &Path) -> Result<String, String> {
+        let io = |e: std::io::Error| format!("can't prepare the type check ({e})");
+        std::fs::create_dir_all(work.join("harness")).map_err(io)?;
+        std::fs::write(
+            work.join(".luaurc"),
+            r#"{ "aliases": { "harness": "./harness" } }"#,
+        )
+        .map_err(io)?;
+        for (name, source) in HARNESS_TYPES {
+            std::fs::write(work.join("harness").join(name), source).map_err(io)?;
+        }
+        let mut files = Vec::new();
+        for folder in ["src", "tests"] {
+            copy_luau(
+                &self.dir.join(folder),
+                &work.join(folder),
+                Path::new(folder),
+                &mut files,
+            )
+            .map_err(io)?;
+        }
+        if !files.iter().any(|f| f.starts_with("src")) {
+            return Err("src/ has no *.luau files".into());
+        }
+        files.sort();
+        // Absolute, so a file is the same module whether passed or required.
+        let out = std::process::Command::new(bin)
+            .current_dir(work)
+            .args(files.iter().map(|f| work.join(f)))
+            .output()
+            .map_err(|e| format!("can't run luau-analyze ({e})"))?;
+        // Report paths in the package, not in the copy.
+        let report = String::from_utf8_lossy(&out.stderr)
+            .replace(&work.display().to_string(), &self.dir.display().to_string());
+        if out.status.success() {
+            Ok(report)
+        } else {
+            Err(report)
+        }
+    }
+}
+
+/// The api-1 type modules `@harness/*` resolves to under `luau-analyze`.
+const HARNESS_TYPES: [(&str, &str); 6] = [
+    ("json.luau", include_str!("../../plugin-api/json.luau")),
+    ("svg.luau", include_str!("../../plugin-api/svg.luau")),
+    ("num.luau", include_str!("../../plugin-api/num.luau")),
+    ("rand.luau", include_str!("../../plugin-api/rand.luau")),
+    ("log.luau", include_str!("../../plugin-api/log.luau")),
+    ("test.luau", include_str!("../../plugin-api/test.luau")),
+];
+
+/// Copy the `.luau` files under `from` (followed into real subfolders, not
+/// symlinked ones) to `to`, recording each copy's path relative to the work
+/// folder. A missing `from` copies nothing.
+fn copy_luau(from: &Path, to: &Path, rel: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = rel.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_luau(&path, &to.join(entry.file_name()), &rel, files)?;
+        } else if path.extension().is_some_and(|e| e == "luau") && path.is_file() {
+            std::fs::create_dir_all(to)?;
+            std::fs::copy(&path, to.join(entry.file_name()))?;
+            files.push(rel);
+        }
+    }
+    Ok(())
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -401,62 +475,251 @@ fn truncate(mut text: String) -> String {
     text
 }
 
-/// A `require` restricted to the package's `src/` and the host library.
-fn make_require(lua: &Lua, dir: PathBuf) -> Result<mlua::Function, mlua::Error> {
-    let base = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-    let src = base.join("src");
-    let src_root = src.canonicalize().unwrap_or_else(|_| src.clone());
-    lua.create_function(move |lua, name: String| {
-        let name = name.trim();
-        if let Some(host_name) = name.strip_prefix("host.") {
-            let host: Table = lua.globals().get("host")?;
-            return host.get::<Value>(host_name);
+/// Registry key of the table of host modules `@harness/<name>` returns.
+const HARNESS_MODULES: &str = "__harness_modules";
+/// The host modules of every VM; `test` is added in `plugin test` VMs.
+const HARNESS_NAMES: [&str; 5] = ["json", "svg", "num", "rand", "log"];
+
+/// Luau require-by-string for one plugin package. mlua runs Luau's own
+/// navigator (the one luau-analyze uses); this supplies the package's view:
+///
+/// - `./x` and `../x` resolve from the requiring module's path (its file
+///   without `.luau`; for `init.luau`, its folder), `@self/x` from the module
+///   itself;
+/// - module path `p` is the file `p.luau` or `p/init.luau` (both present is
+///   ambiguous); a folder without `init.luau` is only a step on the way;
+/// - `@harness/<name>` is a host module, `@harness/test` only under
+///   `plugin test`; there are no other aliases;
+/// - a path never steps above the package root, and a module's file (after
+///   symlinks) must lie in `src/`, or also `tests/` under `plugin test`;
+/// - results are cached per resolved file for the VM's life (mlua's cache).
+struct PackageRequire {
+    /// The package folder (canonical).
+    root: PathBuf,
+    /// Folders a module's file may resolve into (canonical).
+    allowed: Vec<PathBuf>,
+    test: bool,
+    /// The requiring chunk (package-relative), for error messages.
+    requirer: String,
+    at: At,
+    /// Set while Luau looks for a `.luaurc` declaring an alias: stepping
+    /// above the root then ends that search instead of failing.
+    alias_search: bool,
+}
+
+enum At {
+    /// A module path relative to the package root (empty: the root), and
+    /// the file it names, if any.
+    Package {
+        path: Vec<String>,
+        file: Option<PathBuf>,
+    },
+    Harness,
+    HarnessModule(String),
+}
+
+fn require_error(message: String) -> NavigateError {
+    NavigateError::Other(mlua::Error::RuntimeError(message))
+}
+
+impl PackageRequire {
+    fn new(dir: &Path, test: bool) -> Self {
+        let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
+        let root = canonical(dir.to_owned());
+        let mut allowed = vec![canonical(root.join("src"))];
+        if test {
+            allowed.push(canonical(root.join("tests")));
         }
-        let cache: Table = lua.named_registry_value("__plugin_modules")?;
-        if let Some(hit) = cache.get::<Option<Value>>(name)? {
-            return Ok(hit);
+        Self {
+            root,
+            allowed,
+            test,
+            requirer: String::new(),
+            at: At::Harness,
+            alias_search: false,
         }
-        if name.contains("..") || name.starts_with('/') || name.contains('\\') {
-            return Err(mlua::Error::RuntimeError(format!(
-                "require `{name}` is outside the plugin package"
-            )));
-        }
-        let src = &src_root;
-        let rel = name.strip_prefix("./").unwrap_or(name);
-        let candidates = [
-            src.join(format!("{rel}.luau")),
-            src.join(rel).join("init.luau"),
-            src.join(rel),
-        ];
-        let Some(path) = candidates.iter().find(|p| p.is_file()) else {
-            return Err(mlua::Error::RuntimeError(format!(
-                "module `{name}` is not in this plugin's src/"
-            )));
+    }
+
+    /// The file module path `path` names (Luau CLI rules, `.luau` only).
+    fn resolve(&self, path: &[String]) -> Result<Option<PathBuf>, NavigateError> {
+        let Some(last) = path.last() else {
+            return Ok(None);
         };
-        let canonical = path
-            .canonicalize()
-            .map_err(|_| mlua::Error::RuntimeError(format!("module `{name}` is unreadable")))?;
-        if !canonical.starts_with(src) {
-            return Err(mlua::Error::RuntimeError(format!(
-                "module `{name}` is outside the plugin's src/"
-            )));
+        let base = path.iter().fold(self.root.clone(), |p, c| p.join(c));
+        let mut file = base.clone().into_os_string();
+        file.push(".luau");
+        let file = PathBuf::from(file);
+        let found = last != "init" && file.is_file();
+        if base.is_dir() {
+            if found {
+                return Err(NavigateError::Ambiguous);
+            }
+            let init = base.join("init.luau");
+            return Ok(init.is_file().then_some(init));
         }
-        let mut source = String::new();
-        std::fs::File::open(&canonical)
-            .and_then(|mut f| f.read_to_string(&mut source))
-            .map_err(|e| mlua::Error::RuntimeError(format!("can't read `{name}` ({e})")))?;
-        let value: Value = lua
-            .load(&source)
-            .set_name(canonical.to_string_lossy().as_ref())
-            .eval()?;
-        let stored = if matches!(value, Value::Nil) {
-            Value::Boolean(true)
+        if found {
+            Ok(Some(file))
         } else {
-            value
+            Err(NavigateError::NotFound)
+        }
+    }
+}
+
+impl Require for PackageRequire {
+    fn is_require_allowed(&self, chunk_name: &str) -> bool {
+        chunk_name.starts_with('@')
+    }
+
+    fn reset(&mut self, chunk_name: &str) -> Result<(), NavigateError> {
+        self.alias_search = false;
+        let rel = chunk_name
+            .strip_prefix('@')
+            .ok_or(NavigateError::NotFound)?;
+        self.requirer = rel.to_owned();
+        let mut path: Vec<String> = rel
+            .split('/')
+            .filter(|c| !c.is_empty() && *c != ".")
+            .map(str::to_owned)
+            .collect();
+        if path.last().is_some_and(|c| c == "init.luau") {
+            path.pop();
+        } else if let Some(stem) = path.last().and_then(|c| c.strip_suffix(".luau")) {
+            let stem = stem.to_owned();
+            *path.last_mut().expect("non-empty") = stem;
+        }
+        let file = self.resolve(&path)?;
+        self.at = At::Package { path, file };
+        Ok(())
+    }
+
+    fn jump_to_alias(&mut self, _path: &str) -> Result<(), NavigateError> {
+        // Only reached through a `.luaurc` alias, and none is read.
+        Err(NavigateError::NotFound)
+    }
+
+    fn to_alias_override(&mut self, alias: &str) -> Result<(), NavigateError> {
+        if alias == "harness" {
+            self.at = At::Harness;
+            return Ok(());
+        }
+        self.alias_search = true;
+        Err(NavigateError::NotFound)
+    }
+
+    fn to_alias_fallback(&mut self, alias: &str) -> Result<(), NavigateError> {
+        Err(require_error(format!(
+            "@{alias} is not a require alias here: a plugin requires @harness/<module>, @self/…, ./… or ../…"
+        )))
+    }
+
+    fn to_parent(&mut self) -> Result<(), NavigateError> {
+        let At::Package { path, .. } = &self.at else {
+            return Err(NavigateError::NotFound);
         };
-        cache.set(name, stored.clone())?;
-        Ok(stored)
-    })
+        if path.is_empty() {
+            if self.alias_search {
+                return Err(NavigateError::NotFound);
+            }
+            return Err(require_error(format!(
+                "{}: a require path can't leave the plugin package",
+                self.requirer
+            )));
+        }
+        let mut path = path.clone();
+        path.pop();
+        // As in Luau, stepping up is never ambiguous.
+        let file = match self.resolve(&path) {
+            Ok(file) => file,
+            Err(NavigateError::Ambiguous) => None,
+            Err(e) => return Err(e),
+        };
+        self.at = At::Package { path, file };
+        Ok(())
+    }
+
+    fn to_child(&mut self, name: &str) -> Result<(), NavigateError> {
+        match &self.at {
+            At::Package { path, .. } => {
+                let mut path = path.clone();
+                path.push(name.to_owned());
+                let file = self.resolve(&path)?;
+                self.at = At::Package { path, file };
+                Ok(())
+            }
+            At::Harness if HARNESS_NAMES.contains(&name) || (name == "test" && self.test) => {
+                self.at = At::HarnessModule(name.to_owned());
+                Ok(())
+            }
+            At::Harness if name == "test" => Err(require_error(
+                "@harness/test is only available under `plugin test`".into(),
+            )),
+            At::Harness => Err(require_error(format!(
+                "@harness/{name} is not a harness module (json, svg, num, rand, log)"
+            ))),
+            At::HarnessModule(module) => Err(require_error(format!(
+                "@harness/{module}/{name} is not a harness module"
+            ))),
+        }
+    }
+
+    fn has_module(&self) -> bool {
+        match &self.at {
+            At::Package { file, .. } => file.is_some(),
+            At::HarnessModule(_) => true,
+            At::Harness => false,
+        }
+    }
+
+    fn cache_key(&self) -> String {
+        match &self.at {
+            At::Package {
+                file: Some(file), ..
+            } => file
+                .canonicalize()
+                .unwrap_or_else(|_| file.clone())
+                .display()
+                .to_string(),
+            At::HarnessModule(module) => format!("@harness/{module}"),
+            _ => String::new(),
+        }
+    }
+
+    fn has_config(&self) -> bool {
+        false
+    }
+
+    fn config(&self) -> std::io::Result<Vec<u8>> {
+        Err(std::io::ErrorKind::NotFound.into())
+    }
+
+    fn loader(&self, lua: &Lua) -> mlua::Result<mlua::Function> {
+        let file = match &self.at {
+            At::HarnessModule(module) => {
+                let module = module.clone();
+                return lua.create_function(move |lua, ()| {
+                    lua.named_registry_value::<Table>(HARNESS_MODULES)?
+                        .get::<Value>(module.as_str())
+                });
+            }
+            At::Package {
+                file: Some(file), ..
+            } => file,
+            _ => return Err(mlua::Error::RuntimeError("no module to load".into())),
+        };
+        let rel = file.strip_prefix(&self.root).unwrap_or(file).display();
+        let canonical = file
+            .canonicalize()
+            .map_err(|e| mlua::Error::RuntimeError(format!("can't read `{rel}` ({e})")))?;
+        if !self.allowed.iter().any(|root| canonical.starts_with(root)) {
+            let roots = if self.test { "src/ and tests/" } else { "src/" };
+            return Err(mlua::Error::RuntimeError(format!(
+                "module `{rel}` resolves outside the plugin's {roots}"
+            )));
+        }
+        let source = std::fs::read_to_string(&canonical)
+            .map_err(|e| mlua::Error::RuntimeError(format!("can't read `{rel}` ({e})")))?;
+        lua.load(source).set_name(format!("@{rel}")).into_function()
+    }
 }
 
 /// Run every `tests/*.luau` file of a package (no manifest validation here).
@@ -539,14 +802,103 @@ mod tests {
     #[test]
     fn require_cannot_escape_the_package() {
         let dir = package(
-            "return {\n up = function() return require('../outside') end,\n abs = function() return require('/etc/passwd') end,\n}\n",
+            "return {\n root = function() return require('../outside') end,\n up = function() return require('../../outside') end,\n abs = function() return require('/etc/passwd') end,\n bare = function() return require('util') end,\n}\n",
+        );
+        std::fs::write(dir.join("outside.luau"), "return 'outside'").unwrap();
+        std::fs::write(dir.join("src/util.luau"), "return 'util'").unwrap();
+        let rt = LuauRuntime::new(&dir);
+        for (entry, needle) in [
+            // The package root is a step on the way, never a module source.
+            (
+                "root",
+                "module `outside.luau` resolves outside the plugin's src/",
+            ),
+            (
+                "up",
+                "src/main.luau: a require path can't leave the plugin package",
+            ),
+            ("abs", "must start with a valid prefix: ./, ../, or @"),
+            // Luau require-by-string: no bare names.
+            ("bare", "must start with a valid prefix: ./, ../, or @"),
+        ] {
+            let out = rt.call_tool(entry, &Json::Null, false);
+            assert!(
+                out.is_error && out.content.contains(needle),
+                "{entry}: {}",
+                out.content
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn requires_resolve_from_the_requiring_file() {
+        let dir = package(
+            "local child = require('./folder/child')\nlocal group = require('./group')\nreturn { run = function()\n  return { child.name, group.name, group.inner, tostring(child.sibling == require('./folder/../sibling')) }\nend }\n",
+        );
+        std::fs::create_dir_all(dir.join("src/folder")).unwrap();
+        std::fs::create_dir_all(dir.join("src/group")).unwrap();
+        std::fs::write(
+            dir.join("src/folder/child.luau"),
+            "local sibling = require('../sibling')\nreturn { name = 'child of ' .. sibling.name, sibling = sibling }",
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/sibling.luau"), "return { name = 'sibling' }").unwrap();
+        // init.luau is its folder's module: `./` reaches the folder's
+        // siblings, `@self/` its own children.
+        std::fs::write(
+            dir.join("src/group/init.luau"),
+            "return { name = require('./sibling').name, inner = require('@self/inner') }",
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/group/inner.luau"), "return 'inner'").unwrap();
+        let out = LuauRuntime::new(&dir).call_tool("run", &Json::Null, false);
+        assert_eq!(
+            (out.is_error, out.content.as_str()),
+            (false, r#"["child of sibling","sibling","inner","true"]"#),
+            "the same file is one cached module, whatever path reached it"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_folder_and_a_file_of_one_name_are_ambiguous() {
+        let dir = package("return { get = function() return require('./util') end }\n");
+        std::fs::write(dir.join("src/util.luau"), "return 1").unwrap();
+        std::fs::create_dir_all(dir.join("src/util")).unwrap();
+        std::fs::write(dir.join("src/util/init.luau"), "return 2").unwrap();
+        let out = LuauRuntime::new(&dir).call_tool("get", &Json::Null, false);
+        assert!(
+            out.is_error
+                && out
+                    .content
+                    .contains("could not resolve child component \"util\" (ambiguous)"),
+            "{}",
+            out.content
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_harness_and_self_aliases_resolve() {
+        let dir = package(
+            "return {\n test = function() return require('@harness/test') end,\n other = function() return require('@harness/fs') end,\n alias = function() return require('@lune/fs') end,\n}\n",
         );
         let rt = LuauRuntime::new(&dir);
-        for entry in ["up", "abs"] {
+        for (entry, needle) in [
+            (
+                "test",
+                "@harness/test is only available under `plugin test`",
+            ),
+            (
+                "other",
+                "@harness/fs is not a harness module (json, svg, num, rand, log)",
+            ),
+            ("alias", "@lune is not a require alias here"),
+        ] {
             let out = rt.call_tool(entry, &Json::Null, false);
-            assert!(out.is_error, "{entry}: {}", out.content);
             assert!(
-                out.content.contains("outside the plugin package"),
+                out.is_error && out.content.contains(needle),
                 "{entry}: {}",
                 out.content
             );
@@ -557,7 +909,7 @@ mod tests {
     #[test]
     fn a_host_module_is_reachable_through_require() {
         let dir = package(
-            "local num = require('host.num')\nreturn { solve = function()\n  local x = num.linsolve({ { 2 } }, { 6 })\n  return tostring(x[1])\nend }\n",
+            "local num = require('@harness/num')\nreturn { solve = function()\n  local x = num.linsolve({ { 2 } }, { 6 })\n  return tostring(x[1])\nend }\n",
         );
         let rt = LuauRuntime::new(&dir);
         let out = rt.call_tool("solve", &Json::Null, false);
@@ -569,7 +921,7 @@ mod tests {
     #[test]
     fn num_mul_multiplies_matrices_by_vectors_and_refuses_other_shapes() {
         let dir = package(
-            r#"local num = host.num
+            r#"local num = require("@harness/num")
 return {
   mv = function() return num.mul({ { 1, 2 }, { 3, 4 } }, { 5, 6 }) end,
   mm = function() return num.mul({ { 1, 2 }, { 3, 4 } }, { { 1, 0 }, { 0, 1 } }) end,
@@ -613,7 +965,7 @@ return {
     #[test]
     fn a_self_referential_result_is_a_tool_error_and_the_next_call_works() {
         let dir = package(
-            "return {\n loop = function() local t = {} t.t = t return t end,\n deep = function() local t = {} for i = 1, 100 do t = { t } end return t end,\n enc = function() local t = {} t[1] = t return host.json.encode(t) end,\n echo = function(a) return a.n end,\n}\n",
+            "local json = require('@harness/json')\nreturn {\n loop = function() local t = {} t.t = t return t end,\n deep = function() local t = {} for i = 1, 100 do t = { t } end return t end,\n enc = function() local t = {} t[1] = t return json.encode(t) end,\n echo = function(a) return a.n end,\n}\n",
         );
         let rt = LuauRuntime::new(&dir);
         for (f, needle) in [
@@ -667,24 +1019,46 @@ return {
 
     #[test]
     fn require_resolving_outside_src_through_a_symlink_is_refused() {
-        let dir = package("return { peek = function() return require('leak') end }\n");
-        std::fs::create_dir_all(dir.join("tests")).unwrap();
-        std::fs::write(dir.join("tests/secret.luau"), "return 'secret'").unwrap();
-        std::os::unix::fs::symlink(dir.join("tests/secret.luau"), dir.join("src/leak.luau"))
-            .unwrap();
+        let dir = package("return { peek = function() return require('./leak') end }\n");
+        std::fs::create_dir_all(dir.join("tests/data")).unwrap();
+        std::fs::write(dir.join("tests/data/secret.luau"), "return 'secret'").unwrap();
+        std::os::unix::fs::symlink(
+            dir.join("tests/data/secret.luau"),
+            dir.join("src/leak.luau"),
+        )
+        .unwrap();
         let out = LuauRuntime::new(&dir).call_tool("peek", &Json::Null, false);
         assert!(
-            out.is_error && out.content.contains("outside the plugin's src/"),
+            out.is_error
+                && out
+                    .content
+                    .contains("module `src/leak.luau` resolves outside the plugin's src/"),
             "{}",
             out.content
         );
+        // Under `plugin test`, tests/ is in reach but the outside world isn't.
+        let outside = package("return 'far away'\n");
+        std::fs::remove_file(dir.join("src/leak.luau")).unwrap();
+        std::os::unix::fs::symlink(outside.join("src/main.luau"), dir.join("src/leak.luau"))
+            .unwrap();
+        std::fs::write(
+            dir.join("tests/t.luau"),
+            "return function() assert(require('./data/secret') == 'secret') require('../src/leak') end",
+        )
+        .unwrap();
+        let err = test_package(&dir).unwrap_err();
+        assert!(
+            err.contains("module `src/leak.luau` resolves outside the plugin's src/ and tests/"),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     #[test]
     fn num_refuses_matrices_over_the_size_cap() {
         let dir = package(
-            "return {\n big = function() local r = {} for i = 1, 401 do r[i] = 1 end return host.num.linsolve({ r }, { 1 }) end,\n ok = function() local r = {} for i = 1, 400 do r[i] = 1 end return #host.num.mul({ r }, r) end,\n}\n",
+            "local num = require('@harness/num')\nreturn {\n big = function() local r = {} for i = 1, 401 do r[i] = 1 end return num.linsolve({ r }, { 1 }) end,\n ok = function() local r = {} for i = 1, 400 do r[i] = 1 end return #num.mul({ r }, r) end,\n}\n",
         );
         let rt = LuauRuntime::new(&dir);
         let out = rt.call_tool("big", &Json::Null, false);
@@ -713,45 +1087,50 @@ return {
     }
 
     #[test]
-    fn golden_compares_only_in_test_vms() {
+    fn a_test_file_requires_the_package_through_src() {
+        let dir = package("return { double = function(n) return 2 * n end }\n");
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(
+            dir.join("tests/t.luau"),
+            "local api = require('../src/main')\nreturn { doubles = function() assert(api.double(3) == 6, 'double') end }",
+        )
+        .unwrap();
+        let ran = test_package(&dir).unwrap();
+        assert_eq!(ran.len(), 1);
+        assert!(ran[0].ends_with("tests/t.luau::doubles"), "{ran:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn golden_compares_in_test_vms() {
         let dir = package("return {}\n");
         std::fs::create_dir_all(dir.join("tests/golden")).unwrap();
         std::fs::write(dir.join("tests/golden/a.svg"), "<svg>\n<g/>\n</svg>").unwrap();
         let run = |body: &str| {
-            std::fs::write(dir.join("tests/t.luau"), body).unwrap();
+            std::fs::write(
+                dir.join("tests/t.luau"),
+                format!(
+                    "local golden = require('@harness/test').golden\nreturn function() {body} end"
+                ),
+            )
+            .unwrap();
             test_package(&dir)
         };
-        assert!(
-            run("return function() host.test.golden('a.svg', '<svg>\\n<g/>\\n</svg>') end").is_ok()
-        );
-        let err =
-            run("return function() host.test.golden('a.svg', '<svg>\\n<rect/>\\n</svg>') end")
-                .unwrap_err();
+        assert!(run("golden('a.svg', '<svg>\\n<g/>\\n</svg>')").is_ok());
+        let err = run("golden('a.svg', '<svg>\\n<rect/>\\n</svg>')").unwrap_err();
         assert!(
             err.contains("differs at line 2")
                 && err.contains("got:  <rect/>")
                 && err.contains("want: <g/>"),
             "{err}"
         );
-        let err = run("return function() host.test.golden('b.svg', 'x') end").unwrap_err();
+        let err = run("golden('b.svg', 'x')").unwrap_err();
         assert!(
             err.contains("golden file tests/golden/b.svg missing"),
             "{err}"
         );
-        let err = run("return function() host.test.golden('../t.luau', 'x') end").unwrap_err();
+        let err = run("golden('../t.luau', 'x')").unwrap_err();
         assert!(err.contains("inside tests/golden"), "{err}");
-        // Not part of the runtime host API.
-        std::fs::write(
-            dir.join("src/main.luau"),
-            "return { has = function() return host.test == nil end }",
-        )
-        .unwrap();
-        assert_eq!(
-            LuauRuntime::new(&dir)
-                .call_tool("has", &Json::Null, false)
-                .content,
-            "true"
-        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

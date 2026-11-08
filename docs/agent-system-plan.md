@@ -145,7 +145,7 @@ crates/
                     workspace, guarded writes), plugins/ (manifest, Luau runtime, host API,
                     registry/install/lock, loader), bin/plugin.rs (`plugin test`),
                     models.rs (model catalog cache), events.rs
-    plugin-api/     host.d.luau (api-1 type definitions for luau-analyze)
+    plugin-api/     @harness/* type modules (json, svg, num, rand, log, test; api 1)
     prompts/        bundled by build.rs; <repo>/prompts/<path> overrides. See prompts/README.md
   providers/        wire formats (OpenAI chat, OpenAI Responses, Anthropic Messages),
                     SSE decoding, provider catalog, live model catalogs (models.rs) +

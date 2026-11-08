@@ -762,12 +762,12 @@ Rules:
 
 **Runtime: Luau.** Plugin scripts run in `mlua` with the `luau` feature:
 - `StdLib::ALL_SAFE`, then `io`, `os`, `debug`, `package`, `dofile`, `loadfile`, `loadstring`, `load` and `collectgarbage` removed, plus `sandbox(true)`;
-- `require` resolves only `host.<name>` and modules inside the package's `src/`; `..`, absolute paths and symlink escapes are refused;
+- no host globals: `require` follows Luau require-by-string (Luau's own resolver, driven through mlua): `@harness/<name>` returns a host module, `./` and `../` paths resolve from the requiring file inside the package; stepping above the package root, files outside `src/` (after symlinks) and other aliases are refused;
 - 64 MiB per plugin instance, 2 s per tool call, 200 ms per view bridge call, checked by the Luau interrupt; exceeding a limit returns a tool error and discards the VM;
 - one VM per plugin, created lazily and reused; `src/main.luau` is re-evaluated per call, so edits to it in a folder package take effect on the next call (`require`d modules stay cached until the VM is recreated);
 - tool results are capped at 16 KiB.
 
-The host library is pure: `host.json` (encode/decode), `host.svg` (element builder with escaping, `currentColor` strokes and a complete-document helper), `host.num` (real and complex arithmetic, matrix multiply, partial-pivoting LU solve), `host.rand` (seeded, never clock-seeded) and `host.log` (tracing only). There is no I/O, network, process or clock.
+The host library is pure modules: `@harness/json` (encode/decode), `@harness/svg` (element builder with escaping, `currentColor` strokes and a complete-document helper), `@harness/num` (real and complex arithmetic, matrix multiply, partial-pivoting LU solve), `@harness/rand` (seeded, never clock-seeded) and `@harness/log` (tracing only); `plugin test` adds `@harness/test` (golden files). Their types are one type-only module each in `crates/harness/plugin-api/`, which a `.luaurc` alias points luau-lsp and luau-analyze at. There is no I/O, network, process or clock.
 
 Why Luau: the owner chose it; the interpreter is small and runs where the app runs, including mobile **[inference]**; plugins are mostly AI-written, so an exact typed host API matters more than ecosystem size; the sandbox, memory cap and interrupt are one crate away (`mlua`).
 

@@ -1,0 +1,1 @@
+{ "aliases": { "harness": "./crates/harness/plugin-api" } }

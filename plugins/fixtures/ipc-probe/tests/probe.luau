@@ -1,5 +1,5 @@
 -- Run with `cargo run -p harness --bin plugin -- test plugins/fixtures/ipc-probe`.
-local api = require("main")
+local api = require("../src/main")
 
 return {
   show_returns_an_svg_artifact = function()

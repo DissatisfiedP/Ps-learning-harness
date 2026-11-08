@@ -8,9 +8,10 @@ use std::sync::Arc;
 use mlua::{Lua, Result as LuaResult, Table, Value};
 use serde_json::Value as Json;
 
-/// Install `host` (and the `require("host.<name>")` aliases) into globals.
-pub fn install(lua: &Lua) -> LuaResult<()> {
-    let host = lua.create_table()?;
+/// The host modules by name (`json`, `svg`, `num`, `rand`, `log`): what
+/// `require("@harness/<name>")` returns in a plugin VM.
+pub fn modules(lua: &Lua) -> LuaResult<Table> {
+    let modules = lua.create_table()?;
 
     let json = lua.create_table()?;
     json.set(
@@ -25,21 +26,19 @@ pub fn install(lua: &Lua) -> LuaResult<()> {
             json_to_lua(lua, &parsed)
         })?,
     )?;
-    host.set("json", json)?;
+    modules.set("json", json)?;
 
-    host.set("svg", svg_lib(lua)?)?;
-    host.set("num", num_lib(lua)?)?;
-    host.set("rand", rand_lib(lua)?)?;
-    host.set("log", log_lib(lua)?)?;
-
-    lua.globals().set("host", host)?;
-    Ok(())
+    modules.set("svg", svg_lib(lua)?)?;
+    modules.set("num", num_lib(lua)?)?;
+    modules.set("rand", rand_lib(lua)?)?;
+    modules.set("log", log_lib(lua)?)?;
+    Ok(modules)
 }
 
-/// `host.test`, only in `plugin test` VMs. `golden(name, text)` compares
+/// `@harness/test`, only in `plugin test` VMs. `golden(name, text)` compares
 /// `text` with `tests/golden/<name>`; with `PLUGIN_UPDATE_GOLDEN=1` it writes
 /// the file instead.
-pub fn install_test(lua: &Lua, dir: &std::path::Path) -> LuaResult<()> {
+pub fn test_module(lua: &Lua, dir: &std::path::Path) -> LuaResult<Table> {
     let golden_dir = dir.join("tests/golden");
     let test = lua.create_table()?;
     test.set(
@@ -86,8 +85,7 @@ pub fn install_test(lua: &Lua, dir: &std::path::Path) -> LuaResult<()> {
             }
         })?,
     )?;
-    let host: Table = lua.globals().get("host")?;
-    host.set("test", test)
+    Ok(test)
 }
 
 // ---- JSON -----------------------------------------------------------------
@@ -437,7 +435,7 @@ fn vector(v: &Value) -> Option<Vec<C>> {
     Some(out)
 }
 
-/// Largest matrix/vector side `host.num` accepts, so one host call can't run
+/// Largest matrix/vector side `@harness/num` accepts, so one host call can't run
 /// far past the time limit (Rust host code is not interruptible).
 pub const MAX_DIM: usize = 400;
 
