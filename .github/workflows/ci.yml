@@ -179,8 +179,18 @@ jobs:
           add-to-path: false
       # cargo-mobile2 reads NDK_HOME (not ANDROID_NDK_HOME). The runner's own
       # ANDROID_NDK_HOME is its preinstalled NDK (27.3), not the r29 above.
-      - name: Point the Tauri CLI at the NDK
-        run: echo "NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+      #
+      # The Tauri CLI exports TARGET_CC and TARGET_AR but no ranlib, so the cc
+      # crate falls back to `aarch64-linux-android-ranlib`, which NDKs since r23
+      # no longer ship; openssl-src's `make install_dev` runs it and fails (127).
+      # llvm-ranlib is target-agnostic, so one TARGET_RANLIB serves all four
+      # ABIs; the TARGET_ prefix leaves host build scripts on the host ranlib.
+      - name: Point the Tauri CLI and cc at the NDK
+        run: |
+          echo "NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+          ranlib="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib"
+          test -x "$ranlib"
+          echo "TARGET_RANLIB=$ranlib" >> "$GITHUB_ENV"
         env:
           NDK_PATH: ${{ steps.ndk.outputs.ndk-path }}
       - uses: dtolnay/rust-toolchain@stable
