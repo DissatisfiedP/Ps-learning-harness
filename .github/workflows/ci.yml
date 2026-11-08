@@ -170,16 +170,19 @@ jobs:
       # actions/runner-images#13859); the alias is the reported workaround.
       - name: Alias platforms/android-37 to android-37.0
         run: ln -sfn android-37.0 "$ANDROID_HOME/platforms/android-37"
-      # NDK r29: tauri-cli 2.12.4 carries 29.0.13846066 — the only Android NDK
-      # version literal in the binary — and refuses an older `NDK_HOME`.
+      # NDK r29: tauri-cli 2.12.4 carries 29.0.13846066, the only Android NDK
+      # version literal in the binary.
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
           ndk-version: r29
           add-to-path: false
-      # cargo-mobile2 reads NDK_HOME (not ANDROID_NDK_HOME) and fails without it.
+      # cargo-mobile2 reads NDK_HOME (not ANDROID_NDK_HOME). The runner's own
+      # ANDROID_NDK_HOME is its preinstalled NDK (27.3), not the r29 above.
       - name: Point the Tauri CLI at the NDK
-        run: echo "NDK_HOME=$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
+        run: echo "NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+        env:
+          NDK_PATH: ${{ steps.ndk.outputs.ndk-path }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: |

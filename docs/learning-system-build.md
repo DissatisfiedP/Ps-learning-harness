@@ -143,7 +143,7 @@ and no `huntSend` exists for that section yet. `debrief_record` refused unless a
 `huntId`. `frontier_park` appends `{ "op": "frontier", "opId", "at", "topic", "why", "from": { "sessionId", "huntId"? } }`
 to `<repo>/frontier.jsonl` (append-only JSONL, created on first use).
 
-## Commands (`Harness` methods + Tauri commands in `crates/app/src/main.rs`)
+## Commands (`Harness` methods + Tauri commands in `crates/app/src/lib.rs`)
 
 | Harness method | command args | effect |
 |---|---|---|

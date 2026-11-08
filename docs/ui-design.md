@@ -1873,7 +1873,7 @@ describe it in.
 Verified in headless Chromium 155 against a `window.__TAURI__` mock (`/tmp/lh-bench/mock2.js`
 plus `/tmp/lh-bench/mock3.js`), with `ui/` served over HTTP under the app CSP from
 `crates/app/tauri.conf.json` and views served from a separate origin under the `VIEW_CSP`
-header from `crates/app/src/main.rs`. Screenshots at 1440×900 and 390×844, light and dark;
+header from `crates/app/src/lib.rs`. Screenshots at 1440×900 and 390×844, light and dark;
 `forced-colors: active`, `prefers-reduced-motion: reduce` and light/dark were emulated through
 CDP. No console errors on the exercised paths.
 

@@ -2,7 +2,7 @@
 //
 // Serves ui/ (with the app CSP from crates/app/tauri.conf.json) as
 // http://tauri.localhost, the plugin views (with VIEW_CSP from
-// crates/app/src/main.rs) as http://pluginview.localhost/<id>, and records
+// crates/app/src/lib.rs) as http://pluginview.localhost/<id>, and records
 // every request, including any to http://ipc.localhost. Chromium resolves
 // all three names to this server (--host-resolver-rules), so the origins,
 // the app CSP's frame-src and the view CSP are the ones Tauri uses on
@@ -27,7 +27,7 @@ const ROOT = normalize(join(import.meta.dir, '../..'));
 const read = (p) => readFileSync(join(ROOT, p), 'utf8');
 
 const APP_CSP = JSON.parse(read('crates/app/tauri.conf.json')).app.security.csp;
-const VIEW_CSP = read('crates/app/src/main.rs').match(/const VIEW_CSP: &str = "([^"]+)";/)?.[1];
+const VIEW_CSP = read('crates/app/src/lib.rs').match(/const VIEW_CSP: &str = "([^"]+)";/)?.[1];
 if (!APP_CSP || !VIEW_CSP) throw new Error('could not read the app CSP or VIEW_CSP');
 
 const PLUGIN_DIRS = { circuit: 'plugins/circuit', 'ipc-probe': 'plugins/fixtures/ipc-probe' };

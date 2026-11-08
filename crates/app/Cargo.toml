@@ -3,6 +3,12 @@ name = "ps-learning-harness"
 version.workspace = true
 edition.workspace = true
 
+# Tauri mobile loads the app as a library (`run`); the desktop binary in
+# main.rs only calls it.
+[lib]
+name = "ps_learning_harness_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -228,7 +228,7 @@ export async function createViewHost({
   window.addEventListener('message', onMessage);
 
   // The document comes from the shell's `pluginview` scheme with its own CSP
-  // (VIEW_CSP in crates/app/src/main.rs). A `srcdoc` frame would inherit the
+  // (VIEW_CSP in crates/app/src/lib.rs). A `srcdoc` frame would inherit the
   // app CSP (`script-src 'self'`), which blocks the view's inline script.
   let url;
   try {
