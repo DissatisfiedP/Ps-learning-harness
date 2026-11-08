@@ -161,16 +161,43 @@ Use `reqwest` (already a dependency, `rustls`, so no OpenSSL on any platform). T
 `PUT`, `DELETE` and `MKCOL` directly. Apache OpenDAL's `services-webdav` is the alternative if its writes support
 `If-Match`; check that before choosing it, because conditional writes are what make step 3 safe.
 
-### Sessions that used desktop-only plugins
+### Sessions on mobile: desktop-only plugins and attached folders
 
-Sync carries every session to every device. A session whose plugins don't all list `mobile` in `platforms` opens
-**read-only on mobile**, with a note naming the plugin and saying to continue on desktop. It stays fully writable on
-desktop. The existing `read_only` path is reused, with its own reason so the note differs from the legacy one.
+Sync carries every session to every device. On mobile a session **stays writable** unless a plugin that doesn't run
+on phones has actually been used. Planning a section with such a plugin, or granting it, is not enough.
 
-The `pluginGrant` and `artifact` ops record only the plugin id, version and hash, and a desktop-only plugin is never
-installed on a phone. So the plugin's `platforms` must be stored in those ops when they are written (a new field,
-defaulting to absent). For older ops without it, mobile falls back to the cached registry index. **Open:** whether a
-plugin found in neither place locks the session (safe) or leaves it writable.
+**When it locks.** A session opens **read-only on mobile** when either:
+- the log shows the tutor already used a plugin whose `platforms` lacks `mobile` (one of its tool calls or `artifact`
+  ops), or
+- on the phone, the tutor calls such a plugin's tool. The call is refused with "`<plugin>` only runs on desktop",
+  and the session locks once that turn ends.
+
+The note names the plugin and says to continue on desktop. Desktop is never affected. The existing `read_only` path
+is reused, with its own reason so the note differs from the legacy one.
+
+**How the phone knows.** A desktop-only plugin is never installed on a phone, and the ops record only the plugin id,
+version and hash. So plugin tool calls and `artifact` ops must store the plugin's `platforms` when they are written
+(a new field, defaulting to absent). For older ops without it, mobile checks the cached registry index. A plugin found
+in neither place **does not lock**: "doesn't run on phones" has to be known, not guessed. Calling it on the phone
+still fails the way it does today.
+
+**Override.** The lock note has a "Continue here anyway" action. After it:
+- the session is writable on mobile;
+- the desktop-only plugins' tools are left out of the tutor's tool list on mobile, and one line tells the tutor which
+  plugins aren't available on this device, so it teaches without them;
+- their figures show the static SVG fallback, and an answer-mode view from one of them stays unanswerable on the
+  phone;
+- a later attempt to call one of them is refused but doesn't lock again.
+
+The override is a `mobileUnlock` op in the session log, so it syncs and the learner decides once for every phone and
+tablet; desktop ignores it. (Alternative: a device-local flag. That would mean asking again on each mobile device.)
+
+**Attached folders never lock.** The folder's absolute path is already device-local (`<config>/workspaces.json`);
+the log records only its name. On a device without the mapping the session has no folder: the `workspace` prompt flag
+is off and `workspace_write` refuses with "no workspace is attached to this session". So a folder attached once for a
+build costs nothing on the phone later. The gap to close: when the log names a folder but this device has none, the
+tutor isn't told. Add one line, "the folder `<name>` is attached on another device; its files aren't available
+here", so the tutor says that instead of guessing.
 
 ### Verification (when built)
 
@@ -180,3 +207,8 @@ plugin found in neither place locks the session (safe) or leaves it writable.
   readable error and leaves local files untouched.
 - Git and WebDAV both on: a change made on device A with git only and device B with WebDAV only reaches both through
   a third device that has both targets, with no duplicate `opId`.
+- Mobile lock: a session that only planned or granted a desktop-only plugin stays writable; one with a call or
+  artifact from it opens read-only; a call made on the phone is refused and locks after the turn; a plugin with
+  unknown platforms doesn't lock; `mobileUnlock` makes the session writable, drops those tools from the tutor's list
+  and doesn't re-lock on a later attempt; a session with an attached folder never locks, and the tutor gets the
+  "attached on another device" line.
