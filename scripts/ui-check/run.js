@@ -17,10 +17,13 @@
 //              keyboard moves of A1's R2 slider re-solve through the bridge,
 //              update the probe and post a `state` line.
 //   sync       the whole app (index.html with the fake bridge) in each sync
-//              state: the Home indicator and banner, Settings → Sync (save
-//              git and WebDAV, Sync now, acknowledge, disconnect), the other
-//              Settings sections still in place, and no overflow at phone
-//              width. UI_CHECK_SHOTS=<dir> also saves screenshots there.
+//              state: the Home indicator and banner, the collapsible
+//              Providers and Sync sections (closed by default, summaries,
+//              remembered state, opened by navigation, a WorkBuddy sign-in
+//              surviving collapse), Settings → Sync (save git and WebDAV,
+//              Sync now, acknowledge, disconnect), the other Settings sections
+//              still in place, and no overflow at phone width.
+//              UI_CHECK_SHOTS=<dir> also saves screenshots there.
 //
 // Exit code 0 when every check passes. Usage: run.js [ipc|placement|sync]...
 
@@ -351,10 +354,26 @@ const SECTION = `(() => {
     focus: document.activeElement?.id ?? null,
   };
 })()`;
-const lastCall = (cmd) => `window.__bridge.log.filter((c) => c.cmd === '${cmd}').at(-1)?.args ?? null`;
+const SECTIONS = `Object.fromEntries(['providers', 'sync'].map((n) => [n, {
+  open: document.getElementById(n + '-toggle').getAttribute('aria-expanded') === 'true',
+  shown: !document.getElementById(n + '-body').hidden,
+  summary: document.getElementById(n + '-summary').textContent,
+  stored: localStorage.getItem('lh.settings.' + n),
+}]))`;
+const lastCall = (cmd) => `(window.__bridge.log.filter((c) => c.cmd === '${cmd}').at(-1)?.args ?? null)`;
 const fill = (id, value) => `(() => { const el = document.getElementById('${id}'); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input')); })()`;
 const click = (id) => `(document.getElementById('${id}').focus(), document.getElementById('${id}').click())`;
 const submit = (id) => `document.getElementById('${id}').requestSubmit()`;
+const workbuddy = `document.querySelector('#provider-list .provider[data-id="workbuddy"]')`;
+const closeSettings = `document.getElementById('settings').close()`;
+/** Collapses Providers and Sync (as the learner would) and scrolls them into view. */
+const collapseBoth = `(() => {
+  for (const n of ['providers', 'sync']) {
+    const t = document.getElementById(n + '-toggle');
+    if (t.getAttribute('aria-expanded') === 'true') t.click();
+  }
+  document.getElementById('providers-toggle').scrollIntoView({ block: 'center' });
+})()`;
 
 async function sync() {
   // Nothing configured: no Home parts; Settings → Sync sits after Providers.
@@ -363,10 +382,20 @@ async function sync() {
   expect(home.indicator === null && !home.syncNow && !home.banner, `unconfigured Home shows sync parts: ${JSON.stringify(home)}`);
   await page.evaluate(click('open-settings'));
   await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
-  const order = await page.evaluate(`[...document.querySelectorAll('#settings .settings-section > h2')].map((h) => h.textContent)`);
+  const order = await page.evaluate(`[...document.querySelectorAll('#settings .settings-section > h2')].map((h) => (h.querySelector('.section-name') ?? h).textContent)`);
   expect(JSON.stringify(order) === JSON.stringify(['Model roles', 'Learning', 'Focus', 'Providers', 'Sync', 'Plugins', 'Registries', 'Appearance']), `Settings sections: ${order}`);
   const others = await page.evaluate(`({ providers: document.querySelectorAll('#provider-list .provider').length, plugins: document.querySelectorAll('#plugin-list .plugin').length, roles: document.getElementById('model-form').textContent.trim() })`);
-  expect(others.providers === 2 && others.plugins === 2 && others.roles.length > 0, `other Settings sections did not render: ${JSON.stringify(others)}`);
+  expect(others.providers === 3 && others.plugins === 2 && others.roles.length > 0, `other Settings sections did not render: ${JSON.stringify(others)}`);
+
+  // Providers and Sync start collapsed, each heading carrying its summary.
+  let sections = await page.evaluate(SECTIONS);
+  expect(!sections.providers.open && !sections.providers.shown && sections.providers.summary === '1 connected'
+    && !sections.sync.open && !sections.sync.shown && sections.sync.summary === 'Off', `default sections: ${JSON.stringify(sections)}`);
+  await page.evaluate(`document.getElementById('providers-toggle').scrollIntoView({ block: 'center' })`);
+  await page.shot('settings-collapsed-desktop');
+  await page.evaluate(click('sync-toggle'));
+  sections = await page.evaluate(SECTIONS);
+  expect(sections.sync.open && sections.sync.shown && sections.sync.stored === 'open' && !sections.providers.open, `Sync heading did not expand it: ${JSON.stringify(sections)}`);
   let section = await page.evaluate(SECTION);
   expect(section.git === 'Not connected' && section.webdav === 'Not connected' && section.syncNowDisabled, `unconfigured section: ${JSON.stringify(section)}`);
 
@@ -379,6 +408,8 @@ async function sync() {
   expect(JSON.stringify(gitArgs) === JSON.stringify({ remote: 'https://github.com/learner/notes.git', token: 'ghp-secret', branch: 'main' }), `set_sync args: ${JSON.stringify(gitArgs)}`);
   section = await page.evaluate(SECTION);
   expect(section.git === 'Not synced yet · changes waiting' && section.gitDisconnect && /Saved/.test(section.tokenPlaceholder) && !section.syncNowDisabled, `after git save: ${JSON.stringify(section)}`);
+  sections = await page.evaluate(SECTIONS);
+  expect(sections.sync.summary === 'Not synced', `Sync summary after git save: ${sections.sync.summary}`);
   await page.evaluate(fill('sync-webdav-url', 'http://dav.example.com/harness'));
   await page.evaluate(fill('sync-webdav-username', 'learner'));
   await page.evaluate(fill('sync-webdav-password', 'app-pass'));
@@ -397,12 +428,15 @@ async function sync() {
   // Sync now: "Syncing…" while it runs, then the report and fresh state lines.
   await page.evaluate(click('sync-now'));
   section = await page.evaluate(SECTION);
-  expect(section.syncNow === 'Syncing…' && section.syncNowDisabled, `while syncing: ${JSON.stringify(section)}`);
+  sections = await page.evaluate(SECTIONS);
+  expect(section.syncNow === 'Syncing…' && section.syncNowDisabled && sections.sync.summary === 'Syncing…', `while syncing: ${JSON.stringify({ section, summary: sections.sync.summary })}`);
   home = await page.evaluate(HOME);
   expect(home.indicator === 'Syncing…', `Home indicator while syncing: ${home.indicator}`);
   await until('the sync report', () => page.evaluate(`document.getElementById('sync-status').textContent.startsWith('Synced')`));
   section = await page.evaluate(SECTION);
   expect(section.status === 'Synced. Git: 1 pulled, 1 pushed. WebDAV: 3 uploaded, 1 downloaded.' && section.git === 'Last synced just now' && section.webdav === 'Last synced just now' && section.focus === 'sync-now', `after Sync now: ${JSON.stringify(section)}`);
+  sections = await page.evaluate(SECTIONS);
+  expect(sections.sync.summary === 'Synced just now', `Sync summary after Sync now: ${sections.sync.summary}`);
   await page.shot('settings-sync-desktop');
 
   // A saved secret is kept when its field stays empty.
@@ -412,22 +446,67 @@ async function sync() {
   const kept = await page.evaluate(lastCall('set_sync'));
   expect(kept.token === null && (await page.evaluate(`window.__bridge.sync.token`)) === 'ghp-secret', `empty token field did not keep the saved token: ${JSON.stringify(kept)}`);
 
+  // Reopening keeps what the learner chose: Sync open, Providers closed; then
+  // the learner closes Sync, and that is kept too.
+  await page.evaluate(closeSettings);
+  await page.evaluate(click('open-settings'));
+  await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
+  sections = await page.evaluate(SECTIONS);
+  expect(sections.sync.open && sections.sync.shown && !sections.providers.open, `reopened Settings forgot the open Sync: ${JSON.stringify(sections)}`);
+  await page.evaluate(click('sync-toggle'));
+  await page.evaluate(closeSettings);
+  await page.evaluate(click('open-settings'));
+  await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
+  sections = await page.evaluate(SECTIONS);
+  expect(!sections.sync.open && !sections.sync.shown && sections.sync.stored === 'closed' && sections.sync.summary === 'Synced just now', `reopened Settings forgot the closed Sync: ${JSON.stringify(sections)}`);
+
   // Close Settings: Home shows "Synced just now" and Sync now.
-  await page.evaluate(`document.getElementById('settings').close()`);
+  await page.evaluate(closeSettings);
   home = await page.evaluate(HOME);
   expect(home.indicator === 'Synced just now' && home.indicatorName === 'Synced just now. Sync settings' && home.syncNow && !home.banner, `Home after sync: ${JSON.stringify(home)}`);
 
-  // Indicator opens Settings at the Sync heading; WebDAV disconnects alone.
+  // The indicator expands Sync and focuses its heading; WebDAV disconnects alone.
   await page.evaluate(click('sync-indicator'));
-  await until('Settings at Sync', () => page.evaluate(`document.activeElement?.id === 'sync-heading'`));
+  await until('Settings at Sync', () => page.evaluate(`document.activeElement?.id === 'sync-toggle'`));
+  sections = await page.evaluate(SECTIONS);
+  expect(sections.sync.open && sections.sync.shown, `indicator left Sync collapsed: ${JSON.stringify(sections)}`);
   await page.evaluate(click('sync-webdav-disconnect'));
   await until('WebDAV disconnected', () => page.evaluate(`document.getElementById('sync-webdav-state').textContent === 'Not connected'`));
   const off = await page.evaluate(lastCall('set_webdav'));
   section = await page.evaluate(SECTION);
   expect(off.url === '' && section.git === 'Last synced just now' && section.focus === 'sync-webdav-url', `WebDAV disconnect: ${JSON.stringify({ off, section })}`);
+  // Opening it to get there is not remembered: a plain reopen shows it closed.
+  await page.evaluate(closeSettings);
+  await page.evaluate(click('open-settings'));
+  await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
+  sections = await page.evaluate(SECTIONS);
+  expect(!sections.sync.open && sections.sync.stored === 'closed', `navigation changed the remembered Sync state: ${JSON.stringify(sections)}`);
+  await page.evaluate(closeSettings);
+
+  // "Connect a model to start → Settings" expands Providers. A WorkBuddy
+  // sign-in keeps waiting while Providers is collapsed and expanded, and its
+  // result lands with the section closed.
+  expect(await page.evaluate(`!document.getElementById('setup-notice').hidden`), 'the setup notice is not showing');
+  await page.evaluate(click('setup-button'));
+  await until('Settings at Providers', () => page.evaluate(`document.activeElement?.id === 'providers-toggle'`));
+  sections = await page.evaluate(SECTIONS);
+  expect(sections.providers.open && sections.providers.shown && sections.providers.stored === null, `setup notice did not expand Providers: ${JSON.stringify(sections)}`);
+  await page.evaluate(`[...${workbuddy}.querySelectorAll('button')].find((b) => b.textContent === 'Sign in with WorkBuddy').click()`);
+  await until('the WorkBuddy wait', () => page.evaluate(`${workbuddy}.textContent.includes('Waiting for browser sign-in…')`));
+  await page.evaluate(click('providers-toggle'));
+  await page.evaluate(click('providers-toggle'));
+  const waiting = await page.evaluate(`({ shown: !document.getElementById('providers-body').hidden, text: ${workbuddy}.textContent.includes('Waiting for browser sign-in…') })`);
+  expect(waiting.shown && waiting.text, `sign-in lost after collapse and expand: ${JSON.stringify(waiting)}`);
+  await page.evaluate(click('providers-toggle'));
+  await page.evaluate(`window.__bridge.finishLogin('learner@example.com')`);
+  await until('the sign-in to land', () => page.evaluate(`document.getElementById('providers-summary').textContent === '2 connected'`));
+  await page.evaluate(click('providers-toggle'));
+  const signedIn = await page.evaluate(`({ status: ${workbuddy}.querySelector('.status').textContent, state: ${workbuddy}.querySelector('.provider-state').textContent, tutor: ${lastCall('set_role_model')}?.choice?.provider })`);
+  expect(signedIn.status === 'Signed in as learner@example.com.' && signedIn.state === 'Signed in as learner@example.com' && signedIn.tutor === 'workbuddy', `WorkBuddy sign-in result: ${JSON.stringify(signedIn)}`);
+  await page.evaluate(closeSettings);
+  expect(await page.evaluate(`document.getElementById('setup-notice').hidden`), 'the setup notice still shows after signing in');
 
   // A failing sync_status hides the Home parts quietly.
-  await page.evaluate(`document.getElementById('settings').close()`);
   await page.evaluate(`window.__bridge.sync.statusFails = true; document.getElementById('home').hidden = true`);
   await page.evaluate(`document.getElementById('home').hidden = false`);
   await until('the indicator to hide', () => page.evaluate(`document.getElementById('sync-indicator').hidden`), 3_000).catch(() => null);
@@ -455,13 +534,15 @@ async function sync() {
   await page.shot('home-attention-desktop');
   await page.evaluate(click('sync-banner-review'));
   await until('the attention list', () => page.evaluate(`document.activeElement?.id === 'sync-attention-heading'`));
+  sections = await page.evaluate(SECTIONS);
+  expect(sections.sync.open && sections.sync.summary === 'Synced 5 min ago', `Review left Sync collapsed: ${JSON.stringify(sections.sync)}`);
   section = await page.evaluate(SECTION);
   expect(JSON.stringify(section.paths) === '["graph/topics.json","prompts/tutor.md"]', `attention list: ${JSON.stringify(section.paths)}`);
   await page.shot('settings-attention-desktop');
   await page.evaluate(click('sync-acknowledge'));
   await until('acknowledged', () => page.evaluate(`document.getElementById('sync-attention').hidden`));
   section = await page.evaluate(SECTION);
-  expect(section.status === 'Acknowledged.' && section.focus === 'sync-heading', `after Acknowledge: ${JSON.stringify(section)}`);
+  expect(section.status === 'Acknowledged.' && section.focus === 'sync-toggle', `after Acknowledge: ${JSON.stringify(section)}`);
   await page.evaluate(`document.getElementById('settings').close()`);
   home = await page.evaluate(HOME);
   expect(!home.banner, `banner after Acknowledge: ${JSON.stringify(home)}`);
@@ -475,16 +556,24 @@ async function sync() {
     expect(!home.overflow && home.indicator === 'Not synced', `phone Home (${theme}): ${JSON.stringify(home)}`);
     await page.shot(`home-error-phone-${theme}`);
     await page.evaluate(click('sync-indicator'));
-    await until('Settings at Sync', () => page.evaluate(`document.activeElement?.id === 'sync-heading'`));
+    await until('Settings at Sync', () => page.evaluate(`document.activeElement?.id === 'sync-toggle'`));
     const wide = await page.evaluate(`document.getElementById('settings').scrollWidth > document.getElementById('settings').clientWidth`);
     expect(!wide, `phone Settings (${theme}) overflows sideways`);
     await page.shot(`settings-sync-phone-${theme}`);
+    await page.evaluate(collapseBoth);
+    sections = await page.evaluate(SECTIONS);
+    expect(!sections.sync.open && sections.sync.summary === 'Not synced', `phone collapsed Sync (${theme}): ${JSON.stringify(sections.sync)}`);
+    await page.shot(`settings-collapsed-phone-${theme}`);
     await page.close();
   }
   page = await openApp('synced', { dark: true });
   await page.shot('home-synced-desktop-dark');
+  await page.evaluate(click('open-settings'));
+  await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
+  await page.evaluate(`document.getElementById('providers-toggle').scrollIntoView({ block: 'center' })`);
+  await page.shot('settings-collapsed-desktop-dark');
   await page.close();
-  console.log('sync: indicator, banner, Settings → Sync (save, refuse, Sync now, keep secret, disconnect, acknowledge) and phone layout checked');
+  console.log('sync: indicator, banner, collapsible Providers/Sync (default, summary, remembered, navigation, sign-in while collapsed), Settings → Sync (save, refuse, Sync now, keep secret, disconnect, acknowledge) and phone layout checked');
 }
 
 const cases = { ipc, placement, sync };

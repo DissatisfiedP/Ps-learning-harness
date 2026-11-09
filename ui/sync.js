@@ -4,6 +4,7 @@
 // three; a failing read hides the Home parts quietly.
 
 import { available, call, message } from './api.js';
+import { expandSection, setSectionSummary } from './disclosure.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,7 +17,7 @@ const bannerErrorText = $('sync-banner-error-text');
 const bannerAttention = $('sync-banner-attention');
 const bannerAttentionText = $('sync-banner-attention-text');
 
-const heading = $('sync-heading');
+const sectionToggle = $('sync-toggle');
 const sectionStatus = $('sync-status');
 const syncNowButton = $('sync-now');
 const attention = $('sync-attention');
@@ -119,8 +120,8 @@ function renderHome() {
   indicator.hidden = !on;
   homeSyncNow.hidden = !on;
   homeSyncNow.disabled = running;
+  let text = 'Off';
   if (on) {
-    let text;
     let title = '';
     if (running) text = 'Syncing…';
     else if (list.some((t) => t.lastError || t.unsynced)) text = 'Not synced';
@@ -133,6 +134,8 @@ function renderHome() {
     indicator.title = title;
     indicator.setAttribute('aria-label', `${text}. Sync settings`);
   }
+  // The collapsed Settings heading says the same; nothing when the status is unreadable.
+  setSectionSummary('sync', status ? text : '');
 
   const firstError = list.find((t) => t.lastError)?.lastError ?? null;
   const parked = status?.needsAttention?.length ?? 0;
@@ -280,17 +283,18 @@ async function acknowledge(button) {
     status = await call('acknowledge_conflicts');
     say(sectionStatus, 'Acknowledged.');
     render();
-    heading.focus({ preventScroll: true });
+    sectionToggle.focus({ preventScroll: true });
   } catch (err) {
     say(sectionStatus, message(err), true);
     button.focus({ preventScroll: true });
   }
 }
 
-/** Opens Settings scrolled to the Sync section, or to its needs-attention list. */
+/** Opens Settings at the Sync section (expanded), or at its needs-attention list. */
 export async function openSyncSettings(at = 'section') {
   await openSettings();
-  const target = at === 'attention' && !attention.hidden ? attentionHeading : heading;
+  const toggle = expandSection('sync');
+  const target = at === 'attention' && !attention.hidden ? attentionHeading : toggle;
   target.scrollIntoView({ block: 'start' });
   target.focus({ preventScroll: true });
 }

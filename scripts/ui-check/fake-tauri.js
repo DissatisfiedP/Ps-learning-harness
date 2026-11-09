@@ -138,15 +138,33 @@
     },
   };
 
-  // The rest of what the app shell asks for at startup and when Settings opens.
+  // The rest of what the app shell asks for at startup and when Settings opens,
+  // plus a WorkBuddy sign-in that waits until run.js calls __bridge.finishLogin.
+  const providers = [
+    { id: 'workbuddy', name: 'WorkBuddy', source: null, keyUrl: null },
+    { id: 'anthropic', name: 'Anthropic', source: 'saved', credential: 'api-key', keyUrl: null, defaultBaseUrl: 'https://api.anthropic.com' },
+    { id: 'openai', name: 'OpenAI', source: null, keyUrl: 'https://platform.openai.com/api-keys', defaultBaseUrl: 'https://api.openai.com/v1' },
+  ];
+  const settings = { roles: {} };
+  let finishLogin = null;
   const appHandlers = {
     subscribe_events: () => null,
     list_sessions: () => [],
-    list_providers: () => [
-      { id: 'anthropic', name: 'Anthropic', source: 'saved', credential: 'api-key', keyUrl: null, defaultBaseUrl: 'https://api.anthropic.com' },
-      { id: 'openai', name: 'OpenAI', source: null, keyUrl: 'https://platform.openai.com/api-keys', defaultBaseUrl: 'https://api.openai.com/v1' },
-    ],
-    get_settings: () => ({ roles: {} }),
+    list_providers: () => structuredClone(providers),
+    get_settings: () => structuredClone(settings),
+    list_models: ({ provider }) => [{ id: `${provider}-model`, name: `${provider} model` }],
+    set_role_model: ({ role, choice }) => {
+      settings.roles[role] = choice;
+      return null;
+    },
+    workbuddy_login_start: () => ({ state: 'check-state', authUrl: 'https://workbuddy.example/sign-in' }),
+    workbuddy_login_wait: () => new Promise((resolve) => {
+      finishLogin = (account) => {
+        Object.assign(providers[0], { source: 'saved', credential: 'workbuddy-account', account });
+        resolve(account);
+      };
+    }),
+    workbuddy_login_cancel: () => null,
     list_roles: () => [],
     role_usage: () => [],
     focus_dnd_support: () => null,
@@ -187,7 +205,7 @@
     }
   }
 
-  window.__bridge = { log, forbidden, sync };
+  window.__bridge = { log, forbidden, sync, finishLogin: (account) => finishLogin?.(account) };
   window.__TAURI__ = { core: { invoke, Channel: class {} } };
   window.__TAURI_INTERNALS__ = { invoke };
   window.ipc = { postMessage: (message) => forbidden.push({ via: 'window.ipc', message: String(message) }) };

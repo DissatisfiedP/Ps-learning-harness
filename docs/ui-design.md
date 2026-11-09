@@ -513,7 +513,7 @@ Desktop:
 ```
 
 - **Column:** the same `--measure` column as the session page, so it widens with it (§5.2). The top bar holds the wordmark (plain text, no logo mark) and two text buttons, "Map" (§7.6) and "Settings". "Map" is hidden when there is no app backend. Vertical offset: `--s9` above the display line on desktop, `--s7` on phone.
-- **Sync indicator** (before "Map", only when git or WebDAV is configured, §7.5.2): a text button reading "Syncing…" while a sync started from this window runs, "Not synced" when a configured target has a last error or unsent changes, otherwise "Synced ⟨just now | 5 min ago | 3 h ago | yesterday | on 3 Nov⟩" from the newest `lastSyncAt`, with the full time as its `title`. Its accessible name adds the destination ("Synced 5 min ago. Sync settings"); pressing it opens Settings scrolled to the Sync heading, which takes focus. Next to it a "Sync now" text button runs `sync_now` (disabled while it runs). Both hide when nothing is configured or `sync_status` fails; the failure is not shown. The links wrap under the wordmark on a narrow phone.
+- **Sync indicator** (before "Map", only when git or WebDAV is configured, §7.5.2): a text button reading "Syncing…" while a sync started from this window runs, "Not synced" when a configured target has a last error or unsent changes, otherwise "Synced ⟨just now | 5 min ago | 3 h ago | yesterday | on 3 Nov⟩" from the newest `lastSyncAt`, with the full time as its `title`. Its accessible name adds the destination ("Synced 5 min ago. Sync settings"); pressing it opens Settings with the Sync section expanded and scrolled to, and its heading button takes focus. Next to it a "Sync now" text button runs `sync_now` (disabled while it runs). Both hide when nothing is configured or `sync_status` fails; the failure is not shown. The links wrap under the wordmark on a narrow phone.
 - **Sync banner** (Home only, never in sessions): above "Your sessions", `role="status"`, in the `sessions-error` style. "Not synced: ⟨first target's last error⟩" in `--danger` with a "Try again" text button (runs `sync_now`), and/or "⟨n⟩ files changed on two devices need a look." in `--ink-2` with a "Review" text button (opens Settings at the needs-attention list). Hidden when neither applies.
 - **Sync refresh:** `sync_status` is read when Home shows, every 60 s while Home is visible and the window is in front (no timer otherwise), when Settings opens and after every sync command.
 - **Background sync:** when the document becomes hidden (`visibilitychange` → `hidden`; on mobile this is the app going to the background) the UI calls `sync_if_changed()` once, fire-and-forget. The backend syncs only when a configured target has local changes; nothing is shown.
@@ -951,16 +951,13 @@ Settings is a modal `<dialog>` that fills the viewport (`inline-size: 100vw; blo
 
  ▸ Other roles (optional)                       ← details; each role as above, legend adds "uses the Tutor model" when unset
 
- Providers
- Keys stay on this device.
- WorkBuddy        Signed in as …            Manage
- OpenAI           Not connected             Connect
- …
+ ▸ Providers  1 connected                      ← collapsible heading, closed by default
+   Keys stay on this device.                    ← body, shown when open
+   WorkBuddy        Signed in as …            Manage
+   OpenAI           Not connected             Connect
+   …
 
- Sync                                          ← §7.5.2
- Settings stay on this device.
- Git      Last synced 5 min ago   …   WebDAV   Not connected   …
- [Sync now]
+ ▸ Sync  Synced 5 min ago                      ← collapsible; §7.5.2
 
  Focus
  [x] Full screen in sessions
@@ -997,6 +994,7 @@ Settings is a modal `<dialog>` that fills the viewport (`inline-size: 100vw; blo
 - **Appearance** is new and UI-only: a radio group bound to `localStorage["lh.theme"]`.
 - **Learning** is new (§7.7.7): one radio group, "Starting point for new sessions" (Measure me / Quick check / I'm new to this), read from `get_settings().startingPoint` and written with `set_starting_point({ value })`. Each option carries one help line under it; a `<p class="status" role="status">` beside the group says "Saving…" → "Saved." or the error, and the stored choice is put back on failure. It sits between Model roles and Focus.
 - **Focus** is UI-only and sits right after Model roles: three checkboxes bound to `localStorage["lh.focus.fullscreen" | "lh.focus.dnd" | "lh.focus.breaks"]` (`"on"`/`"off"`, default on). No help text: the labels say what each does (§7.8).
+- **Collapsible sections:** Providers and Sync are closed by default, to keep the dialog short. Their `h2` holds one full-width button (`aria-expanded`, `aria-controls` the body) with a chevron drawn in `--ink-2` (right when closed, down when open; no motion, §8), the section name and a one-line summary in `--fs-small` `--ink-3`. The summary shows whether the section is open or closed and updates with the data: Providers "⟨n⟩ connected" / "None connected"; Sync the Home indicator's text, or "Off" when no target is set (nothing when `sync_status` fails). Enter and Space toggle it (native button). The learner's own open/close is kept per device in `localStorage["lh.settings.providers" | "lh.settings.sync"]` (`"open"`/`"closed"`) and put back on every Settings open (`ui/disclosure.js`). Navigating into a section opens it for that visit only and leaves the stored choice alone: the Home sync indicator and the banner's "Review" open Sync (§7.5.2); Home's "Connect a model to start → Settings" opens Providers; every "Choose a model first" path and a model error's "Settings" button open Providers when no provider is connected (Model roles then says "Connect a provider below"). Focus lands on the section's heading button (or the needs-attention heading), never inside a closed body. A waiting sign-in (WorkBuddy, Claude, ChatGPT) keeps running while Providers is collapsed: its rows are only hidden, and the result shows when the section opens again.
 - **Sync** sits right after Providers; see §7.5.2.
 - Phone: the same single column; button rows wrap.
 
@@ -1022,10 +1020,10 @@ Every install, update, reinstall from the lock and folder addition opens the sam
 
 #### 7.5.2 Sync
 
-The **Sync** section sits right after Providers (`#sync-section`, `ui/sync.js`). Help line: "Settings stay on this device."
+The **Sync** section sits right after Providers (`#sync-section`, `ui/sync.js`). It is collapsible like Providers (§7.5): closed by default, its heading reads "Sync" plus the Home indicator's text (or "Off"). Help line, inside the body: "Settings stay on this device."
 
 ```
- Sync
+ ▾ Sync  Synced 5 min ago                      ← heading button (open)
  Settings stay on this device.
  Git          Last synced 5 min ago · 2 ahead      ← h3 + state line (--fs-small --ink-3)
  the token was rejected; …                       ← lastError, --danger, only when set
@@ -1047,7 +1045,7 @@ The **Sync** section sits right after Providers (`#sync-section`, `ui/sync.js`).
 - **Two targets, one form each** (`set_sync { remote, token, branch }`, `set_webdav { url, username, password }`). Each has its state line ("Not connected", "Not synced yet", or "Last synced ⟨relative⟩", then "⟨n⟩ ahead", "⟨n⟩ behind" or "changes waiting"), its last error, an inline status ("Saving…" → "Saved." or the backend's sentence, e.g. a plain-http WebDAV URL) and Disconnect (`remote: ''` / `url: ''`; no confirmation, like removing a provider key). Focus moves to the target's first field when Disconnect hides.
 - **Secrets** are never shown. A saved token or app password shows as the placeholder "Saved · leave empty to keep"; an empty field sends `null`, which keeps it. The fields are filled from `sync_status` on each Settings open.
 - **Sync now** (secondary; enabled when a target is configured) reads "Syncing…" and is disabled while it runs, then re-reads `sync_status` so each target's error shows on its own line. The section status gives the report ("Synced. Git: … WebDAV: …") or the combined error.
-- **Needs attention** lists the parked paths with one "Acknowledge" (`acknowledge_conflicts`); afterwards the status says "Acknowledged." and focus moves to the Sync heading.
+- **Needs attention** lists the parked paths with one "Acknowledge" (`acknowledge_conflicts`); afterwards the status says "Acknowledged." and focus moves to the Sync heading button. "Review" in the Home banner expands Sync and focuses the "Needs attention" heading.
 
 ### 7.6 Learning map (its own page)
 

@@ -7,6 +7,7 @@ import { escapeHtml } from './markdown.js';
 import { initPluginSettings } from './pluginui.js';
 import { dndSupport, focusPref, setFocusPref } from './focus.js';
 import { modelSearch } from './modelsearch.js';
+import { expandSection, initSections, restoreSections, setSectionSummary } from './disclosure.js';
 import { syncSettingsOpened } from './sync.js';
 
 const dialog = document.getElementById('settings');
@@ -59,6 +60,7 @@ export function initSettings(h) {
     if (e.target.name === 'starting-point' && e.target.checked) saveStartingPoint(e.target.value);
   });
   renderDndRow();
+  initSections('providers', 'sync');
 }
 
 // ---------- learning (ui-design §7.7.7) ----------
@@ -122,7 +124,13 @@ function setTheme(value) {
 
 // ---------- dialog ----------
 
-export async function openSettings() {
+/**
+ * Opens Settings with Providers and Sync as this device left them. `to`:
+ * "providers" opens Providers and focuses its heading; "model" does the same
+ * only when no provider is connected (Model roles then points down to it).
+ */
+export async function openSettings({ to = null } = {}) {
+  if (!dialog.open) restoreSections();
   const sync = syncSettingsOpened();
   try {
     await reload();
@@ -140,6 +148,11 @@ export async function openSettings() {
       el.textContent = `Couldn’t load plugins: ${message(e)}`;
       el.classList.add('error');
     }
+  }
+  if (to === 'providers' || (to === 'model' && !connected().length)) {
+    const heading = expandSection('providers');
+    heading.scrollIntoView({ block: 'start' });
+    heading.focus({ preventScroll: true });
   }
 }
 
@@ -436,6 +449,8 @@ function renderProviders() {
   const rank = (p) => (p.id === 'workbuddy' || p.id === 'claude-code' || p.id === 'openai-codex' ? 0 : p.source ? 1 : 2);
   const ordered = [...providers].sort((a, b) => rank(a) - rank(b));
   for (const p of ordered) providerList.append(providerRow(p));
+  const n = connected().length;
+  setSectionSummary('providers', n ? `${n} connected` : 'None connected');
   // Keep keyboard users on the row they were working in.
   if (focusedId) providerList.querySelector(`.provider[data-id="${CSS.escape(focusedId)}"] .provider-toggle`)?.focus({ preventScroll: true });
 }

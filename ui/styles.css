@@ -863,6 +863,25 @@ dialog {
 .settings-section { padding-block-start: var(--s6); }
 .settings-section + .settings-section { margin-block-start: var(--s7); border-block-start: var(--hair); }
 .settings-section > h2 { font: 600 var(--fs-ui)/1.45 var(--font-ui); }
+/* Collapsible sections (Providers, Sync): the h2 is one full-width button with
+   a chevron (right when closed, down when open; no motion, §8) and a summary. */
+.section-toggle {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--s3);
+  inline-size: 100%; min-block-size: 32px; padding: 0;
+  border: 0; border-radius: var(--r); background: none;
+  color: var(--ink); font: inherit; text-align: start; cursor: pointer;
+  scroll-margin-block-start: var(--s5);
+}
+.section-toggle::before {
+  content: ""; flex: none; align-self: center;
+  inline-size: 0.45em; block-size: 0.45em; margin-inline: 0.1em 0.15em;
+  border-inline-end: 2px solid var(--ink-2); border-block-end: 2px solid var(--ink-2);
+  transform: rotate(-45deg);
+}
+.section-toggle[aria-expanded="true"]::before { transform: rotate(45deg); }
+.section-toggle:hover .section-name { text-decoration: underline; text-underline-offset: 0.18em; }
+.section-summary { font-weight: 400; font-size: var(--fs-small); color: var(--ink-3); }
+@media (forced-colors: active) { .section-toggle::before { border-color: ButtonText; } }
 .help { margin-block-start: var(--s1); font-size: var(--fs-small); color: var(--ink-3); }
 .meta { margin-block-start: var(--s1); font-size: var(--fs-meta); color: var(--ink-3); }
 .role { margin-block-start: var(--s6); }
@@ -906,7 +925,7 @@ dialog {
 .sync-state { font-size: var(--fs-small); color: var(--ink-3); }
 .sync-target .status.error { overflow-wrap: anywhere; }
 .sync-attention { margin-block-start: var(--s5); }
-#sync-heading, #sync-attention-heading { scroll-margin-block-start: var(--s5); }
+#sync-attention-heading { scroll-margin-block-start: var(--s5); }
 .sync-paths { margin: var(--s2) 0 0; padding-inline-start: 1.2em; font-size: var(--fs-small); }
 .sync-paths code, .sync-attention .help code { font-family: var(--font-mono); font-size: 0.92em; overflow-wrap: anywhere; }
 .theme-choice { margin-block-start: var(--s3); display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); }

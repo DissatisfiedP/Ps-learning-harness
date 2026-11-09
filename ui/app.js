@@ -699,7 +699,7 @@ function showError({ title = 'The reply failed.', text = '', action = 'Retry', o
     st.className = 'btn text';
     st.type = 'button';
     st.textContent = 'Settings';
-    st.addEventListener('click', openSettings);
+    st.addEventListener('click', () => openSettings({ to: 'model' }));
     actions.append(st);
   }
   el.append(actions);
@@ -991,7 +991,7 @@ async function startFromFrontier(itemId, button) {
   if (button) button.disabled = true;
   if (!modelReady()) {
     headStatus('');
-    openSettings();
+    openSettings({ to: 'model' });
     if (button) button.disabled = false;
     return;
   }
@@ -1478,7 +1478,7 @@ async function recheckLock(s) {
 function practiseEnded(s) {
   if (!modelReady()) {
     els.deskNoteText.textContent = 'Choose a model first.';
-    openSettings();
+    openSettings({ to: 'model' });
     return;
   }
   const text = practiseText(planIdeas(s));
@@ -1763,7 +1763,7 @@ async function submit(event) {
   if (!text) return;
   if (!modelReady()) {
     setPromptError('Choose a model first.');
-    openSettings();
+    openSettings({ to: 'model' });
     return;
   }
   // With a model that can't see images this asks once; null = keep editing.
@@ -1859,7 +1859,7 @@ function practiseSelection() {
   if (!picked.length) return;
   if (!modelReady()) {
     els.mapError.textContent = 'Choose a model first.';
-    openSettings();
+    openSettings({ to: 'model' });
     return;
   }
   const text = practiseText(picked);
@@ -1941,8 +1941,8 @@ function wire() {
   els.planPanel.addEventListener('click', (e) => {
     if (e.target === els.planPanel) els.planPanel.close();
   });
-  $('#open-settings').addEventListener('click', openSettings);
-  $('#setup-button').addEventListener('click', openSettings);
+  $('#open-settings').addEventListener('click', () => openSettings());
+  $('#setup-button').addEventListener('click', () => openSettings({ to: 'providers' }));
   $('#sessions-retry').addEventListener('click', loadSessions);
   els.openMap.addEventListener('click', showMap);
   els.resumeSession.addEventListener('click', () => openSession(els.resumeSession.dataset.id));
