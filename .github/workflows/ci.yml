@@ -1,6 +1,6 @@
-# Formatting, clippy, tests and the headless UI checks — plus the two bundles the
-# owner wants built (Linux AppImage, one signed release Android APK per ABI),
-# which upload artifacts only.
+# Formatting, clippy, tests and the headless UI checks — plus the bundles the owner
+# wants built (Linux AppImage, one signed release Android APK per ABI, a macOS DMG,
+# an unsigned iOS IPA), which upload artifacts only.
 #
 # No publishing. The only secrets are the Android signing key (README,
 # "Android signing key"), read by the android job alone. The check jobs are the
@@ -79,10 +79,10 @@ jobs:
       - name: Run the UI checks
         run: CHROMIUM=google-chrome bun scripts/ui-check/run.js ipc placement
 
-  # The two bundle jobs are the owner's smoke test of the packaging path: they
-  # build and upload an artefact, they are not part of the tree's gates. Both
-  # need a green `rust` job first, and neither gates the checks above or each
-  # other.
+  # The bundle jobs are the owner's smoke test of the packaging path: they
+  # build and upload an artefact, they are not part of the tree's gates. Each
+  # needs a green `rust` job first, and none gates the checks above or the
+  # others.
   appimage:
     name: Linux AppImage
     # Built on 22.04 (glibc 2.35): an AppImage built on a newer glibc cannot run
@@ -279,4 +279,107 @@ jobs:
         with:
           name: android-apk-x86_64
           path: dist/android/x86_64/*.apk
+          if-no-files-found: error
+
+  macos:
+    name: macOS DMG
+    # Apple Silicon runner, so the bundle is arm64 only: Intel Macs are not
+    # built for.
+    runs-on: macos-latest
+    needs: [rust]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+      - name: Cache the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: cargo-tauri-cli-v2-${{ runner.os }}
+      - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2" --locked
+      # No Developer ID certificate: `-` makes the bundler sign ad hoc, which
+      # Apple Silicon needs before it will run the app at all. Gatekeeper still
+      # refuses a downloaded ad-hoc app until its quarantine flag is cleared
+      # (README "Installing the macOS and iOS builds").
+      - name: Build the app and DMG
+        run: cargo tauri build --bundles app,dmg
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+      - name: Check the bundle
+        run: |
+          app=$(ls -d target/release/bundle/macos/*.app | head -1)
+          codesign --verify --deep --strict --verbose=2 "$app"
+          # Only system libraries: a Homebrew dylib here would not exist on
+          # the machine that downloads the DMG.
+          otool -L "$app/Contents/MacOS/ps-learning-harness"
+          if otool -L "$app/Contents/MacOS/ps-learning-harness" | grep -E '/(opt/homebrew|usr/local)/'; then
+            echo "::error::the binary links a library outside the system"
+            exit 1
+          fi
+      - name: Upload the DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  ios:
+    name: iOS IPA (unsigned)
+    runs-on: macos-latest
+    needs: [rust]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+      - name: Cache the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: cargo-tauri-cli-v2-${{ runner.os }}
+      - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2" --locked
+      # `ios init` generates the Xcode project with XcodeGen.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      # Generates the Xcode project into the git-ignored crates/app/gen/apple/,
+      # then adds the zlib and iconv libgit2 links against, which the
+      # generated project leaves out.
+      - name: Generate the Xcode project
+        run: |
+          cargo tauri ios init --ci
+          scripts/ios-link-libs.sh
+      # The repo has no Apple developer account, so the IPA is unsigned
+      # (`--no-sign`): it installs only after a sideloading tool (Sideloadly,
+      # AltStore) re-signs it with the user's own Apple ID. Device only
+      # (arm64), no simulator build.
+      - name: Build the IPA
+        run: cargo tauri ios build --no-sign --ci --target aarch64
+      - name: Collect the IPA
+        run: |
+          ipas=$(find crates/app/gen/apple/build -name '*.ipa')
+          if [ "$(printf '%s\n' "$ipas" | grep -c .)" -ne 1 ]; then
+            echo "::error::expected one IPA, found: ${ipas:-none}"
+            exit 1
+          fi
+          mkdir -p dist/ios
+          cp "$ipas" dist/ios/ps-learning-harness-unsigned.ipa
+          ls -l dist/ios
+      - name: Upload the IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa-unsigned
+          path: dist/ios/*.ipa
           if-no-files-found: error

@@ -23,7 +23,7 @@ Early. What that means today:
   alias/chain handling and topic splitter, PDF reading, the learning-system features, the Luau plugin runtime
   (host API as `@harness/*` modules) with the owner's plugin registry built in as the default, and ChatGPT
   sign-in through the Codex CLI OAuth flow.
-- **Not built:** the mobile runtime (CI builds signed release Android APKs, but the app has never run on a device), the
+- **Not built:** the mobile runtime (CI builds signed release Android APKs and an unsigned iOS IPA, but the app has never run on a device), the
   practice coach and its outcomes log, native catalogue plugins, and OS-keychain credential storage (today: a `0600`
   file). Plugin-view isolation is verified only in Chromium, not in WebKitGTK or on mobile.
 - `docs/unimplemented.md` is the one-page list of what is missing or unverified; `docs/agent-system-plan.md` is
@@ -71,18 +71,31 @@ CHROMIUM=/path/to/chromium bun scripts/ui-check/run.js ipc placement
 `cargo test --offline` works once the dependencies are in the local cargo cache.
 
 CI (`.github/workflows/ci.yml`) runs the same checks on every push to `master` and every pull
-request, and adds two bundles that the commands above do not build:
+request, and adds bundles that the commands above do not build:
 
 | Artifact | Built with | Notes |
 |---|---|---|
 | `appimage` — Linux `*.AppImage` | `cargo tauri build --bundles appimage` on ubuntu-22.04 | built against glibc 2.35 so it runs on older distributions than the runner |
 | `android-apk-arm64-v8a`, `android-apk-armeabi-v7a`, `android-apk-x86_64` — one `ps-learning-harness-<abi>.apk` each | `cargo tauri android init` + `cargo tauri android build --apk --split-per-abi --target aarch64 armv7 x86_64` (release) with NDK r29, then `zipalign -P 16` + `apksigner` with the repository's release key | one APK per ABI instead of a universal APK carrying all three native libraries, each named after the ABI its `lib/` holds; a **release** build (the debug Rust library is ~460 MB, nearly all debug info), signed with one fixed key from the repository secrets so every build installs over the last; no 32-bit x86 (`i686`) build, which is emulator-only in practice; the generated project lands in the git-ignored `crates/app/gen/android/`. OpenSSL (for git sync's HTTPS) is built from source for Android, with the NDK's `llvm-ranlib` as `TARGET_RANLIB` |
+| `macos-dmg` — macOS `*.dmg` (Apple Silicon) | `cargo tauri build --bundles app,dmg` on macos-latest with `APPLE_SIGNING_IDENTITY=-` | arm64 only; signed **ad hoc**, not with a Developer ID, and not notarized, so Gatekeeper blocks the downloaded app until its quarantine flag is cleared (below); the job fails if the binary links any library outside the system (OpenSSL is built from source on Apple targets for this reason) |
+| `ios-ipa-unsigned` — `ps-learning-harness-unsigned.ipa` | `cargo tauri ios init` + `scripts/ios-link-libs.sh` + `cargo tauri ios build --no-sign --target aarch64` on macos-latest | device (arm64) only; the script adds the zlib and iconv that libgit2 links against to the generated Xcode project, which leaves them out (run it after every local `ios init` too); **unsigned**, because the repository has no Apple developer account: it installs only after a sideloading tool re-signs it with your own Apple ID (below); the generated project lands in the git-ignored `crates/app/gen/apple/` |
 
-Both are uploaded as workflow artifacts, with `if-no-files-found: error` so an empty bundle fails
-the run. Neither is built locally by anything above.
+Each is uploaded as a workflow artifact, with `if-no-files-found: error` so an empty bundle fails
+the run. None is built locally by anything above.
 
 `.github/workflows/release.yml` (run by hand from Actions → Release) tags a commit and publishes
-the AppImage and APK that commit's CI push run already built, without rebuilding them.
+the AppImage, APKs, DMG and IPA that commit's CI push run already built, without rebuilding them.
+
+### Installing the macOS and iOS builds
+
+- **macOS:** open the DMG and drag the app to Applications. Because the app is not notarized, macOS
+  reports it as damaged or from an unidentified developer; clear the download quarantine once with
+  `xattr -dr com.apple.quarantine "/Applications/P's Learning Harness.app"`, then open it normally.
+- **iPhone/iPad:** install the IPA with a sideloading tool such as Sideloadly or AltStore, signed in with
+  a free Apple ID. Turn on Developer Mode (Settings → Privacy & Security) when iOS asks. A free Apple ID's
+  signature expires after 7 days, after which the app must be reinstalled the same way; app data is kept
+  when the bundle identifier stays the same.
+- Both devices share sessions through Settings → Sync (git remote or WebDAV), as on the other platforms.
 
 ### Android signing key
 

@@ -22,6 +22,10 @@ build order these items follow.
   a desktop-only `pick_folder`, and Luau integers that are `i32` on the 32-bit ABIs. CI now builds one
   release APK per ABI (`--split-per-abi`), signed with a fixed key from the repository secrets; neither the
   release build nor the signing step has run yet. No APK has been installed on a device.
+- **The macOS and iOS bundles are unproven on hardware.** CI builds an ad-hoc-signed Apple Silicon DMG and an
+  unsigned device IPA (`--no-sign`, for sideloading with a personal Apple ID). On Apple targets OpenSSL is
+  built from source so the binary links no Homebrew library; libgit2 itself uses Secure Transport there. No
+  IPA has been installed on a device, and WKWebView rendering has not been checked.
 
 ## 2. Designed, not built
 
@@ -30,8 +34,9 @@ build order these items follow.
 - **Practice** (arch §4.11–4.13): the coach, the problem checker job, problem generation with committed
   answers, stream/set formats, and **exam mode** (papers, coverage scheduling, simulation). Practice today is
   one prompt with no tools, and "Practise n ideas" on the Map persists nothing.
-- **Mobile runtime** (arch §8.7): the app has never run on Android; iOS has no project at all (needs a Mac
-  and a developer account). On mobile `pick_folder` refuses (tauri-plugin-dialog picks folders on desktop
+- **Mobile runtime** (arch §8.7): the app has never run on Android or iOS. The iOS project is generated in CI
+  (`cargo tauri ios init`) and not checked in; the IPA is unsigned, so installs depend on re-signing by a
+  sideloading tool. On mobile `pick_folder` refuses (tauri-plugin-dialog picks folders on desktop
   only), so workspaces and folder plugins can't be attached from a phone.
 - **Native plugins** (`sandbox`, `code-runner`, `repl`, `cas`, `live-search`, `image-set`) and the seven
   catalogue manifests: none is implemented or loadable. The Luau runtime (host API as `@harness/*` modules),
@@ -63,4 +68,5 @@ build order these items follow.
 ## 4. Deliberately not built
 
 - **Code-execution plugins** — `sandbox`, `code-runner`, `repl`, `cas`, tree-sitter — excluded by the owner.
-- **iOS** — blocked on hardware/account, not design.
+- **Signed iOS/macOS distribution** (App Store, TestFlight, Developer ID notarization) — needs a paid Apple
+  developer account.
