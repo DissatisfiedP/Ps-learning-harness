@@ -1448,27 +1448,69 @@ const ANDROID_CA_DIRS: [&str; 2] = [
 ///
 /// The order matters: libgit2 reads the file once, the first time any git2
 /// call initialises it, so this runs before [`Sync::new`] in `Harness::open`.
-/// A failure is logged and git sync then reports the certificate error;
-/// WebDAV (rustls with its own roots) does not depend on it.
+/// What happened is kept in [`TRUST_STORE`] and added to every certificate
+/// error (a phone has no log the learner can read), so a failure here names
+/// its cause. WebDAV (rustls with its own roots) does not depend on it.
 #[cfg(target_os = "android")]
 pub(crate) fn install_android_trust_store() {
+    let note = prepare_trust_store();
+    tracing::info!("git trust store: {note}");
+    let _ = TRUST_STORE.set(note);
+}
+
+/// The outcome of [`install_android_trust_store`], for certificate errors.
+#[cfg(target_os = "android")]
+static TRUST_STORE: OnceLock<String> = OnceLock::new();
+
+/// Build and write `cert.pem`; returns a one-line account of what it did.
+#[cfg(target_os = "android")]
+fn prepare_trust_store() -> String {
     let Some(dir) = option_env!("OPENSSL_CONFIG_DIR") else {
-        tracing::warn!("built without OPENSSL_CONFIG_DIR: git sync has no trusted certificates");
-        return;
+        return "this build has no OPENSSL_CONFIG_DIR, so OpenSSL looks in /usr/local/ssl"
+            .to_owned();
     };
-    let dirs: Vec<&Path> = ANDROID_CA_DIRS.iter().map(Path::new).collect();
-    let Some(bundle) = pem_bundle(&dirs) else {
-        tracing::warn!("this device's trusted certificates could not be read");
-        return;
+    let mut tried = Vec::new();
+    let mut found = None;
+    for ca in ANDROID_CA_DIRS {
+        if let Err(e) = fs::read_dir(ca) {
+            tried.push(format!("{ca}: {e}"));
+            continue;
+        }
+        match pem_bundle(&[Path::new(ca)]) {
+            Some(bundle) => {
+                found = Some((ca, bundle));
+                break;
+            }
+            None => tried.push(format!("{ca}: no certificates")),
+        }
+    }
+    let Some((ca, bundle)) = found else {
+        return format!("no roots could be read ({})", tried.join("; "));
     };
+    let count = bundle.matches("-----BEGIN CERTIFICATE-----").count();
     let path = Path::new(dir).join("cert.pem");
     if fs::read_to_string(&path).ok().as_deref() == Some(bundle.as_str()) {
-        return;
+        return format!("{count} roots from {ca} in {}", path.display());
     }
-    let written = fs::create_dir_all(dir).and_then(|()| fs::write(&path, &bundle));
-    if let Err(e) = written {
-        tracing::warn!("the certificate bundle for git sync could not be written: {e}");
+    match fs::create_dir_all(dir).and_then(|()| fs::write(&path, &bundle)) {
+        Ok(()) => format!("{count} roots from {ca} written to {}", path.display()),
+        Err(e) => format!(
+            "{count} roots from {ca}, but {} could not be written: {e}",
+            path.display()
+        ),
     }
+}
+
+/// Appended to a certificate error: on Android, what startup did to the
+/// trust store; elsewhere nothing (the system OpenSSL has its own).
+fn trust_store_detail() -> String {
+    #[cfg(target_os = "android")]
+    return format!(
+        "; trust store: {}",
+        TRUST_STORE.get().map_or("not set up", String::as_str)
+    );
+    #[cfg(not(target_os = "android"))]
+    String::new()
 }
 
 /// Every PEM certificate under the first of `dirs` that holds any, joined into
@@ -1570,8 +1612,9 @@ fn cause(error: &git2::Error, token: Option<&str>) -> String {
             // expired or unknown issuer); the URL it may contain carries no
             // token, which only ever travels through the credentials callback.
             format!(
-                "the remote's certificate could not be verified ({})",
-                error.message().trim()
+                "the remote's certificate could not be verified ({}{})",
+                error.message().trim(),
+                trust_store_detail()
             )
         } else if error.code() == ErrorCode::NotFound {
             "the remote repository was not found; check the URL and that the token can read it"
