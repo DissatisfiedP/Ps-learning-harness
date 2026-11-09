@@ -218,6 +218,31 @@ jobs:
       # Generates the Gradle project into the git-ignored crates/app/gen/android/.
       - name: Generate the Android project
         run: cargo tauri android init --ci
+      # The Gradle wrapper downloads its distribution (~150 MB) from
+      # services.gradle.org with a 10 s read timeout and a single attempt, and
+      # one slow response failed a whole run. Cache the distribution, keyed by
+      # the wrapper properties the template pins, and fetch it up front with a
+      # longer timeout and retries, so the build step never downloads it.
+      - name: Cache the Gradle distribution
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ runner.os }}-${{ hashFiles('crates/app/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+      - name: Fetch Gradle
+        working-directory: crates/app/gen/android
+        run: |
+          props=gradle/wrapper/gradle-wrapper.properties
+          if grep -q '^networkTimeout=' "$props"; then
+            sed -i 's/^networkTimeout=.*/networkTimeout=120000/' "$props"
+          else
+            echo 'networkTimeout=120000' >> "$props"
+          fi
+          for attempt in 1 2 3; do
+            if ./gradlew --version; then exit 0; fi
+            echo "::warning::Gradle download attempt $attempt of 3 failed"
+            sleep $((attempt * 20))
+          done
+          exit 1
       # A release build: an optimised Rust library (a debug one is ~460 MB,
       # nearly all debug info). Gradle leaves release APKs unsigned; the next
       # step signs them. --split-per-abi builds one APK per --target instead of
