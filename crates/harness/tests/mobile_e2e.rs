@@ -245,6 +245,73 @@ async fn a_desktop_only_plugin_locks_the_phone_once_used_and_unlock_sticks() {
     assert!(s.unexpected.lock().unwrap().is_empty());
 }
 
+/// Session ids in a phone's `<config>/session-locks.json`.
+fn cached_locks(repo: &Path, name: &str) -> Vec<String> {
+    let path = repo.parent().unwrap().join(name).join("session-locks.json");
+    let cache: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    cache["sessions"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_phone_lists_a_locked_session_as_locked_from_a_device_local_cache() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("mobile-list");
+    let s = &*script;
+    let desk = harness(&repo, &config, &base).await;
+    desk.register_native_plugin(bench(&["desktop"])).unwrap();
+    let id = teaching_with_bench(&desk, s, &release).await;
+    s.push(
+        "tutor",
+        Reply::Calls("", vec![("b1", "bench_run", json!({}))]),
+    );
+    s.push("tutor", Reply::Text("Six volts."));
+    desk.send_learner_message(&id, "measure it").await.unwrap();
+    let listed = |h: &Harness| {
+        h.list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == id)
+            .unwrap()
+    };
+
+    // Desktop lists it writable and keeps no lock cache.
+    let row = listed(&desk);
+    assert!(!row.read_only && row.read_only_reason.is_none());
+    assert!(!config.join("session-locks.json").exists());
+
+    // The phone lists it locked before opening it: from the op's recorded
+    // platforms, named by id while it has no index.
+    let p = phone(&repo, "phone", &base).await;
+    let row = listed(&p);
+    assert!(row.read_only);
+    assert_eq!(row.read_only_reason.as_deref(), Some("desktop-plugin"));
+    assert_eq!(row.desktop_only_plugins, ["bench"]);
+    assert_eq!(cached_locks(&repo, "phone"), std::slice::from_ref(&id));
+    // A registry refresh changes the names without touching the session
+    // file: the cached facts are judged against the index at list time.
+    with_index(&p, &repo).await;
+    assert_eq!(listed(&p).desktop_only_plugins, ["Bench"]);
+
+    // The unlock appends to the file, so the entry is rebuilt: writable.
+    p.mobile_unlock(&id).unwrap();
+    let row = listed(&p);
+    assert!(!row.read_only && row.read_only_reason.is_none());
+    assert!(row.desktop_only_plugins.is_empty());
+
+    // A deleted session leaves the cache.
+    p.delete_session(&id).unwrap();
+    assert!(cached_locks(&repo, "phone").is_empty());
+    assert!(p.list_sessions().unwrap().iter().all(|x| x.id != id));
+    assert!(s.unexpected.lock().unwrap().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_call_made_on_the_phone_is_refused_and_locks_after_the_turn() {
     let script = Arc::new(Script::default());

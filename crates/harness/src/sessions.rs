@@ -769,6 +769,24 @@ impl Store {
         Ok(())
     }
 
+    /// Length and mtime (ns since the epoch) of a session file: the key of a
+    /// device-local cache derived from it (`mobile.rs`).
+    pub(crate) fn file_stamp(&self, id: &str) -> Result<(u64, u64), Error> {
+        let meta = fs::metadata(self.existing_path(id)?)?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        Ok((meta.len(), mtime))
+    }
+
+    /// A session's ops read from its file, leaving the LRU alone: a scan
+    /// over every session must not evict the ones in use.
+    pub(crate) fn read_uncached(&self, id: &str) -> Result<Vec<Op>, Error> {
+        Ok(read_file(&self.existing_path(id)?)?.ops)
+    }
+
     /// Newest activity first. Reads only the first two lines + mtime (M7).
     pub fn list(&self) -> Result<Vec<SessionSummary>, Error> {
         let mut out = Vec::new();

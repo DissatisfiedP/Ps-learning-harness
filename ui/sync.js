@@ -334,5 +334,10 @@ export function initSync(hooks) {
   if (!available) return;
   new MutationObserver(onVisibility).observe(home, { attributes: true, attributeFilter: ['hidden'] });
   document.addEventListener('visibilitychange', onVisibility);
+  // Going to the background is mobile's "close": sync any local progress.
+  // Best effort; the backend does nothing when nothing changed.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') call('sync_if_changed').catch(() => {});
+  });
   onVisibility();
 }

@@ -652,6 +652,47 @@ async fn acknowledge_conflicts(h: H<'_>) -> Result<harness::SyncStatus> {
     blocking(&h, |h| h.acknowledge_conflicts()).await
 }
 
+/// The app went to the background (the UI's `visibilitychange` → hidden; on
+/// mobile there is no close): sync if a configured target has local
+/// progress. Best effort; returns whether a run started.
+#[tauri::command]
+async fn sync_if_changed(h: H<'_>) -> Result<bool> {
+    blocking(&h, |h| Ok(h.sync_if_changed())).await
+}
+
+/// Set once the exit has been held for a last sync, so the exit that follows
+/// passes straight through.
+#[cfg(desktop)]
+static EXIT_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The learner closed the app: hold the exit, hide the windows so the app
+/// looks closed, give a last sync at most `EXIT_DEADLINE` (it returns at once
+/// when nothing is configured or changed), then exit for real.
+#[cfg(desktop)]
+fn sync_then_exit(app: &tauri::AppHandle, api: &tauri::ExitRequestApi) {
+    let Some(h) = app.try_state::<Arc<Harness>>() else {
+        return;
+    };
+    if EXIT_HELD.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let h = Arc::clone(&h);
+    api.prevent_exit();
+    for window in app.webview_windows().values() {
+        let _ = window.hide();
+    }
+    let handle = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("lh-exit-sync".into())
+        .spawn(move || {
+            h.sync_before_exit(harness::sync::EXIT_DEADLINE);
+            handle.exit(0);
+        });
+    if spawned.is_err() {
+        app.exit(0);
+    }
+}
+
 /// Starts WorkBuddy browser sign-in and opens the approval page.
 #[tauri::command]
 async fn workbuddy_login_start(app: tauri::AppHandle, h: H<'_>) -> Result<LoginStart> {
@@ -890,6 +931,7 @@ pub fn run() {
             set_webdav,
             sync_now,
             acknowledge_conflicts,
+            sync_if_changed,
             workbuddy_login_start,
             workbuddy_login_wait,
             workbuddy_login_cancel,
@@ -933,6 +975,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to start P's Learning Harness")
         .run(|app, event| {
+            // A learner-initiated exit (`code: None`) waits for a last sync;
+            // the programmatic exit that follows carries a code.
+            #[cfg(desktop)]
+            if let RunEvent::ExitRequested {
+                code: None, api, ..
+            } = &event
+            {
+                sync_then_exit(app, api);
+            }
             let closing = matches!(
                 event,
                 RunEvent::Exit

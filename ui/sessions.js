@@ -28,14 +28,17 @@ const clock = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-d
 const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
 const dayMonth = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
 
-/** "Learn · 10:42", "Practice · Tue", "Read-only · 1 Jan". */
+/** "Learn · 10:42", "Practice · Tue", "Read-only · 1 Jan", "Locked · 10:42" (desktop-only plugin, on a phone). */
 function metaText(s) {
-  const kind = s.readOnly ? 'Read-only' : s.mode === 'practice' ? 'Practice' : 'Learn';
+  const kind = isLocked(s) ? 'Locked' : s.readOnly ? 'Read-only' : s.mode === 'practice' ? 'Practice' : 'Learn';
   const t = time(s.updatedAt);
   const today = startOfToday();
   const when = t >= today ? clock.format(t) : t >= today - 7 * DAY ? weekday.format(t) : dayMonth.format(t);
   return `${kind} · ${when}`;
 }
+
+/** Read-only on this phone because the session used a desktop-only plugin (docs/sync-build.md, "Sessions on mobile"). */
+const isLocked = (s) => s.readOnly && s.readOnlyReason === 'desktop-plugin';
 
 /**
  * @param {HTMLElement} root   container for the groups
@@ -60,6 +63,8 @@ export function createSessionList(root, hooks) {
   function fillRow(li, s) {
     li.querySelector('.session-title').textContent = s.title || 'Untitled';
     li.querySelector('.session-meta').textContent = metaText(s);
+    // Dimmed but still openable: the session shows its lock note and "Continue here anyway".
+    li.classList.toggle('locked', isLocked(s));
     li.querySelector('.session-delete').setAttribute('aria-label', `Delete ${s.title || 'session'}`);
   }
 

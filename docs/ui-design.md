@@ -516,6 +516,7 @@ Desktop:
 - **Sync indicator** (before "Map", only when git or WebDAV is configured, §7.5.2): a text button reading "Syncing…" while a sync started from this window runs, "Not synced" when a configured target has a last error or unsent changes, otherwise "Synced ⟨just now | 5 min ago | 3 h ago | yesterday | on 3 Nov⟩" from the newest `lastSyncAt`, with the full time as its `title`. Its accessible name adds the destination ("Synced 5 min ago. Sync settings"); pressing it opens Settings scrolled to the Sync heading, which takes focus. Next to it a "Sync now" text button runs `sync_now` (disabled while it runs). Both hide when nothing is configured or `sync_status` fails; the failure is not shown. The links wrap under the wordmark on a narrow phone.
 - **Sync banner** (Home only, never in sessions): above "Your sessions", `role="status"`, in the `sessions-error` style. "Not synced: ⟨first target's last error⟩" in `--danger` with a "Try again" text button (runs `sync_now`), and/or "⟨n⟩ files changed on two devices need a look." in `--ink-2` with a "Review" text button (opens Settings at the needs-attention list). Hidden when neither applies.
 - **Sync refresh:** `sync_status` is read when Home shows, every 60 s while Home is visible and the window is in front (no timer otherwise), when Settings opens and after every sync command.
+- **Background sync:** when the document becomes hidden (`visibilitychange` → `hidden`; on mobile this is the app going to the background) the UI calls `sync_if_changed()` once, fire-and-forget. The backend syncs only when a configured target has local changes; nothing is shown.
 - **Mode:** a real radio group (`fieldset` + `legend` "Mode", visually hidden legend), replacing `role="tablist"` (wrong semantics). The two options sit on one line and show their names only (`--fs-ui` 600), with no description. The display line already says what each mode is for ("What do you want to learn?" / "…to practise?"), so a description restated it (copy rule (a), §7.10); cutting it also keeps the start area to the question, the choice and the input. Switching mode updates the display line and placeholder from today's `COPY` ("A topic or goal…" / "A topic or problem set…").
 - **Continue:** see §7.9.
 - **Input:** the same `#composer` element moved into the home slot (keep today's slot mechanism). Its label is the display line (`aria-labelledby` = `#hero`). The button reads "Start" (primary).
@@ -524,6 +525,7 @@ Desktop:
 - **Session list** under the heading "Your sessions" (`h2`, `--fs-ui` 600):
   - Groups Today / Yesterday / Previous 7 days / Older, as small-caps `h3` in `--fs-meta` `--ink-3`.
   - Each row is an `li` containing an open button (title in `--fs-ui` `--ink`; meta "Learn · 10:42", "Practice · Tue" or "Read-only · 1 Jan" in `--fs-small` `--ink-3`, right-aligned) and a sibling "Delete" text button.
+  - **Locked** (on a phone, `readOnlyReason === "desktop-plugin"`, docs/sync-build.md "Sessions on mobile"): the meta reads "Locked · 10:42" instead of "Learn"/"Read-only", and the row gets `.locked`, which greys the title to `--ink-3` (the same dimming as a known plan node). The open button stays enabled; its accessible name (title + meta) includes "Locked", and opening it shows the desktop-plugin desk note with "Continue here anyway" (§6.3). Legacy read-only rows are unchanged.
   - Row height is at least 48 px.
   - Delete is visible on `:hover`/`:focus-within` for `(hover: hover)` devices, and always visible on `(hover: none)`.
   - First press arms the button ("Delete? Press again", `aria-live` polite); a second press within 4 s deletes. This is today's armed pattern, restyled as text.
@@ -821,7 +823,7 @@ See §6.2. In addition:
 - The flow renders from the ops, with unanswered exercises showing "Not answered.".
 - The desk is in the read-only state (§6.3): the legacy note, or the desktop-plugin note on a phone.
 - Focus on open goes to the desk note's button ("Start a new session" or "Continue here anyway") with `preventScroll`.
-- A phone session locks after a turn that used a desktop-only plugin: when a `tool` or `artifact` op whose `platforms` lacks `mobile` arrives, the tutor's `turnEnd` triggers one `load_session`, and the session is re-opened if it came back read-only. The session list keeps "Learn" for it (the list reads only each file's head).
+- A phone session locks after a turn that used a desktop-only plugin: when a `tool` or `artifact` op whose `platforms` lacks `mobile` arrives, the tutor's `turnEnd` triggers one `load_session`, and the session is re-opened if it came back read-only. On Home the list shows such a session as "Locked" (§7.1 rows).
 - A figure from a plugin that is installed but doesn't list this device's platform (`PluginInfo.onPlatform` false) shows its fallback SVG; as an answer view it adds "This figure’s plugin doesn’t run on this device." and takes no answer.
 
 #### 7.2.13 Composer: files, paste, drop, `@` mentions
@@ -1794,7 +1796,7 @@ Nothing in this table scrolls, moves focus or animates.
    - the workspace (§7.2.14): `pick_folder() -> path`, `attach_workspace({ sessionId, path }) -> name`, `detach_workspace({ sessionId })`, `workspace_path({ sessionId }) -> path | null`;
    - plugin views (§7.2.15): `plugin_view({ pluginId })`, `plugin_view_url({ pluginId })`, `plugin_view_call({ pluginId, function, args })`, `view_state({ sessionId, artifactId, summary })`, and the shell's `pluginview` URI scheme that serves the view document (§7.2.17);
    - plugins and registries (§7.2.16, §7.2.18, §7.5.1): `plugins()`, `set_plugin_enabled({ id, enabled })`, `install_plugin({ registry, id, version })`, `add_folder_plugin({ path })`, `remove_plugin({ id })`, `missing_locked()`, `registries()`, `add_registry({ name, url })`, `remove_registry({ url })`, `refresh_registries()`, `registry_catalog()`, `install_candidate({ id })`;
-   - sync (§7.1, §7.5.2): `sync_status()`, `set_sync({ remote, token, branch })`, `set_webdav({ url, username, password })`, `sync_now()`, `acknowledge_conflicts()`, shapes in `docs/sync-build.md`.
+   - sync (§7.1, §7.5.2): `sync_status()`, `set_sync({ remote, token, branch })`, `set_webdav({ url, username, password })`, `sync_now()`, `acknowledge_conflicts()`, `sync_if_changed()`, shapes in `docs/sync-build.md`.
 
    Nothing else in Rust changes for the UI.
    - **Events:** subscribe once via `subscribe_events({ onEvent: channel })`. The event kinds are `session`, `turnStart`, `text`, `thinking`, `op` and `turnEnd(error?)`.

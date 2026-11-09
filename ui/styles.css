@@ -301,6 +301,8 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .session-open:hover { background: var(--raised); transition: background-color var(--dur-hover) linear; }
 .session-title { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
 .session-meta { flex: none; font-size: var(--fs-small); color: var(--ink-3); }
+/* Locked on this phone (desktop-only plugin): the title greys to --ink-3, like a known plan node; still openable. */
+.session.locked .session-title { color: var(--ink-3); }
 .session-delete { font-size: var(--fs-small); }
 .session-delete.armed { color: var(--ink); font-weight: 600; }
 @media (hover: hover) {

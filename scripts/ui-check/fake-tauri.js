@@ -131,6 +131,11 @@
       sync.needsAttention = [];
       return syncStatus();
     },
+    // Best-effort background sync when the app is hidden; the fake only counts calls.
+    sync_if_changed: () => {
+      sync.backgroundCalls = (sync.backgroundCalls || 0) + 1;
+      return false;
+    },
   };
 
   // The rest of what the app shell asks for at startup and when Settings opens.

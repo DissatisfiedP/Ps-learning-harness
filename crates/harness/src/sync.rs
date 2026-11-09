@@ -37,8 +37,9 @@ pub use webdav::{WebdavConfig, WebdavReport, WebdavStatus};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use git2::{
     AutotagOption, Cred, CredentialType, ErrorClass, ErrorCode, FetchOptions, Index,
@@ -62,6 +63,17 @@ const DEFAULT_NAME: &str = "learning-harness";
 const DEFAULT_EMAIL: &str = "learning-harness@localhost";
 /// `sync.json` keeps at most this many unacknowledged conflict paths.
 const MAX_CONFLICTS: usize = 100;
+/// How often the background timer looks for local progress to sync.
+pub const PERIODIC_INTERVAL: Duration = Duration::from_secs(20 * 60);
+/// How long closing the app waits for its last sync.
+pub const EXIT_DEADLINE: Duration = Duration::from_secs(15);
+/// Which part of a run is in flight, for a deadline that cuts it short.
+/// Changed under the settings lock, together with the outcome it records.
+const STAGE_IDLE: u8 = 0;
+const STAGE_GIT: u8 = 1;
+const STAGE_WEBDAV: u8 = 2;
+const UNFINISHED: &str =
+    "the sync before closing did not finish in time; it runs again at the next launch";
 
 fn default_branch() -> String {
     DEFAULT_BRANCH.to_owned()
@@ -192,6 +204,11 @@ pub struct Sync {
     config_dir: PathBuf,
     state: Mutex<SyncConfig>,
     running: AtomicBool,
+    /// `STAGE_*`: what the run in flight is doing.
+    stage: AtomicU8,
+    /// The periodic timer's wake-up channel. Dropping the engine drops the
+    /// sender, which ends the timer thread.
+    ticker: OnceLock<mpsc::Sender<()>>,
 }
 
 impl Sync {
@@ -216,6 +233,8 @@ impl Sync {
             config_dir: config_dir.to_owned(),
             state: Mutex::new(state),
             running: AtomicBool::new(false),
+            stage: AtomicU8::new(STAGE_IDLE),
+            ticker: OnceLock::new(),
         }
     }
 
@@ -361,13 +380,7 @@ impl Sync {
             has_password: dav.password.as_deref().is_some_and(|p| !p.is_empty()),
             last_sync_at: dav.last_sync_at.clone(),
             last_error: dav.last_error.clone(),
-            unsynced: dav.configured()
-                && (dav.last_sync_at.is_none()
-                    || webdav::local_changes(
-                        &self.repo,
-                        &self.config_dir,
-                        dav.url.as_deref().unwrap_or_default(),
-                    )),
+            unsynced: self.webdav_unsynced(dav),
         };
         Ok(SyncStatus {
             configured: config.configured(),
@@ -382,6 +395,130 @@ impl Sync {
             needs_attention: config.conflicts,
             webdav,
         })
+    }
+
+    /// WebDAV is configured and a local file differs from its manifest (or it
+    /// never synced). Stat-only, no network.
+    fn webdav_unsynced(&self, dav: &WebdavConfig) -> bool {
+        dav.configured()
+            && (dav.last_sync_at.is_none()
+                || webdav::local_changes(
+                    &self.repo,
+                    &self.config_dir,
+                    dav.url.as_deref().unwrap_or_default(),
+                ))
+    }
+
+    /// A configured target has local progress since its last successful
+    /// sync: git has a dirty tree or unpushed commits, or WebDAV has a file
+    /// its manifest doesn't match. Remote-only changes don't count. No
+    /// network; an unreadable repository counts as changed, so the run
+    /// records why.
+    pub fn has_local_changes(&self) -> bool {
+        let config = self.config();
+        let git = config.configured()
+            && match Repository::open(&self.repo) {
+                Ok(repo) => counts(&repo, config.branch()).map_or(true, |(_, _, dirty)| dirty),
+                Err(_) => true,
+            };
+        git || self.webdav_unsynced(&config.webdav)
+    }
+
+    /// The periodic trigger, and the mobile one when the app goes to the
+    /// background: a background run only when [`Sync::has_local_changes`].
+    /// Nothing configured, nothing changed, or a run in flight: nothing
+    /// happens. Returns whether a run started.
+    pub fn trigger_if_changed(self: &Arc<Self>) -> bool {
+        if self.running.load(Ordering::SeqCst) || !self.has_local_changes() {
+            return false;
+        }
+        self.trigger()
+    }
+
+    /// Start the timer that calls [`Sync::trigger_if_changed`] every
+    /// `interval` ([`PERIODIC_INTERVAL`] in the app). It holds only a weak
+    /// reference, and ends as soon as the engine is dropped. A second call
+    /// does nothing. The handle is for tests; the app lets the thread run.
+    pub fn start_periodic(
+        self: &Arc<Self>,
+        interval: Duration,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        let (sender, wake) = mpsc::channel::<()>();
+        if self.ticker.set(sender).is_err() {
+            return None;
+        }
+        let engine = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new()
+            .name("lh-sync-timer".into())
+            .spawn(move || loop {
+                // Nothing is ever sent: a timeout is a tick, a disconnect
+                // means the engine is gone.
+                if wake.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
+                    return;
+                }
+                let Some(engine) = engine.upgrade() else {
+                    return;
+                };
+                engine.trigger_if_changed();
+            });
+        match spawned {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                tracing::warn!("could not start the periodic sync: {e}");
+                None
+            }
+        }
+    }
+
+    /// Closing the app: a run is in flight, or a configured target has local
+    /// progress worth one last sync.
+    pub fn pending_before_exit(&self) -> bool {
+        self.running.load(Ordering::SeqCst) || self.has_local_changes()
+    }
+
+    /// One last sync before the app closes, waiting at most `deadline`
+    /// (about [`EXIT_DEADLINE`]): a run already in flight is waited for, and
+    /// otherwise one starts when there are local changes. Returns whether
+    /// the run finished in time; when it didn't, the targets it hadn't
+    /// finished record that in `lastError`, and the run keeps going until the
+    /// process exits. Never blocks longer than `deadline` plus the local
+    /// change check.
+    pub fn sync_before_exit(self: &Arc<Self>, deadline: Duration) -> bool {
+        let started = Instant::now();
+        if !self.running.load(Ordering::SeqCst) {
+            if !self.has_local_changes() {
+                return true;
+            }
+            self.trigger();
+        }
+        while self.running.load(Ordering::SeqCst) {
+            let elapsed = started.elapsed();
+            if elapsed >= deadline {
+                self.record_unfinished();
+                return false;
+            }
+            std::thread::sleep((deadline - elapsed).min(Duration::from_millis(50)));
+        }
+        true
+    }
+
+    /// The deadline cut a run short: say so on every target it hadn't
+    /// finished. The stage is read under the settings lock, where the run
+    /// also records its outcomes, so a target that just finished keeps its
+    /// real result.
+    fn record_unfinished(&self) {
+        let saved = self.update(|config| {
+            let stage = self.stage.load(Ordering::SeqCst);
+            if stage == STAGE_GIT && config.configured() {
+                config.last_error = Some(UNFINISHED.into());
+            }
+            if stage != STAGE_IDLE && config.webdav.configured() {
+                config.webdav.last_error = Some(UNFINISHED.into());
+            }
+        });
+        if let Err(e) = saved {
+            tracing::warn!("sync settings not saved: {e}");
+        }
     }
 
     /// One full run: git (commit, fetch, merge, resolve, commit the merge,
@@ -404,17 +541,18 @@ impl Sync {
 
     /// Best-effort background run: never blocks the caller, and a trigger while
     /// a run is in flight is dropped. Nothing happens while unconfigured.
-    pub fn trigger(self: &Arc<Self>) {
+    /// Returns whether a run started.
+    pub fn trigger(self: &Arc<Self>) -> bool {
         let config = self.config();
         if !config.configured() && !config.webdav.configured() {
-            return;
+            return false;
         }
         if self
             .running
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return;
+            return false;
         }
         let me = Arc::clone(self);
         let spawned = std::thread::Builder::new()
@@ -429,7 +567,9 @@ impl Sync {
             });
         if spawned.is_err() {
             self.running.store(false, Ordering::SeqCst);
+            return false;
         }
+        true
     }
 
     /// Git, then WebDAV, in that fixed order so the status reads predictably.
@@ -438,6 +578,8 @@ impl Sync {
         let git = self.config().configured();
         let mut report = SyncReport::default();
         let mut errors: Vec<String> = Vec::new();
+        self.stage
+            .store(if git { STAGE_GIT } else { STAGE_WEBDAV }, Ordering::SeqCst);
         if git {
             match self.finish(self.once()) {
                 Ok(done) => report = done,
@@ -462,6 +604,7 @@ impl Sync {
                 Err(e) => errors.push(e.to_string()),
             }
         }
+        self.stage.store(STAGE_IDLE, Ordering::SeqCst);
         if errors.is_empty() {
             Ok(report)
         } else {
@@ -474,11 +617,13 @@ impl Sync {
     fn finish(&self, result: Result<SyncReport, Error>) -> Result<SyncReport, Error> {
         let outcome = self.update(|config| match &result {
             Ok(report) => {
+                self.stage.store(STAGE_WEBDAV, Ordering::SeqCst);
                 config.last_sync_at = Some(now_iso());
                 config.last_error = None;
                 note_attention(config, &report.needs_attention);
             }
             Err(e) => {
+                self.stage.store(STAGE_WEBDAV, Ordering::SeqCst);
                 let token = config.token.clone();
                 config.last_error = Some(redact(&e.to_string(), token.as_deref()));
             }
@@ -504,6 +649,7 @@ impl Sync {
         }
         .map(|message| dav.scrub(&message));
         let saved = self.update(|config| {
+            self.stage.store(STAGE_IDLE, Ordering::SeqCst);
             if let Ok(outcome) = &result {
                 note_attention(config, &outcome.needs_attention);
             }

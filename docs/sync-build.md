@@ -95,12 +95,30 @@ pub struct SyncReport {
 | `sync_now(&self)` | — | runs git (if configured), then WebDAV (if configured), single-flight; returns `SyncReport`, or an error naming every failed target |
 | `set_webdav(&self, url: Option<&str>, username: Option<&str>, password: Option<&str>)` | `{ url, username, password }` | saves the WebDAV settings; an empty url disconnects WebDAV and deletes the manifest; `None` keeps a saved value, `""` clears it |
 | `acknowledge_conflicts(&self)` | — | clears `needsAttention` (the `.conflicts/` files stay in history) |
+| `sync_if_changed(&self) -> bool` | — | starts a background run only when a configured target has local changes (stat/status checks, no network); returns whether one started. The UI calls it when the app goes to the background |
+| `sync_before_exit(&self, deadline)` | — (app only) | on desktop close: waits for a run in flight or starts one when there are local changes, blocking at most `deadline` (15 s); returns whether it finished |
 | `mobile_unlock(&self, session_id)` | `{ sessionId }` | appends `mobileUnlock` to a session locked on this phone for a desktop-only plugin; returns the reloaded session |
 
-Triggers, all best effort and never blocking a turn: on `Harness::open` when a target is configured, after
-`session_end` (after the graph job is spawned), and on the command. Offline or misconfigured → a recorded `last_error`
-on that target and `unsynced: true`; the session keeps working read-write (the "not synced" state is what the Home
-banner reads).
+Triggers, all best effort and never blocking a turn (each runs git, then WebDAV, under the one single-flight flag):
+- on `Harness::open` when a target is configured;
+- after `session_end` (after the graph job is spawned);
+- every 20 minutes (`sync::PERIODIC_INTERVAL`) **only when there is local progress**: a configured git target with a
+  dirty tree or unpushed commits, or a configured WebDAV target whose stat-only check finds a file the manifest doesn't
+  match (`Sync::trigger_if_changed`, no network; remote-only changes don't count, launch and the button cover pulls).
+  The timer thread holds a `Weak` reference and ends when the Harness is dropped;
+- before the app closes on desktop: a learner-initiated `RunEvent::ExitRequested` (`code: None`) is prevented, the
+  windows are hidden, `Sync::sync_before_exit` waits at most 15 s (`sync::EXIT_DEADLINE`) for a run in flight or
+  starts one when there is local progress (returning at once when there's nothing to sync), then the app exits with
+  `AppHandle::exit(0)`. That second request carries a code and passes through, and `RunEvent::Exit` still restores
+  focus mode. A run cut off by the deadline records "the sync before closing did not finish in time; it runs again at
+  the next launch" on the targets it hadn't finished;
+- when the app goes to the background (mobile has no close): the UI calls `sync_if_changed` on
+  `document.visibilitychange` → hidden. Tauri 2.12 has no suspend/background `RunEvent` on Android, so this is the
+  webview's event; it is non-blocking and does nothing without local progress;
+- the Sync now button (`sync_now`).
+
+Offline or misconfigured → a recorded `last_error` on that target and `unsynced: true`; the session keeps working
+read-write (the "not synced" state is what the Home banner reads).
 
 ## Verification
 
@@ -245,6 +263,18 @@ queued, and the next turn delivers it, on desktop or after "Continue here anyway
 writable) and `desktopOnlyPlugins` (display names: the registry index title, else the installed title, else the id).
 `readOnly` stays the one boolean every caller reads. Desktop is never affected.
 
+**The session list.** On mobile, `list_sessions` applies the same rule, so a locked session is listed locked (meta
+"Locked", dimmed row; `docs/ui-design.md` §7.1) before it is opened. `list` itself still reads only each file's first
+two lines (M7); the lock comes from a device-local cache, `<config>/session-locks.json` (never in the repo), keyed by
+session id. Each entry holds the file's length and mtime and the registry-independent facts: the plugin uses (the
+recorded id and `platforms`, or, for an older call op without `plugin`, its tool name) and the ids released by
+`mobileUnlock` ops. An entry is rebuilt (one uncached read of that file, through the same parser) only when the length
+or mtime changed, and only for Learn sessions that aren't legacy read-only; any append, `mobileUnlock` included,
+therefore refreshes it. The installed plugins and cached indexes are applied at list time, so a registry refresh
+changes the result (and the names) without a rebuild. Entries of deleted sessions are dropped, on `delete_session`
+and on the next list. A failed cache write only costs a rebuild, as with the title index. Desktop reads and writes no
+cache.
+
 **How the phone knows.** Plugin tool calls record `plugin` (the id) and `platforms`, and `artifact` ops record
 `platforms`, when they are written (optional fields, absent on older ops). Each op is judged by its own recorded
 `platforms` first, then by the cached registry indexes (`<config>/registry-cache/`, read only, never fetched). An older
@@ -278,8 +308,6 @@ available in this phase". When the log names a folder this device has no mapping
 device` section carries "The folder `<name>` is attached on another device; its files aren't available here."
 
 **Deviations.**
-- `list_sessions` reads only each file's first two lines (M7), so it can't see the mobile lock: the list shows such a
-  session as writable (meta "Learn") until it is opened, where `load_session` and the desk note show the lock.
 - Tool call ops record the plugin id as well as `platforms` (the doc named only `platforms`): an older op's tool name
   can't be mapped back to an id with dashes, and the lock note needs the id.
 - `mobileUnlock` names the plugins it releases, so a desktop-only plugin first used after it locks again (the doc
@@ -324,9 +352,15 @@ device` section carries "The folder `<name>` is attached on another device; its 
   made; after `mobile_unlock` the next turn delivers it (the test fails without the `flush_deliveries` guard). A
   plugin with unknown platforms (not installed, no index, no earlier op) fails as before and doesn't lock. An attached
   folder never locks: the phone turn's prompt names `thesis-notes` and `workspace_write` refuses with "no workspace is
-  attached to this session".
+  attached to this session". The session list
+  (`the_phone_lists_a_locked_session_as_locked_from_a_device_local_cache`): desktop lists the used-plugin session
+  writable and writes no `session-locks.json`; the phone lists it locked (`desktop-plugin`, named by id), caches it,
+  and names it by title after a registry refresh without the file changing; after `mobile_unlock` it lists writable;
+  after `delete_session` the cache has no entry.
   Unit tests in `mobile.rs` cover grants and `plugin_request` not locking, artifacts, recorded platforms winning over
   the index, the index fallback by tool-name prefix, empty platform lists, planner calls, and an unlock releasing only
   the plugins it names. The desk note and "Continue here anyway" (unlock → writable, a turn with a desktop-only op →
-  re-opened locked, the legacy note unchanged) were checked in headless Chromium against a mocked backend.
+  re-opened locked, the legacy note unchanged) were checked in headless Chromium against a mocked backend, and the
+  Home list at 390 px against the ui-check fake bridge: the locked row reads "Locked · ⟨time⟩" with a greyed title,
+  stays enabled, and opens to the lock note; the legacy row still reads "Read-only".
 - Not proven on mobile: no Android/iOS build ran these paths; the mobile rules ran only through `set_platform`.

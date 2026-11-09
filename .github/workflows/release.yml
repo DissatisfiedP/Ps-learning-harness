@@ -51,9 +51,12 @@ jobs:
           echo "commit $sha, CI run $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run_id"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-      # Fails if either bundle job did not upload (failed, skipped or cancelled).
+      # Fails if any bundle did not upload (failed, skipped or cancelled): the
+      # AppImage and one debug APK per ABI (arm64-v8a, armeabi-v7a, x86_64).
       - name: Download the bundles
-        run: gh run download "$RUN_ID" --name appimage --name android-apk --dir dist
+        run: |
+          gh run download "$RUN_ID" --dir dist --name appimage \
+            --name android-apk-arm64-v8a --name android-apk-armeabi-v7a --name android-apk-x86_64
         env:
           RUN_ID: ${{ steps.ci.outputs.run_id }}
       - name: Create the release

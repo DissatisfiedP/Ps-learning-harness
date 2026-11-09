@@ -695,7 +695,8 @@ On mobile, the OS suspends backgrounded apps, including the Rust core. Jobs ther
 use the same merge rules, and one run does git, then WebDAV. Design and as-built notes: `docs/sync-build.md`, "WebDAV
 target".
 
-Algorithm (on launch, after each session, and on close/background):
+Algorithm (on launch, after each session, every 20 minutes when there is local progress, before close on desktop with a
+15 s cap, when the app goes to the background on mobile, and on the Sync now button; see `docs/sync-build.md`):
 1. Commit local changes.
 2. Fetch.
 3. If the remote has new commits, merge with libgit2 (§6.4). For every conflicted index entry, resolve by file type in app code:

@@ -205,6 +205,9 @@ pub struct Harness {
     /// session → artifact → latest view-state summary since the learner's
     /// last message; flushed as `viewState` ops when they next send (W7).
     pub(crate) view_states: Mutex<HashMap<String, BTreeMap<String, String>>>,
+    /// Mobile only: each Learn session file's mobile-lock facts, keyed by its
+    /// length and mtime (`<config>/session-locks.json`, loaded on first use).
+    pub(crate) session_locks: Mutex<Option<mobile::LockCache>>,
     /// Git sync of the data repo (device-local settings + one run at a time).
     pub(crate) sync: Arc<sync::Sync>,
 }
@@ -244,6 +247,7 @@ impl Harness {
             librarian_slots: Arc::new(Semaphore::new(1)),
             sink: Mutex::new(None),
             view_states: Mutex::new(HashMap::new()),
+            session_locks: Mutex::new(None),
             sync: Arc::new(sync::Sync::new(repo, config_dir)),
         })
         .inspect(|harness: &Self| {
@@ -255,6 +259,9 @@ impl Harness {
             // Best effort: a configured sync catches up in the background, and
             // an offline launch only records `last_error` (the UI banner).
             harness.sync.trigger();
+            // Every 20 minutes, a run when there is local progress. The timer
+            // holds a weak reference and ends with the Harness.
+            harness.sync.start_periodic(sync::PERIODIC_INTERVAL);
         })
     }
 
@@ -308,6 +315,25 @@ impl Harness {
         self.sync.trigger();
     }
 
+    /// Best-effort background run only when a configured target has local
+    /// progress (the app going to the background on mobile). No network for
+    /// the check; never blocks on the run.
+    pub fn sync_if_changed(&self) -> bool {
+        self.sync.trigger_if_changed()
+    }
+
+    /// Closing the app: whether a last sync is worth holding the exit for (a
+    /// run in flight, or local progress on a configured target).
+    pub fn sync_pending_before_exit(&self) -> bool {
+        self.sync.pending_before_exit()
+    }
+
+    /// One last sync before the app closes, blocking at most `deadline`
+    /// ([`sync::EXIT_DEADLINE`] in the app). Returns whether it finished.
+    pub fn sync_before_exit(&self, deadline: Duration) -> bool {
+        self.sync.sync_before_exit(deadline)
+    }
+
     /// Where runtime events (turns, ops, jobs) go.
     pub fn set_event_sink(&self, sink: Option<EventSink>) {
         *lock(&self.sink) = sink;
@@ -315,11 +341,13 @@ impl Harness {
 
     // ---- sessions -------------------------------------------------------
 
-    /// Every session, from each file's first two lines (M7). The mobile lock
-    /// needs the whole log, so it shows on `load_session` and the write
-    /// path, not here.
+    /// Every session, from each file's first two lines (M7). On mobile, a
+    /// Learn session that used a desktop-only plugin is listed read-only,
+    /// from a device-local cache that re-reads a file only when it changed.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, Error> {
-        self.store.list()
+        let mut list = self.store.list()?;
+        self.apply_mobile_locks(&mut list);
+        Ok(list)
     }
 
     /// A session with its ops. On mobile, a Learn session that used a
@@ -342,7 +370,9 @@ impl Harness {
         for job in jobs {
             let _ = self.cancel_job(id, &job);
         }
-        self.store.delete(id)
+        self.store.delete(id)?;
+        self.forget_mobile_lock(id);
+        Ok(())
     }
 
     /// The Map page's data: the standalone knowledge graph (topics, claims,

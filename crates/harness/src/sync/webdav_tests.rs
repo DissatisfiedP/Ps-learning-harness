@@ -1,19 +1,21 @@
 //! WebDAV target tests (docs/sync-build.md, "WebDAV target", Verification)
 //! against a small WebDAV server on `127.0.0.1:0` over a temp dir: no network
-//! and no external binary.
+//! and no external binary. Also the automatic triggers (periodic, if
+//! changed, before exit), which need both targets.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 
 use super::tests::{bare, header, op, op_ids, snapshot, Device, Tmp};
-use super::{ConflictPath, WebdavReport};
+use super::{ConflictPath, Sync, WebdavReport};
 
 const USER: &str = "alice";
 const PASSWORD: &str = "app-pass-7Qx9";
@@ -901,4 +903,171 @@ fn set_webdav_checks_the_url_and_keeps_or_clears_the_password() {
         "{file}"
     );
     assert!(device.sync.sync().is_err(), "nothing is configured");
+}
+
+// ---- automatic triggers -------------------------------------------------
+
+/// Wait for the background run in flight to finish.
+fn wait_idle(sync: &Sync) {
+    let start = Instant::now();
+    while sync.running.load(Ordering::SeqCst) {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the run never ended"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn remote_has(remote: &Path, rel: &str) -> bool {
+    let Ok(repo) = git2::Repository::open(remote) else {
+        return false;
+    };
+    let tree = repo
+        .find_reference("refs/heads/main")
+        .and_then(|reference| reference.peel_to_tree());
+    tree.is_ok_and(|tree| tree.get_path(Path::new(rel)).is_ok())
+}
+
+#[test]
+fn trigger_if_changed_runs_only_for_local_progress() {
+    // Nothing configured: nothing to do.
+    let idle = Device::new("changed-none");
+    idle.write(SESSION, &base_session());
+    assert!(!idle.sync.trigger_if_changed());
+
+    // Git: clean after a run, so the trigger skips; a new op runs it.
+    let (_remote_root, remote) = bare("changed-git");
+    let git = Device::connected("changed-git-a", &remote);
+    git.write(SESSION, &base_session());
+    git.run();
+    assert!(
+        !git.sync.trigger_if_changed(),
+        "a clean tree is not progress"
+    );
+    let other = "sessions/2026/new.jsonl";
+    git.write(other, &base_session());
+    assert!(git.sync.trigger_if_changed());
+    wait_idle(&git.sync);
+    assert!(remote_has(&remote, other), "the change was pushed");
+    assert!(
+        !git.sync.trigger_if_changed(),
+        "and the tree is clean again"
+    );
+
+    // Remote-only changes are not local progress.
+    let peer = Device::connected("changed-git-b", &remote);
+    peer.run();
+    peer.write("sessions/2026/peer.jsonl", &base_session());
+    peer.run();
+    assert!(!git.sync.trigger_if_changed());
+
+    // WebDAV: the same, through the stat-only check.
+    let server = Server::start("changed-dav");
+    let dav = dav_device("changed-dav-a", &server);
+    dav.write(SESSION, &base_session());
+    assert!(dav.sync.trigger_if_changed(), "never synced");
+    wait_idle(&dav.sync);
+    assert!(server.exists(SESSION));
+    assert!(!dav.sync.trigger_if_changed(), "nothing changed since");
+    dav.append(
+        SESSION,
+        &op(
+            "01H00000000000000000000003",
+            "2026-01-01T00:00:03Z",
+            "later",
+        ),
+    );
+    assert!(dav.sync.trigger_if_changed());
+    wait_idle(&dav.sync);
+    assert!(server.read(SESSION).contains("later"));
+    assert!(dav.sync.status().unwrap().webdav.last_error.is_none());
+}
+
+#[test]
+fn sync_before_exit_gives_up_at_its_deadline() {
+    // A server that accepts and never answers.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            held.push(stream);
+        }
+    });
+    let device = Device::new("exit-stall");
+    device
+        .sync
+        .set_webdav(
+            Some(&format!("http://127.0.0.1:{port}/dav/")),
+            Some(USER),
+            Some(PASSWORD),
+        )
+        .unwrap();
+    device.write(SESSION, &base_session());
+    assert!(device.sync.pending_before_exit());
+    let before = snapshot(&device.repo);
+
+    let deadline = Duration::from_millis(800);
+    let start = Instant::now();
+    assert!(!device.sync.sync_before_exit(deadline), "it did not finish");
+    let took = start.elapsed();
+    assert!(
+        took >= deadline && took < deadline + Duration::from_secs(2),
+        "{took:?}"
+    );
+    assert_eq!(snapshot(&device.repo), before, "the tree is unchanged");
+    let error = device.sync.status().unwrap().webdav.last_error.unwrap();
+    assert!(error.contains("did not finish in time"), "{error}");
+
+    // With nothing to sync, closing never waits.
+    let clean = Device::new("exit-clean");
+    assert!(!clean.sync.pending_before_exit());
+    let start = Instant::now();
+    assert!(clean.sync.sync_before_exit(Duration::from_secs(5)));
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn the_periodic_timer_syncs_progress_and_stops_with_the_engine() {
+    let (_remote_root, remote) = bare("timer");
+    let device = Device::new("timer-a");
+    let engine = Arc::new(Sync::new(&device.repo, &device.config));
+    engine
+        .set(Some(remote.to_str().unwrap()), None, None)
+        .unwrap();
+    let timer = engine
+        .start_periodic(Duration::from_millis(30))
+        .expect("the timer started");
+    assert!(
+        engine.start_periodic(Duration::from_millis(30)).is_none(),
+        "one timer per engine"
+    );
+
+    device.write(SESSION, &base_session());
+    let start = Instant::now();
+    while !remote_has(&remote, SESSION) {
+        assert!(start.elapsed() < Duration::from_secs(20), "no tick synced");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    wait_idle(&engine);
+    let synced_at = engine.status().unwrap().last_sync_at;
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        engine.status().unwrap().last_sync_at,
+        synced_at,
+        "clean ticks don't run"
+    );
+
+    // Dropping the engine (what dropping the Harness does) ends the thread.
+    drop(engine);
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = timer.join();
+        let _ = done.send(());
+    });
+    assert!(
+        ended.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "the timer thread stopped"
+    );
 }

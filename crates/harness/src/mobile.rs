@@ -10,16 +10,24 @@
 //! found in neither does not lock. A `mobileUnlock` op releases the plugins it
 //! names. Desktop ignores all of it.
 //!
+//! `list_sessions` applies the same rule on mobile from a device-local cache,
+//! `<config>/session-locks.json`: each Learn session file's registry-
+//! independent [`LockFacts`], keyed by the file's length and mtime, judged
+//! against the installed plugins and cached indexes at list time.
+//!
 //! An attached folder never locks: its path is device-local, so a device
 //! without the mapping just has no folder, and the tutor is told so.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
 
 use crate::plugins::install::IndexPlugin;
 use crate::sessions::{op_id, MobileUnlockOp, Op};
 use crate::state::SessionState;
 use crate::tools;
-use crate::{lock, now_iso, Error, Harness, Mode, Session};
+use crate::{lock, now_iso, Error, Harness, Mode, Session, SessionSummary};
 
 /// `SessionSummary::read_only_reason` of a session locked on mobile.
 pub const DESKTOP_PLUGIN: &str = "desktop-plugin";
@@ -85,50 +93,123 @@ pub(crate) fn desktop_only(platforms: &[String]) -> bool {
     !platforms.is_empty() && !platforms.iter().any(|p| p == "mobile")
 }
 
-/// The plugins this log shows the tutor used (a tutor tool call or an
-/// `artifact` op) that are known not to run on mobile, as ids in first-use
-/// order. Each op is judged by the platforms it recorded, else the index.
-pub(crate) fn desktop_only_used(ops: &[Op], known: &Known) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for op in ops {
-        let (id, recorded) = match op {
-            Op::Tool(t) if t.agent.is_none() => {
-                let Some(id) = t.plugin.clone().or_else(|| known.owner_of(&t.name)) else {
-                    continue;
-                };
-                (id, t.platforms.as_deref())
-            }
-            Op::Artifact(a) => (a.plugin_id.clone(), a.platforms.as_deref()),
-            _ => continue,
-        };
-        if out.contains(&id) {
-            continue;
-        }
-        let platforms = recorded
-            .filter(|p| !p.is_empty())
-            .or_else(|| known.index_platforms(&id));
-        if platforms.is_some_and(desktop_only) {
-            out.push(id);
-        }
-    }
-    out
+/// One plugin use in a log: a tutor tool call or an `artifact` op, with what
+/// the op itself recorded. Registry-independent, so it can be cached per
+/// session file and judged against [`Known`] later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginUse {
+    /// The plugin id the op recorded (artifacts, newer tool calls).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin: Option<String>,
+    /// An older tool call's name, resolved by [`Known::owner_of`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool: Option<String>,
+    /// The plugin's platforms as the op recorded them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    platforms: Option<Vec<String>>,
 }
 
-/// The plugins that keep this session read-only on mobile: used, desktop-
-/// only, and not released by a `mobileUnlock` op.
+/// What a session log says for the mobile lock, in log order: the plugin
+/// uses and the plugin ids `mobileUnlock` ops released.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LockFacts {
+    #[serde(default)]
+    uses: Vec<PluginUse>,
+    #[serde(default)]
+    unlocked: Vec<String>,
+}
+
+impl LockFacts {
+    pub(crate) fn from_ops(ops: &[Op]) -> Self {
+        let mut facts = Self::default();
+        for op in ops {
+            let used = match op {
+                // The call op, not its result: the call carries the stamp,
+                // and a result never names anything the call didn't.
+                Op::Tool(t) if t.agent.is_none() && t.result.is_none() => match &t.plugin {
+                    Some(id) => PluginUse {
+                        plugin: Some(id.clone()),
+                        tool: None,
+                        platforms: t.platforms.clone(),
+                    },
+                    None if tools::is_core_tutor_tool(&t.name) => continue,
+                    None => PluginUse {
+                        plugin: None,
+                        tool: Some(t.name.clone()),
+                        platforms: t.platforms.clone(),
+                    },
+                },
+                Op::Artifact(a) => PluginUse {
+                    plugin: Some(a.plugin_id.clone()),
+                    tool: None,
+                    platforms: a.platforms.clone(),
+                },
+                Op::MobileUnlock(u) => {
+                    for id in &u.plugins {
+                        if !facts.unlocked.contains(id) {
+                            facts.unlocked.push(id.clone());
+                        }
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            if !facts.uses.contains(&used) {
+                facts.uses.push(used);
+            }
+        }
+        facts
+    }
+
+    /// The plugins used that are known not to run on mobile, as ids in
+    /// first-use order. Each use is judged by the platforms it recorded,
+    /// else the index.
+    pub(crate) fn desktop_only_used(&self, known: &Known) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for used in &self.uses {
+            let id = match (&used.plugin, &used.tool) {
+                (Some(id), _) => id.clone(),
+                (None, Some(tool)) => match known.owner_of(tool) {
+                    Some(id) => id,
+                    None => continue,
+                },
+                (None, None) => continue,
+            };
+            if out.contains(&id) {
+                continue;
+            }
+            let platforms = used
+                .platforms
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .or_else(|| known.index_platforms(&id));
+            if platforms.is_some_and(desktop_only) {
+                out.push(id);
+            }
+        }
+        out
+    }
+
+    /// The plugins that keep this session read-only on mobile: used,
+    /// desktop-only, and not released by a `mobileUnlock` op.
+    pub(crate) fn locking(&self, known: &Known) -> Vec<String> {
+        self.desktop_only_used(known)
+            .into_iter()
+            .filter(|id| !self.unlocked.contains(id))
+            .collect()
+    }
+}
+
+/// [`LockFacts::desktop_only_used`] of a log.
+pub(crate) fn desktop_only_used(ops: &[Op], known: &Known) -> Vec<String> {
+    LockFacts::from_ops(ops).desktop_only_used(known)
+}
+
+/// [`LockFacts::locking`] of a log.
 pub(crate) fn locking(ops: &[Op], known: &Known) -> Vec<String> {
-    let unlocked: HashSet<&str> = ops
-        .iter()
-        .filter_map(|o| match o {
-            Op::MobileUnlock(u) => Some(u.plugins.iter().map(String::as_str)),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-    desktop_only_used(ops, known)
-        .into_iter()
-        .filter(|id| !unlocked.contains(id.as_str()))
-        .collect()
+    LockFacts::from_ops(ops).locking(known)
 }
 
 /// Names joined for a sentence: "A", "A and B", "A, B and C".
@@ -138,6 +219,72 @@ fn join_names(names: &[String]) -> String {
         [one] => one.clone(),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
+}
+
+/// `<config>/session-locks.json`: never synced, derived, rebuilt when lost.
+const LOCK_CACHE_FILE: &str = "session-locks.json";
+
+/// The list-time cache (mobile only): each Learn session file's
+/// [`LockFacts`], valid while the file's length and mtime are unchanged.
+/// Registry knowledge is applied at list time, so a registry refresh changes
+/// the result without a rebuild.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct LockCache {
+    #[serde(default)]
+    sessions: HashMap<String, LockEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LockEntry {
+    len: u64,
+    mtime: u64,
+    facts: LockFacts,
+}
+
+impl LockCache {
+    fn load(path: &Path) -> Self {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// Best effort, like the title index: a failed write costs a rebuild.
+    fn save(&self, path: &Path) {
+        let write = || -> Result<(), Error> {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_vec(self)?)?;
+            std::fs::rename(&tmp, path)?;
+            Ok(())
+        };
+        if let Err(e) = write() {
+            tracing::debug!("session lock cache not written: {e}");
+        }
+    }
+}
+
+/// Marks a summary locked for `locked` (`(id, display name)`), if any.
+fn lock_summary(summary: &mut SessionSummary, locked: Vec<(String, String)>) {
+    if locked.is_empty() {
+        return;
+    }
+    summary.read_only = true;
+    summary.read_only_reason = Some(DESKTOP_PLUGIN.to_owned());
+    summary.desktop_only_plugins = locked.into_iter().map(|(_, name)| name).collect();
+}
+
+/// `(id, display name)` of each plugin in `ids`.
+fn named(ids: Vec<String>, known: &Known) -> Vec<(String, String)> {
+    ids.into_iter()
+        .map(|id| {
+            let name = known.name(&id);
+            (id, name)
+        })
+        .collect()
 }
 
 impl Harness {
@@ -166,13 +313,7 @@ impl Harness {
             return Vec::new();
         }
         let known = self.known_plugins();
-        locking(ops, &known)
-            .into_iter()
-            .map(|id| {
-                let name = known.name(&id);
-                (id, name)
-            })
-            .collect()
+        named(locking(ops, &known), &known)
     }
 
     /// Marks a loaded Learn session read-only on mobile when the rule says
@@ -183,12 +324,73 @@ impl Harness {
             return;
         }
         let locked = self.mobile_lock(&session.ops);
-        if locked.is_empty() {
+        lock_summary(&mut session.summary, locked);
+    }
+
+    /// The same rule for `list_sessions`, on mobile only (desktop reads and
+    /// writes nothing). A Learn session that isn't legacy read-only is read
+    /// whole only when its file's length or mtime changed since the cached
+    /// facts; entries of deleted sessions are dropped.
+    pub(crate) fn apply_mobile_locks(&self, list: &mut [SessionSummary]) {
+        if !self.is_mobile() {
             return;
         }
-        session.summary.read_only = true;
-        session.summary.read_only_reason = Some(DESKTOP_PLUGIN.to_owned());
-        session.summary.desktop_only_plugins = locked.into_iter().map(|(_, name)| name).collect();
+        let path = self.config_dir.join(LOCK_CACHE_FILE);
+        let mut guard = lock(&self.session_locks);
+        let cache = guard.get_or_insert_with(|| LockCache::load(&path));
+        let before = cache.sessions.len();
+        let live: HashSet<&str> = list.iter().map(|s| s.id.as_str()).collect();
+        cache.sessions.retain(|id, _| live.contains(id.as_str()));
+        let mut dirty = cache.sessions.len() != before;
+        let mut known: Option<Known> = None;
+        for summary in list.iter_mut() {
+            if summary.mode != Mode::Learn || summary.read_only {
+                continue;
+            }
+            // Stamp before reading: a write in between only costs a re-read.
+            let Ok((len, mtime)) = self.store.file_stamp(&summary.id) else {
+                continue;
+            };
+            let fresh = cache
+                .sessions
+                .get(&summary.id)
+                .is_some_and(|e| e.len == len && e.mtime == mtime);
+            if !fresh {
+                let Ok(ops) = self.store.read_uncached(&summary.id) else {
+                    continue;
+                };
+                let facts = LockFacts::from_ops(&ops);
+                cache
+                    .sessions
+                    .insert(summary.id.clone(), LockEntry { len, mtime, facts });
+                dirty = true;
+            }
+            let Some(entry) = cache.sessions.get(&summary.id) else {
+                continue;
+            };
+            if entry.facts.uses.is_empty() {
+                continue;
+            }
+            let known = known.get_or_insert_with(|| self.known_plugins());
+            let locked = named(entry.facts.locking(known), known);
+            lock_summary(summary, locked);
+        }
+        if dirty {
+            cache.save(&path);
+        }
+    }
+
+    /// A deleted session leaves the list-time cache (mobile only).
+    pub(crate) fn forget_mobile_lock(&self, session_id: &str) {
+        if !self.is_mobile() {
+            return;
+        }
+        let path = self.config_dir.join(LOCK_CACHE_FILE);
+        let mut guard = lock(&self.session_locks);
+        let cache = guard.get_or_insert_with(|| LockCache::load(&path));
+        if cache.sessions.remove(session_id).is_some() {
+            cache.save(&path);
+        }
     }
 
     /// The write path's refusal for a session locked on this device.
@@ -391,14 +593,27 @@ mod tests {
         assert_eq!(locking(&ops, &Known::default()), ["bench"]);
         let ops = [artifact("scope", Some(&["desktop"]))];
         assert_eq!(locking(&ops, &Known::default()), ["scope"]);
-        // The op's own platforms win over the index.
+        // The op's own platforms win over the index, and the call's result
+        // (which records nothing) doesn't fall back to the index.
         let k = known(vec![index("bench", "Bench", &["desktop"])]);
-        let ops = [call(
-            "bench_run",
-            Some("bench"),
-            Some(&["desktop", "mobile"]),
-        )];
+        let mut result = call("bench_run", None, None);
+        if let Op::Tool(t) = &mut result {
+            t.args = Value::Null;
+            t.result = Some(crate::sessions::ToolResultValue {
+                content: "ok".into(),
+                is_error: false,
+            });
+        }
+        let ops = [
+            call("bench_run", Some("bench"), Some(&["desktop", "mobile"])),
+            result,
+        ];
         assert!(locking(&ops, &k).is_empty());
+        // What the list-time cache stores survives a JSON round trip.
+        let facts = LockFacts::from_ops(&ops);
+        let back: LockFacts =
+            serde_json::from_value(serde_json::to_value(&facts).unwrap()).unwrap();
+        assert_eq!(back, facts);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # What is not implemented
 
-Status: 2026-11-08. This is a one-page inventory; `docs/agent-system-plan.md` is the detailed record
+Status: 2026-11-09. This is a one-page inventory; `docs/agent-system-plan.md` is the detailed record
 (what is built, why, and the numbered known gaps this file condenses). `docs/architecture.md` §8 is the
 build order these items follow.
 
@@ -12,14 +12,15 @@ build order these items follow.
   placement, the graph builder, and researcher brief quality.
 - **The UI is verified in headless Chromium only**, against a mocked Tauri bridge — never in WebKitGTK and
   never on a device. Plugin-view isolation likewise: Chromium, not WebKitGTK.
-- **Sync is proven against local bare repositories only.** No real host, no token flow, no two devices, no
-  phone. On Android, libgit2 and OpenSSL are built from source (`openssl-sys/vendored`), but nothing has
-  synced from a phone.
+- **Sync is proven against local servers only.** Git against a temp bare repository, WebDAV against an
+  in-process test server: no real host (GitHub, Koofr, Nextcloud), no token flow, no TLS server, no phone.
+  The mobile session lock ran only with an injected platform. On Android, libgit2 and OpenSSL are built from
+  source (`openssl-sys/vendored`), but nothing has synced from a phone.
 - **No green Android CI run is on record yet.** The bundle jobs now run on every push, and `release.yml`
   publishes what a push run built. The Android job has been fixed run by run: the `android-37.0` platform
   package, a library target for `crates/app`, the r29 NDK, OpenSSL (vendored, then the NDK's `llvm-ranlib`),
-  a desktop-only `pick_folder`, and Luau integers that are `i32` on the 32-bit ABIs. No APK has been
-  installed on a device.
+  a desktop-only `pick_folder`, and Luau integers that are `i32` on the 32-bit ABIs. CI now builds one debug
+  APK per ABI (`--split-per-abi`) instead of a universal one. No APK has been installed on a device.
 
 ## 2. Designed, not built
 
@@ -28,11 +29,6 @@ build order these items follow.
 - **Practice** (arch §4.11–4.13): the coach, the problem checker job, problem generation with committed
   answers, stream/set formats, and **exam mode** (papers, coverage scheduling, simulation). Practice today is
   one prompt with no tools, and "Practise n ideas" on the Map persists nothing.
-- **WebDAV sync target** (`docs/sync-build.md`, decided 2026-11-08): a second sync target, independent of
-  git (none, git, WebDAV or both per device), with an ETag/`If-Match` three-way pass and the same union merges.
-- **Mobile session lock** (`docs/sync-build.md`): a session turns read-only on a phone only once the tutor
-  has used, or tries to use, a plugin whose `platforms` lacks `mobile`; a synced `mobileUnlock` op lets the
-  learner continue without those tools. Plugin tool calls and `artifact` ops do not record `platforms` yet.
 - **Mobile runtime** (arch §8.7): the app has never run on Android; iOS has no project at all (needs a Mac
   and a developer account). On mobile `pick_folder` refuses (tauri-plugin-dialog picks folders on desktop
   only), so workspaces and folder plugins can't be attached from a phone.

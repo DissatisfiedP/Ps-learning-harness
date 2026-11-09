@@ -23,10 +23,9 @@ Early. What that means today:
   alias/chain handling and topic splitter, PDF reading, the learning-system features, the Luau plugin runtime
   (host API as `@harness/*` modules) with the owner's plugin registry built in as the default, and ChatGPT
   sign-in through the Codex CLI OAuth flow.
-- **Not built:** the mobile runtime (CI builds a debug Android APK, but the app has never run on a device), the
-  practice coach and its outcomes log, native catalogue plugins, OS-keychain credential storage (today: a `0600`
-  file), the WebDAV sync target and the mobile session lock (both designed in `docs/sync-build.md`). Plugin-view
-  isolation is verified only in Chromium, not in WebKitGTK or on mobile.
+- **Not built:** the mobile runtime (CI builds debug Android APKs, but the app has never run on a device), the
+  practice coach and its outcomes log, native catalogue plugins, and OS-keychain credential storage (today: a `0600`
+  file). Plugin-view isolation is verified only in Chromium, not in WebKitGTK or on mobile.
 - `docs/unimplemented.md` is the one-page list of what is missing or unverified; `docs/agent-system-plan.md` is
   the running record of what is built, what is not, and where the code departs from the design. Read them before
   trusting any feature list, including this one.
@@ -77,7 +76,7 @@ request, and adds two bundles that the commands above do not build:
 | Artifact | Built with | Notes |
 |---|---|---|
 | `appimage` — Linux `*.AppImage` | `cargo tauri build --bundles appimage` on ubuntu-22.04 | built against glibc 2.35 so it runs on older distributions than the runner |
-| `android-apk` — `*.apk` | `cargo tauri android init` + `cargo tauri android build --apk --debug --target aarch64 armv7 x86_64` with NDK r29 | **debug**-signed, because a release APK is unsigned without a keystore and an unsigned APK will not install; no 32-bit x86 (`i686`) build, which is emulator-only in practice; the generated project lands in the git-ignored `crates/app/gen/android/`. OpenSSL (for git sync's HTTPS) is built from source for Android, with the NDK's `llvm-ranlib` as `TARGET_RANLIB` |
+| `android-apk-arm64-v8a`, `android-apk-armeabi-v7a`, `android-apk-x86_64` — one `ps-learning-harness-<abi>-debug.apk` each | `cargo tauri android init` + `cargo tauri android build --apk --debug --split-per-abi --target aarch64 armv7 x86_64` with NDK r29 | one APK per ABI instead of a universal APK carrying all three native libraries, each named after the ABI its `lib/` holds; **debug**-signed, because a release APK is unsigned without a keystore and an unsigned APK will not install; no 32-bit x86 (`i686`) build, which is emulator-only in practice; the generated project lands in the git-ignored `crates/app/gen/android/`. OpenSSL (for git sync's HTTPS) is built from source for Android, with the NDK's `llvm-ranlib` as `TARGET_RANLIB` |
 
 Both are uploaded as workflow artifacts, with `if-no-files-found: error` so an empty bundle fails
 the run. Neither is built locally by anything above.
