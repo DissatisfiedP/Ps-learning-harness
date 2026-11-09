@@ -108,6 +108,17 @@
   }
 }
 
+/* Safe areas: on an edge-to-edge phone (`viewport-fit=cover`) the page runs
+   under the status bar, the notch and the gesture bar. Every surface that
+   touches a screen edge pads by these; they are 0 on desktop. Android WebView
+   reports them to CSS from M144 on. */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --dur-sheet-in: 0ms;
@@ -173,7 +184,12 @@ h1, h2, h3 { margin: 0; }
   font: 400 var(--fs-ui)/1.45 var(--font-ui);
 }
 
-.app { block-size: 100vh; block-size: 100dvh; }
+.app {
+  block-size: 100vh; block-size: 100dvh;
+  /* Paper (the body) shows behind the status bar; the bottom inset belongs to
+     the desk and Home's list, which reach the bottom edge. */
+  padding: var(--safe-top) var(--safe-right) 0 var(--safe-left);
+}
 
 /* ---------- buttons and fields ---------- */
 .btn {
@@ -247,7 +263,7 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 
 /* ---------- Home ---------- */
 .home { block-size: 100%; overflow-y: auto; }
-.home-col { padding-block-end: var(--s8); }
+.home-col { padding-block-end: calc(var(--s8) + var(--safe-bottom)); }
 .home-bar {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 var(--s4);
   min-block-size: var(--head-h);
@@ -640,7 +656,7 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   inset-inline-end: 0;
   inline-size: min(420px, 100vw);
   overflow-y: auto;
-  padding: var(--s4) var(--s5) var(--s7);
+  padding: calc(var(--s4) + var(--safe-top)) calc(var(--s5) + var(--safe-right)) calc(var(--s7) + var(--safe-bottom)) var(--s5);
   background: var(--paper);
   border-inline-start: var(--line);
   box-shadow: 0 0 0 1px var(--rule);
@@ -669,6 +685,7 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
     inset-inline: 0;
     inline-size: 100%;
     max-block-size: 76dvh;
+    padding: var(--s4) calc(var(--s5) + var(--safe-right)) calc(var(--s7) + var(--safe-bottom)) calc(var(--s5) + var(--safe-left));
     border-inline-start: 0;
     border-block-start: var(--line);
     border-radius: var(--r) var(--r) 0 0;
@@ -676,7 +693,7 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 }
 
 /* desk */
-.desk { background: var(--paper); border-block-start: var(--hair); padding-block-end: env(safe-area-inset-bottom); }
+.desk { background: var(--paper); border-block-start: var(--hair); padding-block-end: var(--safe-bottom); }
 .desk-inner {
   position: relative;
   display: flex; flex-direction: column; justify-content: center; gap: var(--s2);
@@ -755,7 +772,7 @@ dialog {
   block-size: 100%;
   display: grid;
   grid-template-rows: auto 1fr auto;
-  padding: var(--s4) var(--s5);
+  padding: calc(var(--s4) + var(--safe-top)) calc(var(--s5) + var(--safe-right)) calc(var(--s4) + var(--safe-bottom)) calc(var(--s5) + var(--safe-left));
   gap: var(--s2);
 }
 .plan-bar {
@@ -806,7 +823,7 @@ dialog {
   inset-inline-end: 0;
   inline-size: min(420px, 92vw);
   overflow-y: auto;
-  padding: var(--s4) var(--s5) var(--s7);
+  padding: calc(var(--s4) + var(--safe-top)) calc(var(--s5) + var(--safe-right)) calc(var(--s7) + var(--safe-bottom)) var(--s5);
   background: var(--paper);
   border-inline-start: var(--line);
   box-shadow: var(--shadow-sheet, 0 0 0 1px var(--rule));
@@ -834,12 +851,13 @@ dialog {
 .plan-drawer .change { margin-block-start: var(--s5); }
 .plan-drawer .input { background: var(--paper); }
 @media (max-width: 599px) {
-  .plan-overlay-inner { padding: var(--s3) var(--s3); }
+  .plan-overlay-inner { padding: calc(var(--s3) + var(--safe-top)) calc(var(--s3) + var(--safe-right)) calc(var(--s3) + var(--safe-bottom)) calc(var(--s3) + var(--safe-left)); }
   .plan-drawer {
     inset-block: auto 0;
     inset-inline: 0;
     inline-size: 100%;
     max-block-size: 72dvh;
+    padding: var(--s4) calc(var(--s5) + var(--safe-right)) calc(var(--s7) + var(--safe-bottom)) calc(var(--s5) + var(--safe-left));
     border-inline-start: 0;
     border-block-start: var(--line);
     border-radius: var(--r) var(--r) 0 0;
@@ -852,6 +870,10 @@ dialog {
   inline-size: 100vw; block-size: 100vh; block-size: 100dvh;
   background: var(--paper);
   overflow-y: auto;
+  /* A border, not padding, so it stays put while the sheet scrolls under it:
+     nothing scrolls behind the status bar or the gesture bar. */
+  border: 0 solid var(--paper);
+  border-width: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
 }
 .settings-col { max-inline-size: 640px; margin-inline: auto; padding: var(--s3) var(--gutter) var(--s8); }
 .settings-head {

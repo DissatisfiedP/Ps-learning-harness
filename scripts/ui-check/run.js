@@ -297,13 +297,16 @@ async function placement() {
 
 const SHOTS = process.env.UI_CHECK_SHOTS;
 
-/** The app page in one sync state (`?sync=`), at a viewport and colour scheme. */
-async function openApp(scenario, { width = 1440, height = 900, mobile = false, dark = false } = {}) {
+/** The app page in one sync state (`?sync=`), at a viewport and colour scheme.
+ *  `insets` emulates an edge-to-edge phone's status bar/notch and gesture bar
+ *  (`env(safe-area-inset-*)`), e.g. `{ top: 47, bottom: 34 }`. */
+async function openApp(scenario, { width = 1440, height = 900, mobile = false, dark = false, insets = null } = {}) {
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
   await send('Page.enable', {}, sessionId);
   await send('Runtime.enable', {}, sessionId);
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }, sessionId);
+  if (insets) await send('Emulation.setSafeAreaInsetsOverride', { insets }, sessionId);
   await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: dark ? 'dark' : 'light' }] }, sessionId);
   await send('Page.addScriptToEvaluateOnNewDocument', {
     source: `window.__errors = [];
@@ -566,6 +569,48 @@ async function sync() {
     await page.shot(`settings-collapsed-phone-${theme}`);
     await page.close();
   }
+
+  // An edge-to-edge phone: nothing tappable sits under the status bar/notch
+  // (top 47) or the gesture bar (bottom 34), and the Settings sheet scrolls
+  // under its inset instead of behind the status bar.
+  const insets = { top: 47, bottom: 34, left: 0, right: 0 };
+  page = await openApp('error', { width: 390, height: 844, mobile: true, insets });
+  const notch = await page.evaluate(`(() => {
+    const top = (sel) => document.querySelector(sel).getBoundingClientRect().top;
+    const out = { homeBar: top('.home-bar'), settingsButton: top('#open-settings') };
+    document.getElementById('home').hidden = true;
+    document.getElementById('conversation').hidden = false;
+    out.head = top('#conversation .head-inner');
+    out.deskBottom = document.querySelector('#conversation .desk-inner').getBoundingClientRect().bottom;
+    document.getElementById('conversation').hidden = true;
+    document.getElementById('home').hidden = false;
+    return out;
+  })()`);
+  expect(notch.homeBar >= insets.top && notch.settingsButton >= insets.top, `notched phone Home under the status bar: ${JSON.stringify(notch)}`);
+  expect(notch.head >= insets.top, `notched phone session head under the status bar: ${JSON.stringify(notch)}`);
+  expect(notch.deskBottom <= 844 - insets.bottom, `notched phone desk under the gesture bar: ${JSON.stringify(notch)}`);
+  await page.shot('home-notch-phone');
+  await page.evaluate(click('open-settings'));
+  await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
+  await sleep(400);
+  // The sheet's scrollport (where scrolled content is clipped) must start
+  // below the status bar and end above the gesture bar.
+  const sheet = await page.evaluate(`(() => {
+    const settings = document.getElementById('settings');
+    const box = settings.getBoundingClientRect();
+    const head = document.querySelector('.settings-head').getBoundingClientRect().top;
+    settings.scrollTop = settings.scrollHeight / 2;
+    return {
+      head,
+      scrolled: settings.scrollTop > 0,
+      viewportTop: box.top + settings.clientTop,
+      viewportBottom: box.top + settings.clientTop + settings.clientHeight,
+    };
+  })()`);
+  expect(sheet.head >= insets.top && sheet.scrolled && sheet.viewportTop >= insets.top && sheet.viewportBottom <= 844 - insets.bottom,
+    `notched phone Settings: ${JSON.stringify(sheet)}`);
+  await page.shot('settings-notch-phone');
+  await page.close();
   page = await openApp('synced', { dark: true });
   await page.shot('home-synced-desktop-dark');
   await page.evaluate(click('open-settings'));
@@ -573,7 +618,7 @@ async function sync() {
   await page.evaluate(`document.getElementById('providers-toggle').scrollIntoView({ block: 'center' })`);
   await page.shot('settings-collapsed-desktop-dark');
   await page.close();
-  console.log('sync: indicator, banner, collapsible Providers/Sync (default, summary, remembered, navigation, sign-in while collapsed), Settings → Sync (save, refuse, Sync now, keep secret, disconnect, acknowledge) and phone layout checked');
+  console.log('sync: indicator, banner, collapsible Providers/Sync (default, summary, remembered, navigation, sign-in while collapsed), Settings → Sync (save, refuse, Sync now, keep secret, disconnect, acknowledge), phone layout and notch/gesture-bar insets checked');
 }
 
 const cases = { ipc, placement, sync };

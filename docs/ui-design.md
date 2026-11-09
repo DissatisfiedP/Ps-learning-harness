@@ -393,11 +393,17 @@ Phone (390 px):
 │ │ YOU               │
 │ │ learner text      │
 ├─────────────────────┤
-│ [Reply to the tutor ] [Send] │  desk; padding-bottom: env(safe-area-inset-bottom)
+│ [Reply to the tutor ] [Send] │  desk; padding-bottom: var(--safe-bottom)
 └─────────────────────┘
 ```
 
 Use `height: 100dvh` so the desk stays above the on-screen keyboard.
+
+**Safe areas.** The page is edge-to-edge (`viewport-fit=cover`), so on a phone it runs under the status bar, the notch and the gesture bar. `--safe-top/right/bottom/left` (`env(safe-area-inset-*)`, 0 on desktop; Android WebView reports them from M144) keep every control clear of them:
+- `.app` pads top and sides, so Home, the session and the Map start below the status bar; paper shows behind it.
+- The bottom inset goes on what touches the bottom edge: the desk, the end of Home's list, and the bottom-sheet drawers.
+- Full-screen sheets pad themselves, because they sit in the top layer outside `.app`. Settings uses a paper-coloured **border** of the inset width rather than padding, so it scrolls under a fixed strip instead of behind the status bar. The plan overlay and its side drawers pad by the insets.
+- `scripts/ui-check/run.sh sync` checks this with an emulated 47 px status bar and 34 px gesture bar.
 
 ### 6.2 Running head
 
