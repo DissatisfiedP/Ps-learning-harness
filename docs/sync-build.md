@@ -26,15 +26,18 @@ any host. **Device-local state never syncs**: `settings.json`, `credentials.json
   built from source (`openssl-sys/vendored`) on Android. Add it to `crates/harness/Cargo.toml`; the workspace already
   builds offline against the local registry cache, and CI installs `libssl-dev`.
 - **Android trust store.** OpenSSL built from source has no CA roots on a phone: its built-in folder (`OPENSSLDIR`,
-  `/usr/local/ssl` by default) doesn't exist there, so every HTTPS remote failed with "the SSL certificate is
-  invalid" (fixed 2026-11-09). `.cargo/config.toml` sets `OPENSSL_CONFIG_DIR` to the app's private
-  `/data/data/com.pslearningharness.app/files/ssl`, which the vendored build makes `OPENSSLDIR`. At startup, before
-  anything touches libgit2, `Harness::open` concatenates Android's roots (the Conscrypt APEX,
-  `/apex/com.android.conscrypt/cacerts`, then `/system/etc/security/cacerts`) into `cert.pem` there
-  (`sync::install_android_trust_store`), and OpenSSL loads it when libgit2 initialises it. `git2::opts::set_ssl_cert_file`
-  would be simpler but is `unsafe`, which the workspace forbids. Limits: the path is for the primary Android user
-  (a work profile has its own data folder), and user-installed CAs aren't included. WebDAV doesn't use this: it
-  runs on rustls with its own bundled roots, like the model clients.
+  `/usr/local/ssl`) doesn't exist there, so every HTTPS remote failed with "the SSL certificate is invalid". At
+  startup, before anything touches libgit2, `Harness::open` concatenates Android's roots (the Conscrypt APEX,
+  `/apex/com.android.conscrypt/cacerts`, then `/system/etc/security/cacerts`) into `<config>/git-ca-bundle.pem`
+  and points `SSL_CERT_FILE` at it (`sync::install_android_trust_store`); OpenSSL loads it when libgit2
+  initialises. This is how git2 configures OpenSSL itself: on first use it runs `openssl_probe`, which sets
+  `SSL_CERT_FILE`/`SSL_CERT_DIR` and keeps a value already set to an existing file. The config folder is resolved
+  at runtime, so it works for any Android user or work profile. Rejected: `git2::opts::set_ssl_cert_file`
+  (`unsafe`, which the workspace forbids) and a folder baked in at build time with `OPENSSL_CONFIG_DIR` (tried
+  first; valid only for the primary user's data path, and it did not fix the owner's phone). What startup did is
+  appended to every git certificate error on Android ("; trust store: N roots from … in …", or the read/write
+  error). Limit: user-installed CAs aren't included. WebDAV doesn't use this: it runs on rustls with its own
+  bundled roots, like the model clients.
 - Remote: an HTTPS URL plus a personal access token, stored **device-locally** in `<config>/sync.json` (mode 0600,
   never in the repo, never synced): `{ remote, token, branch, lastSyncAt, lastError }`. SSH keys are out of scope.
 - The repo's `.gitattributes` is written on first use when missing: `*.jsonl merge=union` (sessions, graph ops,

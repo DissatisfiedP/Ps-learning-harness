@@ -1432,28 +1432,41 @@ const ANDROID_CA_DIRS: [&str; 2] = [
     "/system/etc/security/cacerts",
 ];
 
+/// The bundle written for OpenSSL, `<config>/git-ca-bundle.pem`.
+#[cfg(target_os = "android")]
+const CA_BUNDLE_FILE: &str = "git-ca-bundle.pem";
+
 /// Give the Android OpenSSL the phone's trusted certificates. Called once at
-/// startup, before anything opens a git repository.
+/// startup, before anything touches libgit2.
 ///
 /// The OpenSSL built from source for Android (`openssl-sys/vendored`) has no
-/// roots of its own: its built-in folder (`OPENSSLDIR`, `/usr/local/ssl` by
-/// default) does not exist on a phone, so every HTTPS remote failed with "the
-/// SSL certificate is invalid". `.cargo/config.toml` sets `OPENSSL_CONFIG_DIR`
-/// to a folder inside the app's private storage, which the build makes
-/// `OPENSSLDIR`; OpenSSL then loads `OPENSSLDIR/cert.pem` when libgit2
-/// initialises it. Android keeps its roots one file per certificate, under
-/// names OpenSSL's directory lookup does not use, so they are concatenated
-/// into that one file. It is rebuilt at every launch, so a root Android adds or
-/// removes (through a system or Play update) takes effect on the next start.
+/// roots of its own: its built-in folder (`/usr/local/ssl`) does not exist on
+/// a phone, so every HTTPS remote failed with "the SSL certificate is
+/// invalid". Android keeps its roots one file per certificate, under names
+/// OpenSSL's directory lookup does not use, so they are concatenated into
+/// `<config>/git-ca-bundle.pem`, and `SSL_CERT_FILE` is pointed at it.
+///
+/// Why the environment variable: it is how git2 itself configures OpenSSL. On
+/// its first use git2 runs `openssl_probe::init_ssl_cert_env_vars`, which sets
+/// `SSL_CERT_FILE`/`SSL_CERT_DIR` from a list of standard paths and keeps a
+/// value that is already set when its file exists; libgit2's OpenSSL setup
+/// then loads `SSL_CERT_FILE`. Setting it here, from the same single thread at
+/// the same point in startup that git2 would, adds nothing git2 doesn't do. The
+/// alternatives were worse: `git2::opts::set_ssl_cert_file` is `unsafe` (the
+/// workspace forbids it), and a folder baked in at build time is only valid for
+/// the phone's primary user (a work profile or second user has its own data
+/// path, so the earlier fix failed there).
 ///
 /// The order matters: libgit2 reads the file once, the first time any git2
-/// call initialises it, so this runs before [`Sync::new`] in `Harness::open`.
-/// What happened is kept in [`TRUST_STORE`] and added to every certificate
-/// error (a phone has no log the learner can read), so a failure here names
-/// its cause. WebDAV (rustls with its own roots) does not depend on it.
+/// call initialises it, so this runs first in `Harness::open`. The bundle is
+/// rebuilt at every launch, so a root Android adds or removes (through a
+/// system or Play update) takes effect on the next start. What happened is
+/// kept in [`TRUST_STORE`] and added to every certificate error (a phone has
+/// no log the learner can read). WebDAV (rustls with its own roots) does not
+/// depend on any of this.
 #[cfg(target_os = "android")]
-pub(crate) fn install_android_trust_store() {
-    let note = prepare_trust_store();
+pub(crate) fn install_android_trust_store(config_dir: &Path) {
+    let note = prepare_trust_store(config_dir);
     tracing::info!("git trust store: {note}");
     let _ = TRUST_STORE.set(note);
 }
@@ -1462,13 +1475,10 @@ pub(crate) fn install_android_trust_store() {
 #[cfg(target_os = "android")]
 static TRUST_STORE: OnceLock<String> = OnceLock::new();
 
-/// Build and write `cert.pem`; returns a one-line account of what it did.
+/// Build and write the bundle, point `SSL_CERT_FILE` at it; returns a
+/// one-line account of what it did.
 #[cfg(target_os = "android")]
-fn prepare_trust_store() -> String {
-    let Some(dir) = option_env!("OPENSSL_CONFIG_DIR") else {
-        return "this build has no OPENSSL_CONFIG_DIR, so OpenSSL looks in /usr/local/ssl"
-            .to_owned();
-    };
+fn prepare_trust_store(config_dir: &Path) -> String {
     let mut tried = Vec::new();
     let mut found = None;
     for ca in ANDROID_CA_DIRS {
@@ -1488,17 +1498,17 @@ fn prepare_trust_store() -> String {
         return format!("no roots could be read ({})", tried.join("; "));
     };
     let count = bundle.matches("-----BEGIN CERTIFICATE-----").count();
-    let path = Path::new(dir).join("cert.pem");
-    if fs::read_to_string(&path).ok().as_deref() == Some(bundle.as_str()) {
-        return format!("{count} roots from {ca} in {}", path.display());
+    let path = config_dir.join(CA_BUNDLE_FILE);
+    if fs::read_to_string(&path).ok().as_deref() != Some(bundle.as_str()) {
+        if let Err(e) = fs::create_dir_all(config_dir).and_then(|()| fs::write(&path, &bundle)) {
+            return format!(
+                "{count} roots from {ca}, but {} could not be written: {e}",
+                path.display()
+            );
+        }
     }
-    match fs::create_dir_all(dir).and_then(|()| fs::write(&path, &bundle)) {
-        Ok(()) => format!("{count} roots from {ca} written to {}", path.display()),
-        Err(e) => format!(
-            "{count} roots from {ca}, but {} could not be written: {e}",
-            path.display()
-        ),
-    }
+    std::env::set_var("SSL_CERT_FILE", &path);
+    format!("{count} roots from {ca} in {}", path.display())
 }
 
 /// Appended to a certificate error: on Android, what startup did to the
