@@ -23,7 +23,7 @@ Early. What that means today:
   alias/chain handling and topic splitter, PDF reading, the learning-system features, the Luau plugin runtime
   (host API as `@harness/*` modules) with the owner's plugin registry built in as the default, and ChatGPT
   sign-in through the Codex CLI OAuth flow.
-- **Not built:** the mobile runtime (CI builds debug Android APKs, but the app has never run on a device), the
+- **Not built:** the mobile runtime (CI builds signed release Android APKs, but the app has never run on a device), the
   practice coach and its outcomes log, native catalogue plugins, and OS-keychain credential storage (today: a `0600`
   file). Plugin-view isolation is verified only in Chromium, not in WebKitGTK or on mobile.
 - `docs/unimplemented.md` is the one-page list of what is missing or unverified; `docs/agent-system-plan.md` is
@@ -76,13 +76,29 @@ request, and adds two bundles that the commands above do not build:
 | Artifact | Built with | Notes |
 |---|---|---|
 | `appimage` — Linux `*.AppImage` | `cargo tauri build --bundles appimage` on ubuntu-22.04 | built against glibc 2.35 so it runs on older distributions than the runner |
-| `android-apk-arm64-v8a`, `android-apk-armeabi-v7a`, `android-apk-x86_64` — one `ps-learning-harness-<abi>-debug.apk` each | `cargo tauri android init` + `cargo tauri android build --apk --debug --split-per-abi --target aarch64 armv7 x86_64` with NDK r29 | one APK per ABI instead of a universal APK carrying all three native libraries, each named after the ABI its `lib/` holds; **debug**-signed, because a release APK is unsigned without a keystore and an unsigned APK will not install; no 32-bit x86 (`i686`) build, which is emulator-only in practice; the generated project lands in the git-ignored `crates/app/gen/android/`. OpenSSL (for git sync's HTTPS) is built from source for Android, with the NDK's `llvm-ranlib` as `TARGET_RANLIB` |
+| `android-apk-arm64-v8a`, `android-apk-armeabi-v7a`, `android-apk-x86_64` — one `ps-learning-harness-<abi>.apk` each | `cargo tauri android init` + `cargo tauri android build --apk --split-per-abi --target aarch64 armv7 x86_64` (release) with NDK r29, then `zipalign -P 16` + `apksigner` with the repository's release key | one APK per ABI instead of a universal APK carrying all three native libraries, each named after the ABI its `lib/` holds; a **release** build (the debug Rust library is ~460 MB, nearly all debug info), signed with one fixed key from the repository secrets so every build installs over the last; no 32-bit x86 (`i686`) build, which is emulator-only in practice; the generated project lands in the git-ignored `crates/app/gen/android/`. OpenSSL (for git sync's HTTPS) is built from source for Android, with the NDK's `llvm-ranlib` as `TARGET_RANLIB` |
 
 Both are uploaded as workflow artifacts, with `if-no-files-found: error` so an empty bundle fails
 the run. Neither is built locally by anything above.
 
 `.github/workflows/release.yml` (run by hand from Actions → Release) tags a commit and publishes
 the AppImage and APK that commit's CI push run already built, without rebuilding them.
+
+### Android signing key
+
+Android only installs an update signed with the same key as the installed app; a new key means
+uninstalling first, which deletes the app's local data. CI therefore signs every APK with one key
+kept in two repository secrets, and the `android` job fails without them. Create them once:
+
+```sh
+keytool -genkeypair -keystore ps-learning-harness-release.p12 -storetype PKCS12 \
+  -alias release -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=P's Learning Harness"
+base64 -w0 ps-learning-harness-release.p12 | gh secret set ANDROID_KEYSTORE_BASE64
+gh secret set ANDROID_KEYSTORE_PASSWORD   # the password keytool asked for
+```
+
+The alias must be `release`. Keep the `.p12` and its password backed up outside the repository:
+losing either means no future APK can update an installed one.
 
 ## Data and config
 

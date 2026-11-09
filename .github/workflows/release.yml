@@ -52,7 +52,7 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
       # Fails if any bundle did not upload (failed, skipped or cancelled): the
-      # AppImage and one debug APK per ABI (arm64-v8a, armeabi-v7a, x86_64).
+      # AppImage and one signed release APK per ABI (arm64-v8a, armeabi-v7a, x86_64).
       - name: Download the bundles
         run: |
           gh run download "$RUN_ID" --dir dist --name appimage \

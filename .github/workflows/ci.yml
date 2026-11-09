@@ -1,9 +1,11 @@
 # Formatting, clippy, tests and the headless UI checks — plus the two bundles the
-# owner wants built (Linux AppImage, one Android APK per ABI), which upload artifacts only.
+# owner wants built (Linux AppImage, one signed release Android APK per ABI),
+# which upload artifacts only.
 #
-# No secrets and no publishing. The check jobs are the commands in README.md's
-# "Test" section, in the order that fails fastest; the bundle jobs come last and
-# gate nothing.
+# No publishing. The only secrets are the Android signing key (README,
+# "Android signing key"), read by the android job alone. The check jobs are the
+# commands in README.md's "Test" section, in the order that fails fastest; the
+# bundle jobs come last and gate nothing.
 name: CI
 
 on:
@@ -216,19 +218,34 @@ jobs:
       # Generates the Gradle project into the git-ignored crates/app/gen/android/.
       - name: Generate the Android project
         run: cargo tauri android init --ci
-      # --debug, not a release build: release APKs are unsigned without a
-      # keystore (and this repo has none), while Gradle's debug build type signs
-      # with the standard debug key, so the artifacts actually install
-      # (`adb install …`). --split-per-abi builds one APK per --target instead
-      # of one universal APK carrying all three native libraries; Gradle writes
+      # A release build: an optimised Rust library (a debug one is ~460 MB,
+      # nearly all debug info). Gradle leaves release APKs unsigned; the next
+      # step signs them. --split-per-abi builds one APK per --target instead of
+      # one universal APK carrying all three native libraries; Gradle writes
       # them under the generated project's app/build/outputs/apk/.
       - name: Build the APKs
-        run: cargo tauri android build --apk --debug --split-per-abi --ci --target aarch64 armv7 x86_64
-      # Names each APK after the one ABI its lib/ holds (read from the APK, not
-      # from Gradle's flavour directories), so the artifact and release asset
-      # names are stable; an APK with no or several ABIs fails the job.
-      - name: Name the APKs by ABI
+        run: cargo tauri android build --apk --split-per-abi --ci --target aarch64 armv7 x86_64
+      # Every APK is signed with the one release key from the repository
+      # secrets, so each build installs over the previous one (Android refuses
+      # an update signed with a different key, and uninstalling deletes the
+      # app's data). Each APK is named after the one ABI its lib/ holds (read
+      # from the APK, not from Gradle's flavour directories); an APK with no or
+      # several ABIs fails the job. zipalign -P 16 page-aligns the native
+      # libraries for 16 KB-page devices before signing.
+      - name: Sign the APKs and name them by ABI
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::the ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD secrets are not set (README, 'Android signing key')"
+            exit 1
+          fi
+          tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          test -x "$tools/apksigner" && test -x "$tools/zipalign"
+          ks="$RUNNER_TEMP/release.p12"
+          trap 'rm -f "$ks"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$ks"
           mkdir -p dist/android
           mapfile -t apks < <(find crates/app/gen/android -path '*/build/outputs/apk/*' -name '*.apk')
           for apk in "${apks[@]}"; do
@@ -237,8 +254,12 @@ jobs:
               echo "::error::$apk carries ABIs: ${abis[*]:-none}"
               exit 1
             fi
-            mkdir -p "dist/android/${abis[0]}"
-            cp "$apk" "dist/android/${abis[0]}/ps-learning-harness-${abis[0]}-debug.apk"
+            out="dist/android/${abis[0]}/ps-learning-harness-${abis[0]}.apk"
+            mkdir -p "$(dirname "$out")"
+            "$tools/zipalign" -P 16 -f 4 "$apk" "$RUNNER_TEMP/aligned.apk"
+            "$tools/apksigner" sign --ks "$ks" --ks-pass env:KEYSTORE_PASSWORD \
+              --ks-key-alias release --out "$out" "$RUNNER_TEMP/aligned.apk"
+            "$tools/apksigner" verify --print-certs "$out" | grep -m1 'certificate SHA-256'
           done
           ls -l dist/android/*/
       - name: Upload the arm64-v8a APK
