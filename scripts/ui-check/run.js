@@ -586,7 +586,7 @@ async function sync() {
   page = await openApp('error');
   home = await page.evaluate(HOME);
   expect(home.name === 'Sync: Not synced' && home.dot && !home.busy && oneLine(home)
-    && home.error === 'Not synced: the token was rejected; save a new one in Settings → Sync' && !home.attention, `error Home: ${JSON.stringify(home)}`);
+    && home.error === 'Git not synced: the token was rejected; save a new one in Settings → Sync' && !home.attention, `error Home: ${JSON.stringify(home)}`);
   const dotColour = await page.evaluate(`getComputedStyle(document.getElementById('sync-dot')).backgroundColor === getComputedStyle(document.querySelector('.sessions-error')).color`);
   expect(dotColour, 'the dot is not --danger');
   await page.shot('home-error-desktop');
@@ -611,6 +611,29 @@ async function sync() {
   home = await page.evaluate(HOME);
   expect(panel.open && panel.now === 'Sync now' && !panel.nowDisabled && panel.focus === 'sync-panel-now' && !home.busy
     && panel.status === 'Synced. Git: 1 pulled, 1 pushed. WebDAV: 3 uploaded, 1 downloaded.', `panel after Sync now: ${JSON.stringify(panel)}`);
+  await page.close();
+
+  // Git fails, WebDAV syncs: the run line names the failing target instead of
+  // repeating git's raw error under Sync now, where it read as WebDAV's.
+  page = await openApp('synced');
+  await page.evaluate(click('open-settings'));
+  await until('Settings (git fails, WebDAV syncs)', () => page.evaluate(`document.getElementById('settings').open`));
+  await page.evaluate(`(t => t.getAttribute('aria-expanded') === 'true' || t.click())(document.getElementById('sync-toggle'))`);
+  await page.evaluate(fill('sync-git-remote', 'https://offline.example/notes.git'));
+  await page.evaluate(submit('sync-git'));
+  await until('git saved', () => page.evaluate(`document.getElementById('sync-git-status').textContent === 'Saved.'`));
+  await page.evaluate(closeSettings);
+  await page.evaluate(click('sync-indicator'));
+  await page.evaluate(click('sync-panel-now'));
+  await until('the partial-failure report', () => page.evaluate(`document.getElementById('sync-panel-status').textContent.includes('didn')`));
+  panel = await page.evaluate(PANEL);
+  home = await page.evaluate(HOME);
+  expect(panel.status === 'Git didn’t sync (see above). WebDAV synced.'
+    && JSON.stringify(panel.lines[0]) === JSON.stringify(['Git · Not synced · last 5 min ago', 'the network is unreachable; try again when you are online'])
+    && panel.lines[1][0] === 'WebDAV · Last synced just now'
+    && home.error === 'Git not synced: the network is unreachable; try again when you are online',
+    `git fails, WebDAV syncs: ${JSON.stringify({ panel, home })}`);
+  await page.shot('panel-git-fails-webdav-syncs');
   await page.close();
 
   // Needs attention: banner and a panel line; Review opens the list, Acknowledge clears it.

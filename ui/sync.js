@@ -146,13 +146,13 @@ function renderHome() {
   // The collapsed Settings heading says the same; nothing when the status is unreadable.
   setSectionSummary('sync', status ? text : '');
 
-  const firstError = list.find((t) => t.lastError)?.lastError ?? null;
+  const failing = list.find((t) => t.lastError) ?? null;
   const parked = status?.needsAttention?.length ?? 0;
-  bannerError.hidden = !firstError;
-  bannerErrorText.textContent = firstError ? `Not synced: ${firstError}` : '';
+  bannerError.hidden = !failing;
+  bannerErrorText.textContent = failing ? `${failing.name} not synced: ${failing.lastError}` : '';
   bannerAttention.hidden = parked === 0;
   bannerAttentionText.textContent = parked ? `${parked} ${parked === 1 ? 'file' : 'files'} changed on two devices need a look.` : '';
-  banner.hidden = !firstError && parked === 0;
+  banner.hidden = !failing && parked === 0;
 }
 
 /** A target's line in the panel: "Last synced 5 min ago", "Not synced · last 3 h ago". */
@@ -292,6 +292,18 @@ function reportText(report) {
   return parts.length ? `Synced. ${parts.join('. ')}.` : 'Synced.';
 }
 
+/** A failed run, by target: each target's own error is already shown under
+ * its name (panel and Settings), so this only says which ones failed. The raw
+ * error is the fallback when no target recorded one (e.g. nothing configured). */
+function failureText(error) {
+  const list = targets(status);
+  const failed = list.filter((t) => t.lastError).map((t) => t.name);
+  if (!failed.length) return error;
+  const synced = list.filter((t) => !t.lastError).map((t) => t.name);
+  const tail = synced.length ? ` ${synced.join(' and ')} synced.` : '';
+  return `${failed.join(' and ')} didn’t sync (see above).${tail}`;
+}
+
 /** Runs one `sync_now` (single-flight in this UI), then re-reads the status.
  * The Sync now buttons are disabled meanwhile; focus that took goes back to
  * the pressed button, or to the indicator when it is gone (the banner's "Try again"). */
@@ -312,8 +324,9 @@ async function syncNow(button) {
   running = false;
   await refresh();
   render();
-  say(sectionStatus, error ?? reportText(report), Boolean(error));
-  say(panelStatus, error ?? reportText(report), Boolean(error));
+  const outcome = error ? failureText(error) : reportText(report);
+  say(sectionStatus, outcome, Boolean(error));
+  say(panelStatus, outcome, Boolean(error));
   const active = document.activeElement;
   const lost = !active || active === document.body || active.getClientRects().length === 0;
   if (hadFocus && lost) (button.getClientRects().length ? button : indicator).focus({ preventScroll: true });

@@ -1512,13 +1512,26 @@ fn prepare_trust_store(config_dir: &Path) -> String {
 }
 
 /// Appended to a certificate error: on Android, what startup did to the
-/// trust store; elsewhere nothing (the system OpenSSL has its own).
+/// trust store and where OpenSSL was actually told to look (`SSL_CERT_FILE`/
+/// `SSL_CERT_DIR` as they are now, after git2's own `openssl_probe` ran at its
+/// first use and may have set them); elsewhere nothing (the system OpenSSL has
+/// its own).
 fn trust_store_detail() -> String {
     #[cfg(target_os = "android")]
-    return format!(
-        "; trust store: {}",
-        TRUST_STORE.get().map_or("not set up", String::as_str)
-    );
+    {
+        let var = |name: &str| {
+            std::env::var_os(name).map_or_else(
+                || "unset".to_owned(),
+                |v| v.to_string_lossy().into_owned(),
+            )
+        };
+        format!(
+            "; trust store: {}; SSL_CERT_FILE={}; SSL_CERT_DIR={}",
+            TRUST_STORE.get().map_or("not set up", String::as_str),
+            var("SSL_CERT_FILE"),
+            var("SSL_CERT_DIR"),
+        )
+    }
     #[cfg(not(target_os = "android"))]
     String::new()
 }
