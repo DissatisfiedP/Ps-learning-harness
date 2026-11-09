@@ -1476,7 +1476,13 @@ fn cause(error: &git2::Error, token: Option<&str>) -> String {
         {
             "the token was rejected".to_owned()
         } else if error.code() == ErrorCode::Certificate || raw.contains("certificate") {
-            "the remote's certificate could not be verified".to_owned()
+            // libgit2's own text says which check failed (no CA store, an
+            // expired or unknown issuer); the URL it may contain carries no
+            // token, which only ever travels through the credentials callback.
+            format!(
+                "the remote's certificate could not be verified ({})",
+                error.message().trim()
+            )
         } else if error.code() == ErrorCode::NotFound {
             "the remote repository was not found; check the URL and that the token can read it"
                 .to_owned()
@@ -1490,7 +1496,12 @@ fn cause(error: &git2::Error, token: Option<&str>) -> String {
             || raw.contains("network is unreachable")
             || raw.contains("timed out")
         {
-            "the remote is unreachable; check the network and the URL".to_owned()
+            // The class alone folds DNS, refused connections, TLS and proxy
+            // failures into one sentence; libgit2's text tells them apart.
+            format!(
+                "the remote is unreachable; check the network and the URL ({})",
+                error.message().trim()
+            )
         } else {
             error.message().to_owned()
         };

@@ -1201,21 +1201,31 @@ fn unexpected(status: StatusCode, what: &str, rel: &str) -> Failure {
     ))
 }
 
-/// A transport error as a sentence; the URL is left out (it is in Settings).
+/// A transport error as a sentence, plus the innermost cause the OS or the TLS
+/// layer gave ("os error 101", a DNS failure, "connection refused"): without
+/// it every network fault reads the same and can't be told apart. The URL is
+/// left out (it is in Settings); the password never reaches a URL or a cause,
+/// it travels in the Authorization header.
 fn transport(error: &reqwest::Error) -> Error {
     let mut chain = String::new();
+    let mut innermost = error.to_string();
     let mut source: Option<&dyn std::error::Error> = Some(error);
     while let Some(current) = source {
-        chain.push_str(&current.to_string().to_lowercase());
+        let text = current.to_string();
+        chain.push_str(&text.to_lowercase());
         chain.push(' ');
+        innermost = text;
         source = current.source();
     }
+    let detail = format!(" ({})", innermost.trim());
     if chain.contains("certificate") {
-        Error::Sync("the WebDAV server's certificate could not be verified".into())
+        Error::Sync(format!(
+            "the WebDAV server's certificate could not be verified{detail}"
+        ))
     } else if error.is_timeout() {
         Error::Sync("the WebDAV server did not answer in time; run sync again".into())
     } else {
-        Error::Sync(UNREACHABLE.into())
+        Error::Sync(format!("{UNREACHABLE}{detail}"))
     }
 }
 
