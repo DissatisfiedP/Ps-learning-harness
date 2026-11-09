@@ -25,6 +25,16 @@ any host. **Device-local state never syncs**: `settings.json`, `credentials.json
 - `git2` (libgit2) with `vendored-libgit2`; HTTPS remotes use the system OpenSSL (`libssl`) on desktop and OpenSSL
   built from source (`openssl-sys/vendored`) on Android. Add it to `crates/harness/Cargo.toml`; the workspace already
   builds offline against the local registry cache, and CI installs `libssl-dev`.
+- **Android trust store.** OpenSSL built from source has no CA roots on a phone: its built-in folder (`OPENSSLDIR`,
+  `/usr/local/ssl` by default) doesn't exist there, so every HTTPS remote failed with "the SSL certificate is
+  invalid" (fixed 2026-11-09). `.cargo/config.toml` sets `OPENSSL_CONFIG_DIR` to the app's private
+  `/data/data/com.pslearningharness.app/files/ssl`, which the vendored build makes `OPENSSLDIR`. At startup, before
+  anything touches libgit2, `Harness::open` concatenates Android's roots (the Conscrypt APEX,
+  `/apex/com.android.conscrypt/cacerts`, then `/system/etc/security/cacerts`) into `cert.pem` there
+  (`sync::install_android_trust_store`), and OpenSSL loads it when libgit2 initialises it. `git2::opts::set_ssl_cert_file`
+  would be simpler but is `unsafe`, which the workspace forbids. Limits: the path is for the primary Android user
+  (a work profile has its own data folder), and user-installed CAs aren't included. WebDAV doesn't use this: it
+  runs on rustls with its own bundled roots, like the model clients.
 - Remote: an HTTPS URL plus a personal access token, stored **device-locally** in `<config>/sync.json` (mode 0600,
   never in the repo, never synced): `{ remote, token, branch, lastSyncAt, lastError }`. SSH keys are out of scope.
 - The repo's `.gitattributes` is written on first use when missing: `*.jsonl merge=union` (sessions, graph ops,

@@ -1420,6 +1420,96 @@ fn reset_index(repo: &Repository) -> Result<(), Error> {
     }
 }
 
+// ---- trust store ------------------------------------------------------------
+
+/// Where Android keeps its trusted CA certificates: the Conscrypt APEX, which
+/// Android 14+ updates through Google Play, then the system image (older
+/// releases; on newer ones a stale copy). One certificate per file, PEM, with
+/// OpenSSL's text dump around it.
+#[cfg(target_os = "android")]
+const ANDROID_CA_DIRS: [&str; 2] = [
+    "/apex/com.android.conscrypt/cacerts",
+    "/system/etc/security/cacerts",
+];
+
+/// Give the Android OpenSSL the phone's trusted certificates. Called once at
+/// startup, before anything opens a git repository.
+///
+/// The OpenSSL built from source for Android (`openssl-sys/vendored`) has no
+/// roots of its own: its built-in folder (`OPENSSLDIR`, `/usr/local/ssl` by
+/// default) does not exist on a phone, so every HTTPS remote failed with "the
+/// SSL certificate is invalid". `.cargo/config.toml` sets `OPENSSL_CONFIG_DIR`
+/// to a folder inside the app's private storage, which the build makes
+/// `OPENSSLDIR`; OpenSSL then loads `OPENSSLDIR/cert.pem` when libgit2
+/// initialises it. Android keeps its roots one file per certificate, under
+/// names OpenSSL's directory lookup does not use, so they are concatenated
+/// into that one file. It is rebuilt at every launch, so a root Android adds or
+/// removes (through a system or Play update) takes effect on the next start.
+///
+/// The order matters: libgit2 reads the file once, the first time any git2
+/// call initialises it, so this runs before [`Sync::new`] in `Harness::open`.
+/// A failure is logged and git sync then reports the certificate error;
+/// WebDAV (rustls with its own roots) does not depend on it.
+#[cfg(target_os = "android")]
+pub(crate) fn install_android_trust_store() {
+    let Some(dir) = option_env!("OPENSSL_CONFIG_DIR") else {
+        tracing::warn!("built without OPENSSL_CONFIG_DIR: git sync has no trusted certificates");
+        return;
+    };
+    let dirs: Vec<&Path> = ANDROID_CA_DIRS.iter().map(Path::new).collect();
+    let Some(bundle) = pem_bundle(&dirs) else {
+        tracing::warn!("this device's trusted certificates could not be read");
+        return;
+    };
+    let path = Path::new(dir).join("cert.pem");
+    if fs::read_to_string(&path).ok().as_deref() == Some(bundle.as_str()) {
+        return;
+    }
+    let written = fs::create_dir_all(dir).and_then(|()| fs::write(&path, &bundle));
+    if let Err(e) = written {
+        tracing::warn!("the certificate bundle for git sync could not be written: {e}");
+    }
+}
+
+/// Every PEM certificate under the first of `dirs` that holds any, joined into
+/// one bundle. Text around the PEM blocks (Android's files carry OpenSSL's
+/// text dump) is dropped. `None` when no directory yields a certificate.
+#[cfg(any(target_os = "android", test))]
+fn pem_bundle(dirs: &[&Path]) -> Option<String> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.is_file())
+            .collect();
+        files.sort();
+        let mut bundle = String::new();
+        for file in files {
+            let Ok(text) = fs::read_to_string(&file) else {
+                continue;
+            };
+            let mut rest = text.as_str();
+            while let Some(start) = rest.find(BEGIN) {
+                let Some(len) = rest[start..].find(END) else {
+                    break;
+                };
+                let end = start + len + END.len();
+                bundle.push_str(&rest[start..end]);
+                bundle.push('\n');
+                rest = &rest[end..];
+            }
+        }
+        if !bundle.is_empty() {
+            return Some(bundle);
+        }
+    }
+    None
+}
+
 // ---- credentials and messages ----------------------------------------------
 
 /// Split a remote URL into the URL to store and the token to keep locally.
@@ -2177,6 +2267,51 @@ mod tests {
         let status = engine.status().unwrap();
         assert!(!status.configured);
         assert!(status.last_error.unwrap().contains("could not be read"));
+    }
+
+    #[test]
+    fn the_android_trust_store_becomes_one_pem_bundle() {
+        // Android's layout: one file per root, the PEM block wrapped in
+        // OpenSSL's text dump. The first directory with certificates wins
+        // (the updatable APEX over the system image); empty ones are skipped.
+        let root = Tmp::new("cacerts");
+        let empty = root.path().join("apex");
+        let system = root.path().join("system");
+        fs::create_dir_all(&empty).unwrap();
+        fs::create_dir_all(&system).unwrap();
+        let pem =
+            |body: &str| format!("-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----");
+        fs::write(
+            system.join("a1b2c3d4.0"),
+            format!(
+                "{}\nCertificate:\n    Data:\n        Version: 3 (0x2)\n",
+                pem("AAAA")
+            ),
+        )
+        .unwrap();
+        fs::write(
+            system.join("e5f6a7b8.0"),
+            format!(
+                "Certificate:\n    Data: ...\n{}\n{}\n",
+                pem("BBBB"),
+                pem("CCCC")
+            ),
+        )
+        .unwrap();
+        fs::write(system.join("README"), "no certificate here").unwrap();
+        fs::write(
+            system.join("f0f0f0f0.0"),
+            "-----BEGIN CERTIFICATE-----\ncut off",
+        )
+        .unwrap();
+
+        let bundle = pem_bundle(&[&root.path().join("missing"), &empty, &system]).unwrap();
+        assert_eq!(
+            bundle,
+            format!("{}\n{}\n{}\n", pem("AAAA"), pem("BBBB"), pem("CCCC")),
+            "only whole PEM blocks, in file order, with no text dump"
+        );
+        assert!(pem_bundle(&[&empty]).is_none());
     }
 
     #[test]
