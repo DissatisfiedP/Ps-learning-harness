@@ -54,6 +54,14 @@ build order these items follow.
   addresses.
 - **`session_state`** truncates the pinned goal and brief to 600 characters, so long constraints and venues
   are cut from the model's summary (the full tool call is still in the conversation).
+- **Git sync on Android works for the phone's primary user only.** OpenSSL there is built from source with
+  its certificate folder fixed at build time to `/data/data/com.pslearningharness.app/files/ssl`
+  (`.cargo/config.toml`), which the app fills with Android's trusted roots at startup. In a work profile or a
+  secondary user the app's data lives under `/data/user/<n>/…` instead, so OpenSSL finds no roots and every
+  HTTPS git remote fails with "the SSL certificate is invalid". WebDAV and the model clients aren't affected
+  (rustls, own roots). Certificates the learner installed on the phone are not trusted by git either. A fix
+  needs the path at runtime (`git2::opts::set_ssl_cert_file`, which is `unsafe` and forbidden by the
+  workspace lints) or a git transport that doesn't use OpenSSL. See `docs/sync-build.md`, "Crate and auth".
 - **Smaller**: `Store::ops` clones the whole log per call inside the tutor loop; `redact` skips secrets under
   12 characters; `answer_plan_question` lacks the open-job guard `edit_plan` has; a repeated
   `verdict_record` can leave a stale `correct` in `checks`; interrupted jobs restart when their session is
