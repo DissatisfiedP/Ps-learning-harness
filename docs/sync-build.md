@@ -25,19 +25,19 @@ any host. **Device-local state never syncs**: `settings.json`, `credentials.json
 - `git2` (libgit2) with `vendored-libgit2`; HTTPS remotes use the system OpenSSL (`libssl`) on desktop and OpenSSL
   built from source (`openssl-sys/vendored`) on Android. Add it to `crates/harness/Cargo.toml`; the workspace already
   builds offline against the local registry cache, and CI installs `libssl-dev`.
-- **Android trust store.** OpenSSL built from source has no CA roots on a phone: its built-in folder (`OPENSSLDIR`,
-  `/usr/local/ssl`) doesn't exist there, so every HTTPS remote failed with "the SSL certificate is invalid". At
-  startup, before anything touches libgit2, `Harness::open` concatenates Android's roots (the Conscrypt APEX,
-  `/apex/com.android.conscrypt/cacerts`, then `/system/etc/security/cacerts`) into `<config>/git-ca-bundle.pem`
-  and points `SSL_CERT_FILE` at it (`sync::install_android_trust_store`); OpenSSL loads it when libgit2
-  initialises. This is how git2 configures OpenSSL itself: on first use it runs `openssl_probe`, which sets
-  `SSL_CERT_FILE`/`SSL_CERT_DIR` and keeps a value already set to an existing file. The config folder is resolved
-  at runtime, so it works for any Android user or work profile. Rejected: `git2::opts::set_ssl_cert_file`
-  (`unsafe`, which the workspace forbids) and a folder baked in at build time with `OPENSSL_CONFIG_DIR` (tried
-  first; valid only for the primary user's data path, and it did not fix the owner's phone). What startup did is
-  appended to every git certificate error on Android ("; trust store: N roots from … in …", or the read/write
-  error). Limit: user-installed CAs aren't included. WebDAV doesn't use this: it runs on rustls with its own
-  bundled roots, like the model clients.
+- **Android: git's HTTPS trust is decided by rustls.** `openssl-src` builds Android's OpenSSL with `no-stdio`, which
+  compiles `BIO_new_file` to `return NULL`: that OpenSSL can read no certificate file or folder, so it trusts
+  nothing and every HTTPS remote failed with "the SSL certificate is invalid". Two attempts to hand it Android's
+  roots as a file (`OPENSSLDIR` via `OPENSSL_CONFIG_DIR`, then `SSL_CERT_FILE`) failed on the owner's phone for
+  exactly that reason, while passing every desktop test (desktop builds don't get `no-stdio`). On Android,
+  `remote_callbacks` now sets libgit2's certificate callback (`git2::RemoteCallbacks::certificate_check`, safe
+  code): it takes the leaf certificate libgit2 received, gets the server's intermediates from a rustls handshake
+  with the same host and port, and verifies that leaf with rustls and the bundled Mozilla roots (`webpki-roots`):
+  chain, validity, server-auth usage and host name (`sync/tls.rs`). Only then is the connection accepted;
+  otherwise the error carries rustls's reason, e.g. "the remote's certificate could not be verified (invalid peer
+  certificate: UnknownIssuer)". Desktop keeps libgit2's verdict from the system OpenSSL. This is the same trust
+  WebDAV and the model clients use on the phone; certificates the learner installed on the phone are not
+  trusted. `sync/tls.rs` tests it offline against a rustls server on 127.0.0.1 with a test CA (`testdata/`).
 - Remote: an HTTPS URL plus a personal access token, stored **device-locally** in `<config>/sync.json` (mode 0600,
   never in the repo, never synced): `{ remote, token, branch, lastSyncAt, lastError }`. SSH keys are out of scope.
 - The repo's `.gitattributes` is written on first use when missing: `*.jsonl merge=union` (sessions, graph ops,

@@ -59,10 +59,10 @@ build order these items follow.
   addresses.
 - **`session_state`** truncates the pinned goal and brief to 600 characters, so long constraints and venues
   are cut from the model's summary (the full tool call is still in the conversation).
-- **Git sync on Android has only been fixed on desktop.** The phone's OpenSSL gets Android's trusted roots
-  through `SSL_CERT_FILE` at startup (`docs/sync-build.md`, "Crate and auth"); reproduced and fixed on desktop
-  with Android-style certificate folders, not yet confirmed on a phone. Certificates the learner installed on the
-  phone are not trusted by git. WebDAV and the model clients aren't affected (rustls, own roots).
+- **Git sync on Android is fixed on desktop only.** The phone's OpenSSL can read no certificates (`no-stdio`), so
+  git's HTTPS trust is decided by rustls in libgit2's certificate callback (`docs/sync-build.md`, "Crate and
+  auth"); proven on desktop with OpenSSL stripped of its roots, not yet on a phone. Certificates the learner
+  installed on the phone are not trusted by git. WebDAV and the model clients use the same rustls trust.
 - **Smaller**: `Store::ops` clones the whole log per call inside the tutor loop; `redact` skips secrets under
   12 characters; `answer_plan_question` lacks the open-job guard `edit_plan` has; a repeated
   `verdict_record` can leave a stale `correct` in `checks`; interrupted jobs restart when their session is

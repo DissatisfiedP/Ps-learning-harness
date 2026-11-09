@@ -28,6 +28,8 @@
 //! Every merge is a union or local-wins, so data crossing from one target to
 //! the other converges whatever the order.
 
+#[cfg(any(target_os = "android", test))]
+mod tls;
 mod webdav;
 #[cfg(test)]
 mod webdav_tests;
@@ -906,7 +908,10 @@ fn commit_all(repo: &Repository) -> Result<bool, Error> {
 
 // ---- network ----------------------------------------------------------------
 
-fn remote_callbacks(token: Option<&str>) -> RemoteCallbacks<'static> {
+/// Credentials (the token) and, on Android, the certificate check.
+///
+/// `url` is the remote's URL, for the port the certificate check connects to.
+fn remote_callbacks(token: Option<&str>, url: Option<&str>) -> RemoteCallbacks<'static> {
     let token = token.map(str::to_owned);
     let mut callbacks = RemoteCallbacks::new();
     callbacks.credentials(move |_url, username, allowed| {
@@ -925,6 +930,26 @@ fn remote_callbacks(token: Option<&str>) -> RemoteCallbacks<'static> {
         }
         Cred::default()
     });
+    // Android's OpenSSL can read no certificates (`no-stdio`, see `tls`), so
+    // libgit2's own verdict is always "invalid" there; rustls decides instead.
+    // Desktop keeps libgit2's verdict from the system OpenSSL (passthrough).
+    #[cfg(target_os = "android")]
+    {
+        let port = url
+            .and_then(|url| reqwest::Url::parse(url).ok())
+            .and_then(|url| url.port_or_known_default())
+            .unwrap_or(443);
+        callbacks.certificate_check(move |cert, host| {
+            let Some(x509) = cert.as_x509() else {
+                return Ok(git2::CertificateCheckStatus::CertificatePassthrough);
+            };
+            tls::verify_leaf(x509.data(), host, port, tls::mozilla_roots())
+                .map(|()| git2::CertificateCheckStatus::CertificateOk)
+                .map_err(|reason| git2::Error::new(ErrorCode::Certificate, ErrorClass::Ssl, reason))
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = url;
     callbacks
 }
 
@@ -934,7 +959,7 @@ fn fetch(repo: &Repository, branch: &str, token: Option<&str>) -> Result<Option<
         .find_remote(REMOTE)
         .map_err(|e| fail("could not open the remote", &e, token))?;
     let mut options = FetchOptions::new();
-    options.remote_callbacks(remote_callbacks(token));
+    options.remote_callbacks(remote_callbacks(token, remote.url().ok()));
     options.download_tags(AutotagOption::None);
     // No explicit refspec: the configured wildcard is used, so a remote
     // without our branch yet fetches nothing instead of failing.
@@ -950,7 +975,7 @@ fn push(repo: &Repository, branch: &str, local: Oid, token: Option<&str>) -> Res
         .find_remote(REMOTE)
         .map_err(|e| fail("could not open the remote", &e, token))?;
     let mut options = PushOptions::new();
-    options.remote_callbacks(remote_callbacks(token));
+    options.remote_callbacks(remote_callbacks(token, remote.url().ok()));
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
     remote
         .push(&[refspec.as_str()], Some(&mut options))
@@ -1420,159 +1445,6 @@ fn reset_index(repo: &Repository) -> Result<(), Error> {
     }
 }
 
-// ---- trust store ------------------------------------------------------------
-
-/// Where Android keeps its trusted CA certificates: the Conscrypt APEX, which
-/// Android 14+ updates through Google Play, then the system image (older
-/// releases; on newer ones a stale copy). One certificate per file, PEM, with
-/// OpenSSL's text dump around it.
-#[cfg(target_os = "android")]
-const ANDROID_CA_DIRS: [&str; 2] = [
-    "/apex/com.android.conscrypt/cacerts",
-    "/system/etc/security/cacerts",
-];
-
-/// The bundle written for OpenSSL, `<config>/git-ca-bundle.pem`.
-#[cfg(target_os = "android")]
-const CA_BUNDLE_FILE: &str = "git-ca-bundle.pem";
-
-/// Give the Android OpenSSL the phone's trusted certificates. Called once at
-/// startup, before anything touches libgit2.
-///
-/// The OpenSSL built from source for Android (`openssl-sys/vendored`) has no
-/// roots of its own: its built-in folder (`/usr/local/ssl`) does not exist on
-/// a phone, so every HTTPS remote failed with "the SSL certificate is
-/// invalid". Android keeps its roots one file per certificate, under names
-/// OpenSSL's directory lookup does not use, so they are concatenated into
-/// `<config>/git-ca-bundle.pem`, and `SSL_CERT_FILE` is pointed at it.
-///
-/// Why the environment variable: it is how git2 itself configures OpenSSL. On
-/// its first use git2 runs `openssl_probe::init_ssl_cert_env_vars`, which sets
-/// `SSL_CERT_FILE`/`SSL_CERT_DIR` from a list of standard paths and keeps a
-/// value that is already set when its file exists; libgit2's OpenSSL setup
-/// then loads `SSL_CERT_FILE`. Setting it here, from the same single thread at
-/// the same point in startup that git2 would, adds nothing git2 doesn't do. The
-/// alternatives were worse: `git2::opts::set_ssl_cert_file` is `unsafe` (the
-/// workspace forbids it), and a folder baked in at build time is only valid for
-/// the phone's primary user (a work profile or second user has its own data
-/// path, so the earlier fix failed there).
-///
-/// The order matters: libgit2 reads the file once, the first time any git2
-/// call initialises it, so this runs first in `Harness::open`. The bundle is
-/// rebuilt at every launch, so a root Android adds or removes (through a
-/// system or Play update) takes effect on the next start. What happened is
-/// kept in [`TRUST_STORE`] and added to every certificate error (a phone has
-/// no log the learner can read). WebDAV (rustls with its own roots) does not
-/// depend on any of this.
-#[cfg(target_os = "android")]
-pub(crate) fn install_android_trust_store(config_dir: &Path) {
-    let note = prepare_trust_store(config_dir);
-    tracing::info!("git trust store: {note}");
-    let _ = TRUST_STORE.set(note);
-}
-
-/// The outcome of [`install_android_trust_store`], for certificate errors.
-#[cfg(target_os = "android")]
-static TRUST_STORE: OnceLock<String> = OnceLock::new();
-
-/// Build and write the bundle, point `SSL_CERT_FILE` at it; returns a
-/// one-line account of what it did.
-#[cfg(target_os = "android")]
-fn prepare_trust_store(config_dir: &Path) -> String {
-    let mut tried = Vec::new();
-    let mut found = None;
-    for ca in ANDROID_CA_DIRS {
-        if let Err(e) = fs::read_dir(ca) {
-            tried.push(format!("{ca}: {e}"));
-            continue;
-        }
-        match pem_bundle(&[Path::new(ca)]) {
-            Some(bundle) => {
-                found = Some((ca, bundle));
-                break;
-            }
-            None => tried.push(format!("{ca}: no certificates")),
-        }
-    }
-    let Some((ca, bundle)) = found else {
-        return format!("no roots could be read ({})", tried.join("; "));
-    };
-    let count = bundle.matches("-----BEGIN CERTIFICATE-----").count();
-    let path = config_dir.join(CA_BUNDLE_FILE);
-    if fs::read_to_string(&path).ok().as_deref() != Some(bundle.as_str()) {
-        if let Err(e) = fs::create_dir_all(config_dir).and_then(|()| fs::write(&path, &bundle)) {
-            return format!(
-                "{count} roots from {ca}, but {} could not be written: {e}",
-                path.display()
-            );
-        }
-    }
-    std::env::set_var("SSL_CERT_FILE", &path);
-    format!("{count} roots from {ca} in {}", path.display())
-}
-
-/// Appended to a certificate error: on Android, what startup did to the
-/// trust store and where OpenSSL was actually told to look (`SSL_CERT_FILE`/
-/// `SSL_CERT_DIR` as they are now, after git2's own `openssl_probe` ran at its
-/// first use and may have set them); elsewhere nothing (the system OpenSSL has
-/// its own).
-fn trust_store_detail() -> String {
-    #[cfg(target_os = "android")]
-    {
-        let var = |name: &str| {
-            std::env::var_os(name)
-                .map_or_else(|| "unset".to_owned(), |v| v.to_string_lossy().into_owned())
-        };
-        format!(
-            "; trust store: {}; SSL_CERT_FILE={}; SSL_CERT_DIR={}",
-            TRUST_STORE.get().map_or("not set up", String::as_str),
-            var("SSL_CERT_FILE"),
-            var("SSL_CERT_DIR"),
-        )
-    }
-    #[cfg(not(target_os = "android"))]
-    String::new()
-}
-
-/// Every PEM certificate under the first of `dirs` that holds any, joined into
-/// one bundle. Text around the PEM blocks (Android's files carry OpenSSL's
-/// text dump) is dropped. `None` when no directory yields a certificate.
-#[cfg(any(target_os = "android", test))]
-fn pem_bundle(dirs: &[&Path]) -> Option<String> {
-    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
-    const END: &str = "-----END CERTIFICATE-----";
-    for dir in dirs {
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
-        };
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.is_file())
-            .collect();
-        files.sort();
-        let mut bundle = String::new();
-        for file in files {
-            let Ok(text) = fs::read_to_string(&file) else {
-                continue;
-            };
-            let mut rest = text.as_str();
-            while let Some(start) = rest.find(BEGIN) {
-                let Some(len) = rest[start..].find(END) else {
-                    break;
-                };
-                let end = start + len + END.len();
-                bundle.push_str(&rest[start..end]);
-                bundle.push('\n');
-                rest = &rest[end..];
-            }
-        }
-        if !bundle.is_empty() {
-            return Some(bundle);
-        }
-    }
-    None
-}
-
 // ---- credentials and messages ----------------------------------------------
 
 /// Split a remote URL into the URL to store and the token to keep locally.
@@ -1629,13 +1501,14 @@ fn cause(error: &git2::Error, token: Option<&str>) -> String {
         {
             "the token was rejected".to_owned()
         } else if error.code() == ErrorCode::Certificate || raw.contains("certificate") {
-            // libgit2's own text says which check failed (no CA store, an
-            // expired or unknown issuer); the URL it may contain carries no
-            // token, which only ever travels through the credentials callback.
+            // The text says which check failed: libgit2's ("the SSL
+            // certificate is invalid") or, on Android, rustls's reason from
+            // the certificate callback ("invalid peer certificate:
+            // UnknownIssuer"). A URL in it carries no token, which only ever
+            // travels through the credentials callback.
             format!(
-                "the remote's certificate could not be verified ({}{})",
-                error.message().trim(),
-                trust_store_detail()
+                "the remote's certificate could not be verified ({})",
+                error.message().trim()
             )
         } else if error.code() == ErrorCode::NotFound {
             "the remote repository was not found; check the URL and that the token can read it"
@@ -2331,51 +2204,6 @@ mod tests {
         let status = engine.status().unwrap();
         assert!(!status.configured);
         assert!(status.last_error.unwrap().contains("could not be read"));
-    }
-
-    #[test]
-    fn the_android_trust_store_becomes_one_pem_bundle() {
-        // Android's layout: one file per root, the PEM block wrapped in
-        // OpenSSL's text dump. The first directory with certificates wins
-        // (the updatable APEX over the system image); empty ones are skipped.
-        let root = Tmp::new("cacerts");
-        let empty = root.path().join("apex");
-        let system = root.path().join("system");
-        fs::create_dir_all(&empty).unwrap();
-        fs::create_dir_all(&system).unwrap();
-        let pem =
-            |body: &str| format!("-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----");
-        fs::write(
-            system.join("a1b2c3d4.0"),
-            format!(
-                "{}\nCertificate:\n    Data:\n        Version: 3 (0x2)\n",
-                pem("AAAA")
-            ),
-        )
-        .unwrap();
-        fs::write(
-            system.join("e5f6a7b8.0"),
-            format!(
-                "Certificate:\n    Data: ...\n{}\n{}\n",
-                pem("BBBB"),
-                pem("CCCC")
-            ),
-        )
-        .unwrap();
-        fs::write(system.join("README"), "no certificate here").unwrap();
-        fs::write(
-            system.join("f0f0f0f0.0"),
-            "-----BEGIN CERTIFICATE-----\ncut off",
-        )
-        .unwrap();
-
-        let bundle = pem_bundle(&[&root.path().join("missing"), &empty, &system]).unwrap();
-        assert_eq!(
-            bundle,
-            format!("{}\n{}\n{}\n", pem("AAAA"), pem("BBBB"), pem("CCCC")),
-            "only whole PEM blocks, in file order, with no text dump"
-        );
-        assert!(pem_bundle(&[&empty]).is_none());
     }
 
     #[test]

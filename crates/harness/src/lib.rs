@@ -216,9 +216,6 @@ impl Harness {
     /// `repo` is the synced data repo; `config_dir` is device-local. Cheap:
     /// no session is read and no prompt composed until first use.
     pub fn open(repo: &Path, config_dir: &Path) -> Result<Self, Error> {
-        // Before anything touches libgit2, which reads the trust store once.
-        #[cfg(target_os = "android")]
-        sync::install_android_trust_store(config_dir);
         std::fs::create_dir_all(repo)?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(20))

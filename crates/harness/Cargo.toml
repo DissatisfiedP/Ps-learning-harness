@@ -37,5 +37,17 @@ git2 = { version = "0.21", default-features = false, features = ["vendored-libgi
 [target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
 
+# Android: that OpenSSL is built with `no-stdio` and can read no certificate
+# file, so git's HTTPS trust is decided by rustls with the Mozilla roots in
+# libgit2's certificate callback (sync/tls.rs). Both are already in the build
+# through reqwest; the features match its.
+[target.'cfg(target_os = "android")'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
 [lints]
 workspace = true
