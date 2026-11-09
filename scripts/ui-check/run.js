@@ -17,12 +17,14 @@
 //              keyboard moves of A1's R2 slider re-solve through the bridge,
 //              update the probe and post a `state` line.
 //   sync       the whole app (index.html with the fake bridge) in each sync
-//              state: the Home indicator and banner, the collapsible
+//              state: the Home sync icon (states, names, a one-line header
+//              at 1440, 390 and 320 px) and its panel (placement, closing,
+//              Sync now, Sync settings), the banner, the collapsible
 //              Providers and Sync sections (closed by default, summaries,
 //              remembered state, opened by navigation, a WorkBuddy sign-in
 //              surviving collapse), Settings → Sync (save git and WebDAV,
 //              Sync now, acknowledge, disconnect), the other Settings sections
-//              still in place, and no overflow at phone width.
+//              still in place, and phone widths with notch insets.
 //              UI_CHECK_SHOTS=<dir> also saves screenshots there.
 //
 // Exit code 0 when every check passes. Usage: run.js [ipc|placement|sync]...
@@ -299,13 +301,15 @@ const SHOTS = process.env.UI_CHECK_SHOTS;
 
 /** The app page in one sync state (`?sync=`), at a viewport and colour scheme.
  *  `insets` emulates an edge-to-edge phone's status bar/notch and gesture bar
- *  (`env(safe-area-inset-*)`), e.g. `{ top: 47, bottom: 34 }`. */
+ *  (`env(safe-area-inset-*)`), e.g. `{ top: 47, bottom: 34 }`; `mobile` also
+ *  turns on touch, so `(pointer: coarse)` matches as on a phone. */
 async function openApp(scenario, { width = 1440, height = 900, mobile = false, dark = false, insets = null } = {}) {
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
   await send('Page.enable', {}, sessionId);
   await send('Runtime.enable', {}, sessionId);
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }, sessionId);
+  if (mobile) await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }, sessionId);
   if (insets) await send('Emulation.setSafeAreaInsetsOverride', { insets }, sessionId);
   await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: dark ? 'dark' : 'light' }] }, sessionId);
   await send('Page.addScriptToEvaluateOnNewDocument', {
@@ -334,17 +338,47 @@ async function openApp(scenario, { width = 1440, height = 900, mobile = false, d
 const HOME = `(() => {
   const $ = (id) => document.getElementById(id);
   const shown = (id) => !$(id).hidden && $(id).getClientRects().length > 0;
+  const icon = $('sync-indicator');
   return {
-    indicator: shown('sync-indicator') ? $('sync-indicator').textContent : null,
-    indicatorName: $('sync-indicator').getAttribute('aria-label'),
-    syncNow: shown('sync-home-now'),
+    icon: shown('sync-indicator'),
+    name: icon.getAttribute('aria-label'),
+    title: icon.title,
+    dot: shown('sync-dot'),
+    busy: icon.getAttribute('aria-busy') === 'true',
+    expanded: icon.getAttribute('aria-expanded'),
+    sameColour: getComputedStyle(icon).color === getComputedStyle($('open-map')).color,
+    iconSize: [icon.getBoundingClientRect().width, icon.getBoundingClientRect().height].map(Math.round),
+    coarse: matchMedia('(pointer: coarse)').matches,
+    panel: shown('sync-panel'),
     banner: shown('sync-banner'),
     error: shown('sync-banner-error') ? $('sync-banner-error-text').textContent : null,
     attention: shown('sync-banner-attention') ? $('sync-banner-attention-text').textContent : null,
+    barHeight: document.querySelector('.home-bar').getBoundingClientRect().height,
+    headH: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--head-h')),
     overflow: document.documentElement.scrollWidth > innerWidth || $('home').scrollWidth > $('home').clientWidth
-      || $('sync-indicator').getBoundingClientRect().right > innerWidth,
+      || $('open-settings').getBoundingClientRect().right > innerWidth || icon.getBoundingClientRect().right > innerWidth,
   };
 })()`;
+const PANEL = `(() => {
+  const $ = (id) => document.getElementById(id);
+  const icon = $('sync-indicator').getBoundingClientRect();
+  const p = $('sync-panel').getBoundingClientRect();
+  return {
+    open: !$('sync-panel').hidden,
+    lines: [...$('sync-panel-targets').children].map((li) => [...li.children].map((c) => c.textContent)),
+    attention: $('sync-panel-attention').hidden ? null : $('sync-panel-attention').textContent,
+    now: $('sync-panel-now').textContent, nowDisabled: $('sync-panel-now').disabled,
+    status: $('sync-panel-status').textContent,
+    rightAligned: Math.abs(p.right - icon.right) < 1,
+    below: p.top >= icon.bottom && p.top - icon.bottom <= 8,
+    inside: p.left >= 0 && p.right <= innerWidth && p.bottom <= innerHeight,
+    box: [p.left, p.top, p.right, p.bottom].map(Math.round),
+    focus: document.activeElement?.id ?? null,
+  };
+})()`;
+/** Escape as a key press on whatever has focus (the panel listens on its wrapper). */
+const escape = `document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`;
+const oneLine = (h) => h.barHeight <= h.headH + 0.5;
 const SECTION = `(() => {
   const $ = (id) => document.getElementById(id);
   return {
@@ -368,7 +402,13 @@ const fill = (id, value) => `(() => { const el = document.getElementById('${id}'
 const click = (id) => `(document.getElementById('${id}').focus(), document.getElementById('${id}').click())`;
 const submit = (id) => `document.getElementById('${id}').requestSubmit()`;
 const workbuddy = `document.querySelector('#provider-list .provider[data-id="workbuddy"]')`;
-const closeSettings = `document.getElementById('settings').close()`;
+/** Closes Settings and resolves once its `close` event has run (the event is a
+ *  queued task; a late one would cancel a sign-in started in the next opening). */
+const closeSettings = `(() => {
+  const d = document.getElementById('settings');
+  if (!d.open) return true;
+  return new Promise((done) => { d.addEventListener('close', () => done(true), { once: true }); d.close(); });
+})()`;
 /** Collapses Providers and Sync (as the learner would) and scrolls them into view. */
 const collapseBoth = `(() => {
   for (const n of ['providers', 'sync']) {
@@ -382,7 +422,7 @@ async function sync() {
   // Nothing configured: no Home parts; Settings → Sync sits after Providers.
   let page = await openApp('none');
   let home = await page.evaluate(HOME);
-  expect(home.indicator === null && !home.syncNow && !home.banner, `unconfigured Home shows sync parts: ${JSON.stringify(home)}`);
+  expect(!home.icon && !home.banner, `unconfigured Home shows sync parts: ${JSON.stringify(home)}`);
   await page.evaluate(click('open-settings'));
   await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
   const order = await page.evaluate(`[...document.querySelectorAll('#settings .settings-section > h2')].map((h) => (h.querySelector('.section-name') ?? h).textContent)`);
@@ -434,7 +474,7 @@ async function sync() {
   sections = await page.evaluate(SECTIONS);
   expect(section.syncNow === 'Syncing…' && section.syncNowDisabled && sections.sync.summary === 'Syncing…', `while syncing: ${JSON.stringify({ section, summary: sections.sync.summary })}`);
   home = await page.evaluate(HOME);
-  expect(home.indicator === 'Syncing…', `Home indicator while syncing: ${home.indicator}`);
+  expect(home.name === 'Sync: Syncing…' && home.busy && !home.dot, `Home icon while syncing: ${JSON.stringify(home)}`);
   await until('the sync report', () => page.evaluate(`document.getElementById('sync-status').textContent.startsWith('Synced')`));
   section = await page.evaluate(SECTION);
   expect(section.status === 'Synced. Git: 1 pulled, 1 pushed. WebDAV: 3 uploaded, 1 downloaded.' && section.git === 'Last synced just now' && section.webdav === 'Last synced just now' && section.focus === 'sync-now', `after Sync now: ${JSON.stringify(section)}`);
@@ -463,16 +503,37 @@ async function sync() {
   sections = await page.evaluate(SECTIONS);
   expect(!sections.sync.open && !sections.sync.shown && sections.sync.stored === 'closed' && sections.sync.summary === 'Synced just now', `reopened Settings forgot the closed Sync: ${JSON.stringify(sections)}`);
 
-  // Close Settings: Home shows "Synced just now" and Sync now.
+  // Close Settings: the Home icon says "Synced just now", in the links' colour, on one line.
   await page.evaluate(closeSettings);
   home = await page.evaluate(HOME);
-  expect(home.indicator === 'Synced just now' && home.indicatorName === 'Synced just now. Sync settings' && home.syncNow && !home.banner, `Home after sync: ${JSON.stringify(home)}`);
+  expect(home.icon && home.name === 'Sync: Synced just now' && /^Last synced /.test(home.title) && !home.dot && !home.busy
+    && home.expanded === 'false' && home.sameColour && oneLine(home) && !home.banner, `Home after sync: ${JSON.stringify(home)}`);
 
-  // The indicator expands Sync and focuses its heading; WebDAV disconnects alone.
+  // The icon opens the panel under itself, right-aligned; Escape, the icon and
+  // an outside click close it.
   await page.evaluate(click('sync-indicator'));
+  await until('the panel', () => page.evaluate(`!document.getElementById('sync-panel').hidden`));
+  let panel = await page.evaluate(PANEL);
+  expect(JSON.stringify(panel.lines) === JSON.stringify([['Git · Last synced just now'], ['WebDAV · Last synced just now']])
+    && panel.rightAligned && panel.below && panel.inside && panel.now === 'Sync now' && !panel.attention
+    && (await page.evaluate(HOME)).expanded === 'true', `panel: ${JSON.stringify(panel)}`);
+  await page.shot('panel-desktop');
+  await page.evaluate(escape);
+  panel = await page.evaluate(PANEL);
+  expect(!panel.open && panel.focus === 'sync-indicator', `Escape: ${JSON.stringify(panel)}`);
+  await page.evaluate(click('sync-indicator'));
+  await page.evaluate(click('sync-indicator'));
+  expect(!(await page.evaluate(PANEL)).open, 'the icon did not close its panel');
+  await page.evaluate(click('sync-indicator'));
+  await page.evaluate(`document.getElementById('hero').click()`);
+  expect(!(await page.evaluate(PANEL)).open, 'an outside click did not close the panel');
+
+  // "Sync settings" in the panel expands Sync and focuses its heading; WebDAV disconnects alone.
+  await page.evaluate(click('sync-indicator'));
+  await page.evaluate(click('sync-panel-settings'));
   await until('Settings at Sync', () => page.evaluate(`document.activeElement?.id === 'sync-toggle'`));
   sections = await page.evaluate(SECTIONS);
-  expect(sections.sync.open && sections.sync.shown, `indicator left Sync collapsed: ${JSON.stringify(sections)}`);
+  expect(sections.sync.open && sections.sync.shown && !(await page.evaluate(PANEL)).open, `Sync settings left Sync collapsed: ${JSON.stringify(sections)}`);
   await page.evaluate(click('sync-webdav-disconnect'));
   await until('WebDAV disconnected', () => page.evaluate(`document.getElementById('sync-webdav-state').textContent === 'Not connected'`));
   const off = await page.evaluate(lastCall('set_webdav'));
@@ -512,28 +573,55 @@ async function sync() {
   // A failing sync_status hides the Home parts quietly.
   await page.evaluate(`window.__bridge.sync.statusFails = true; document.getElementById('home').hidden = true`);
   await page.evaluate(`document.getElementById('home').hidden = false`);
-  await until('the indicator to hide', () => page.evaluate(`document.getElementById('sync-indicator').hidden`), 3_000).catch(() => null);
+  await until('the icon to hide', () => page.evaluate(`document.getElementById('sync-wrap').hidden`), 3_000).catch(() => null);
   home = await page.evaluate(HOME);
-  expect(home.indicator === null && !home.syncNow && !home.banner, `failing sync_status still shows: ${JSON.stringify(home)}`);
+  expect(!home.icon && !home.banner, `failing sync_status still shows: ${JSON.stringify(home)}`);
   const errors = await page.evaluate('window.__errors');
   expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
   await page.close();
 
-  // A recorded error: banner and "Not synced"; Try again clears both.
+  // A recorded error: a --danger dot and the banner; the panel lists the error
+  // under its target; Try again clears both; Sync now runs from the panel,
+  // which stays open.
   page = await openApp('error');
   home = await page.evaluate(HOME);
-  expect(home.indicator === 'Not synced' && home.error === 'Not synced: the token was rejected; save a new one in Settings → Sync' && !home.attention, `error Home: ${JSON.stringify(home)}`);
+  expect(home.name === 'Sync: Not synced' && home.dot && !home.busy && oneLine(home)
+    && home.error === 'Not synced: the token was rejected; save a new one in Settings → Sync' && !home.attention, `error Home: ${JSON.stringify(home)}`);
+  const dotColour = await page.evaluate(`getComputedStyle(document.getElementById('sync-dot')).backgroundColor === getComputedStyle(document.querySelector('.sessions-error')).color`);
+  expect(dotColour, 'the dot is not --danger');
   await page.shot('home-error-desktop');
+  await page.evaluate(click('sync-indicator'));
+  await until('the panel', () => page.evaluate(`!document.getElementById('sync-panel').hidden`));
+  panel = await page.evaluate(PANEL);
+  expect(JSON.stringify(panel.lines) === JSON.stringify([['Git · Not synced · last 5 min ago', 'the token was rejected; save a new one in Settings → Sync'], ['WebDAV · Last synced 12 min ago']])
+    && panel.inside, `error panel: ${JSON.stringify(panel)}`);
+  await page.shot('panel-error-desktop');
+  await page.evaluate(escape);
   await page.evaluate(click('sync-banner-retry'));
   await until('the banner to clear', () => page.evaluate(`document.getElementById('sync-banner').hidden`));
   home = await page.evaluate(HOME);
-  expect(home.indicator === 'Synced just now' && (await page.evaluate(`document.activeElement?.id`)) === 'sync-indicator', `after Try again: ${JSON.stringify(home)}`);
+  expect(home.name === 'Sync: Synced just now' && !home.dot && (await page.evaluate(`document.activeElement?.id`)) === 'sync-indicator', `after Try again: ${JSON.stringify(home)}`);
+  await page.evaluate(click('sync-indicator'));
+  await page.evaluate(click('sync-panel-now'));
+  panel = await page.evaluate(PANEL);
+  home = await page.evaluate(HOME);
+  expect(panel.open && panel.now === 'Syncing…' && panel.nowDisabled && home.busy && home.name === 'Sync: Syncing…', `panel while syncing: ${JSON.stringify({ panel, home })}`);
+  await until('the panel report', () => page.evaluate(`document.getElementById('sync-panel-status').textContent.startsWith('Synced')`));
+  panel = await page.evaluate(PANEL);
+  home = await page.evaluate(HOME);
+  expect(panel.open && panel.now === 'Sync now' && !panel.nowDisabled && panel.focus === 'sync-panel-now' && !home.busy
+    && panel.status === 'Synced. Git: 1 pulled, 1 pushed. WebDAV: 3 uploaded, 1 downloaded.', `panel after Sync now: ${JSON.stringify(panel)}`);
   await page.close();
 
-  // Needs attention: banner, Review opens the list, Acknowledge clears it.
+  // Needs attention: banner and a panel line; Review opens the list, Acknowledge clears it.
   page = await openApp('attention');
   home = await page.evaluate(HOME);
-  expect(home.indicator === 'Synced 5 min ago' && home.attention === '2 files changed on two devices need a look.' && !home.error, `attention Home: ${JSON.stringify(home)}`);
+  expect(home.name === 'Sync: Synced 5 min ago' && !home.dot && home.attention === '2 files changed on two devices need a look.' && !home.error, `attention Home: ${JSON.stringify(home)}`);
+  await page.evaluate(click('sync-indicator'));
+  await until('the panel', () => page.evaluate(`!document.getElementById('sync-panel').hidden`));
+  panel = await page.evaluate(PANEL);
+  expect(panel.attention === '2 files need a look', `attention panel: ${JSON.stringify(panel)}`);
+  await page.evaluate(escape);
   await page.shot('home-attention-desktop');
   await page.evaluate(click('sync-banner-review'));
   await until('the attention list', () => page.evaluate(`document.activeElement?.id === 'sync-attention-heading'`));
@@ -546,27 +634,36 @@ async function sync() {
   await until('acknowledged', () => page.evaluate(`document.getElementById('sync-attention').hidden`));
   section = await page.evaluate(SECTION);
   expect(section.status === 'Acknowledged.' && section.focus === 'sync-toggle', `after Acknowledge: ${JSON.stringify(section)}`);
-  await page.evaluate(`document.getElementById('settings').close()`);
+  await page.evaluate(closeSettings);
   home = await page.evaluate(HOME);
   expect(!home.banner, `banner after Acknowledge: ${JSON.stringify(home)}`);
   await page.close();
 
-  // Phone width, both themes: the header wraps instead of overflowing.
-  for (const dark of [false, true]) {
-    const theme = dark ? 'dark' : 'light';
-    page = await openApp('error', { width: 390, height: 844, mobile: true, dark });
+  // Phones at 390 px (both themes) and 320 px: the header is one line, the
+  // icon a 44 px target, and the panel opens inside the viewport.
+  for (const [width, dark] of [[390, false], [390, true], [320, false]]) {
+    const name = `${width}-${dark ? 'dark' : 'light'}`;
+    page = await openApp('error', { width, height: 844, mobile: true, dark });
     home = await page.evaluate(HOME);
-    expect(!home.overflow && home.indicator === 'Not synced', `phone Home (${theme}): ${JSON.stringify(home)}`);
-    await page.shot(`home-error-phone-${theme}`);
+    expect(!home.overflow && oneLine(home) && home.coarse && home.iconSize[0] >= 44 && home.iconSize[1] >= 44 && home.dot,
+      `phone Home ${name}: ${JSON.stringify(home)}`);
+    const clipped = await page.evaluate(`(() => { const w = document.querySelector('.home-bar .wordmark'); return w.scrollWidth > w.clientWidth; })()`);
+    expect(width < 390 || !clipped, `the wordmark is cut short at ${name}`);
+    await page.shot(`home-error-phone-${name}`);
     await page.evaluate(click('sync-indicator'));
+    await until('the panel', () => page.evaluate(`!document.getElementById('sync-panel').hidden`));
+    panel = await page.evaluate(PANEL);
+    expect(panel.rightAligned && panel.below && panel.inside, `phone panel ${name}: ${JSON.stringify(panel)}`);
+    await page.shot(`panel-phone-${name}`);
+    await page.evaluate(click('sync-panel-settings'));
     await until('Settings at Sync', () => page.evaluate(`document.activeElement?.id === 'sync-toggle'`));
     const wide = await page.evaluate(`document.getElementById('settings').scrollWidth > document.getElementById('settings').clientWidth`);
-    expect(!wide, `phone Settings (${theme}) overflows sideways`);
-    await page.shot(`settings-sync-phone-${theme}`);
+    expect(!wide, `phone Settings ${name} overflows sideways`);
+    if (width === 390) await page.shot(`settings-sync-phone-${name}`);
     await page.evaluate(collapseBoth);
     sections = await page.evaluate(SECTIONS);
-    expect(!sections.sync.open && sections.sync.summary === 'Not synced', `phone collapsed Sync (${theme}): ${JSON.stringify(sections.sync)}`);
-    await page.shot(`settings-collapsed-phone-${theme}`);
+    expect(!sections.sync.open && sections.sync.summary === 'Not synced', `phone collapsed Sync ${name}: ${JSON.stringify(sections.sync)}`);
+    if (width === 390) await page.shot(`settings-collapsed-phone-${name}`);
     await page.close();
   }
 
@@ -590,6 +687,12 @@ async function sync() {
   expect(notch.head >= insets.top, `notched phone session head under the status bar: ${JSON.stringify(notch)}`);
   expect(notch.deskBottom <= 844 - insets.bottom, `notched phone desk under the gesture bar: ${JSON.stringify(notch)}`);
   await page.shot('home-notch-phone');
+  await page.evaluate(click('sync-indicator'));
+  await until('the panel', () => page.evaluate(`!document.getElementById('sync-panel').hidden`));
+  panel = await page.evaluate(PANEL);
+  expect(panel.inside && panel.box[1] >= insets.top, `notched phone panel: ${JSON.stringify(panel)}`);
+  await page.shot('panel-notch-phone');
+  await page.evaluate(escape);
   await page.evaluate(click('open-settings'));
   await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
   await sleep(400);
@@ -612,13 +715,19 @@ async function sync() {
   await page.shot('settings-notch-phone');
   await page.close();
   page = await openApp('synced', { dark: true });
+  home = await page.evaluate(HOME);
+  expect(oneLine(home) && home.sameColour && !home.dot && home.name === 'Sync: Synced 5 min ago', `desktop dark Home: ${JSON.stringify(home)}`);
   await page.shot('home-synced-desktop-dark');
+  await page.evaluate(click('sync-indicator'));
+  await until('the panel', () => page.evaluate(`!document.getElementById('sync-panel').hidden`));
+  await page.shot('panel-desktop-dark');
+  await page.evaluate(escape);
   await page.evaluate(click('open-settings'));
   await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
   await page.evaluate(`document.getElementById('providers-toggle').scrollIntoView({ block: 'center' })`);
   await page.shot('settings-collapsed-desktop-dark');
   await page.close();
-  console.log('sync: indicator, banner, collapsible Providers/Sync (default, summary, remembered, navigation, sign-in while collapsed), Settings → Sync (save, refuse, Sync now, keep secret, disconnect, acknowledge), phone layout and notch/gesture-bar insets checked');
+  console.log('sync: sync icon (states, names, one-line header at 1440/390/320), its panel (placement, Escape/icon/outside close, Sync now, Sync settings), banner, collapsible Providers/Sync, Settings → Sync (save, refuse, Sync now, keep secret, disconnect, acknowledge), phone layout and notch/gesture-bar insets checked');
 }
 
 const cases = { ipc, placement, sync };

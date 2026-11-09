@@ -265,11 +265,48 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .home { block-size: 100%; overflow-y: auto; }
 .home-col { padding-block-end: calc(var(--s8) + var(--safe-bottom)); }
 .home-bar {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 var(--s4);
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s4);
   min-block-size: var(--head-h);
 }
-.home-col > .home-bar .wordmark { font-weight: 600; color: var(--ink-2); }
-.home-links { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 var(--s4); }
+/* One line at any width: on a narrow phone the wordmark gives way, not the links. */
+.home-col > .home-bar .wordmark {
+  min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 600; color: var(--ink-2);
+}
+.home-links { display: flex; flex: none; align-items: center; gap: var(--s4); }
+/* On touch the text buttons' own padding is the spacing, and the icon's 44 px
+   target reaches into the gutter so its glyph lines up with the column edge;
+   the wordmark keeps its full name at 390 px. */
+@media (pointer: coarse) {
+  .home-bar { gap: var(--s2); }
+  .home-links { gap: 0; }
+  .home-links > .btn.text { padding-inline: 6px; }
+  .home-links > .sync-wrap { margin-inline-end: -13px; }
+}
+/* The sync icon (§7.1): currentColor like the links beside it; a --danger dot
+   when not synced, quieter while syncing. Nothing moves. */
+.sync-icon { position: relative; min-inline-size: 28px; }
+.sync-icon svg { display: block; }
+.sync-icon:hover:not(:disabled) { background: var(--raised); }
+.sync-icon[aria-busy="true"] { color: var(--ink-3); }
+@media (pointer: coarse) { .sync-icon { min-inline-size: 44px; } }
+.sync-dot {
+  position: absolute; inset-block-start: calc(50% - 12px); inset-inline-end: calc(50% - 12px);
+  inline-size: 7px; block-size: 7px; border-radius: 50%;
+  background: var(--danger); box-shadow: 0 0 0 1.5px var(--paper);
+}
+/* The panel is the session head's .menu, right-aligned under the icon. */
+.menu.sync-panel {
+  inline-size: min(280px, calc(100vw - var(--safe-left) - var(--safe-right) - 2 * var(--gutter)));
+  min-inline-size: 0; padding: var(--s3); gap: var(--s2);
+  color: var(--ink); font: 400 var(--fs-small)/1.45 var(--font-ui);
+}
+.sync-panel-targets { display: grid; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
+.sync-panel-error { color: var(--danger); overflow-wrap: anywhere; }
+.sync-panel-attention { color: var(--ink-2); }
+.sync-panel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); margin-block-start: var(--s1); }
+.sync-panel .status { margin: 0; overflow-wrap: anywhere; }
+@media (forced-colors: active) { .sync-dot { forced-color-adjust: none; background: Highlight; box-shadow: none; } }
 .home-alert { color: var(--danger); font-size: var(--fs-small); }
 .home-col > .start { margin-block-start: var(--s9); }
 .home-col .start > .hero {

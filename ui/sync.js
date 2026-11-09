@@ -1,7 +1,7 @@
 // Sync (docs/sync-build.md, ui-design §7.5.2): the Settings → Sync section
 // (git and WebDAV targets, Sync now, the needs-attention list), the Home
-// header indicator and the Home banner. One `sync_status` read feeds all
-// three; a failing read hides the Home parts quietly.
+// header's sync icon with its small panel, and the Home banner. One
+// `sync_status` read feeds all three; a failing read hides the Home parts quietly.
 
 import { available, call, message } from './api.js';
 import { expandSection, setSectionSummary } from './disclosure.js';
@@ -9,8 +9,14 @@ import { expandSection, setSectionSummary } from './disclosure.js';
 const $ = (id) => document.getElementById(id);
 
 const home = $('home');
+const wrap = $('sync-wrap');
 const indicator = $('sync-indicator');
-const homeSyncNow = $('sync-home-now');
+const dot = $('sync-dot');
+const panel = $('sync-panel');
+const panelTargets = $('sync-panel-targets');
+const panelAttention = $('sync-panel-attention');
+const panelNow = $('sync-panel-now');
+const panelStatus = $('sync-panel-status');
 const banner = $('sync-banner');
 const bannerError = $('sync-banner-error');
 const bannerErrorText = $('sync-banner-error-text');
@@ -117,22 +123,25 @@ function render() {
 function renderHome() {
   const list = targets(status);
   const on = list.length > 0;
-  indicator.hidden = !on;
-  homeSyncNow.hidden = !on;
-  homeSyncNow.disabled = running;
+  wrap.hidden = !on;
+  if (!on) closePanel();
   let text = 'Off';
   if (on) {
     let title = '';
+    const behind = list.some((t) => t.lastError || t.unsynced);
     if (running) text = 'Syncing…';
-    else if (list.some((t) => t.lastError || t.unsynced)) text = 'Not synced';
+    else if (behind) text = 'Not synced';
     else {
       const last = newest(list.map((t) => t.lastSyncAt));
       text = last ? `Synced ${ago(last)}` : 'Not synced';
       if (last) title = `Last synced ${fullTime.format(Date.parse(last))}`;
     }
-    indicator.textContent = text;
     indicator.title = title;
-    indicator.setAttribute('aria-label', `${text}. Sync settings`);
+    indicator.setAttribute('aria-label', `Sync: ${text}`);
+    if (running) indicator.setAttribute('aria-busy', 'true');
+    else indicator.removeAttribute('aria-busy');
+    dot.hidden = running || !behind;
+    renderPanel(list);
   }
   // The collapsed Settings heading says the same; nothing when the status is unreadable.
   setSectionSummary('sync', status ? text : '');
@@ -144,6 +153,36 @@ function renderHome() {
   bannerAttention.hidden = parked === 0;
   bannerAttentionText.textContent = parked ? `${parked} ${parked === 1 ? 'file' : 'files'} changed on two devices need a look.` : '';
   banner.hidden = !firstError && parked === 0;
+}
+
+/** A target's line in the panel: "Last synced 5 min ago", "Not synced · last 3 h ago". */
+function panelState(t) {
+  const last = t.lastSyncAt ? ago(t.lastSyncAt) : null;
+  if (t.lastError || t.unsynced) return last ? `Not synced · last ${last}` : 'Not synced';
+  return last ? `Last synced ${last}` : 'Not synced';
+}
+
+/** The panel's contents; redrawn in place, so an open panel stays open across a refresh. */
+function renderPanel(list) {
+  panelTargets.textContent = '';
+  for (const t of list) {
+    const li = document.createElement('li');
+    const line = document.createElement('p');
+    line.textContent = `${t.name} · ${panelState(t)}`;
+    li.append(line);
+    if (t.lastError) {
+      const error = document.createElement('p');
+      error.className = 'sync-panel-error';
+      error.textContent = t.lastError;
+      li.append(error);
+    }
+    panelTargets.append(li);
+  }
+  const parked = status?.needsAttention?.length ?? 0;
+  panelAttention.hidden = parked === 0;
+  panelAttention.textContent = parked ? `${parked} ${parked === 1 ? 'file needs' : 'files need'} a look` : '';
+  panelNow.disabled = running;
+  panelNow.textContent = running ? 'Syncing…' : 'Sync now';
 }
 
 /** A target's state line: "Not connected", "Last synced 5 min ago · 2 ahead". */
@@ -261,6 +300,7 @@ async function syncNow(button) {
   const hadFocus = document.activeElement === button;
   running = true;
   say(sectionStatus, 'Syncing…');
+  say(panelStatus, '');
   render();
   let report = null;
   let error = null;
@@ -273,6 +313,7 @@ async function syncNow(button) {
   await refresh();
   render();
   say(sectionStatus, error ?? reportText(report), Boolean(error));
+  say(panelStatus, error ?? reportText(report), Boolean(error));
   const active = document.activeElement;
   const lost = !active || active === document.body || active.getClientRects().length === 0;
   if (hadFocus && lost) (button.getClientRects().length ? button : indicator).focus({ preventScroll: true });
@@ -306,12 +347,27 @@ export async function syncSettingsOpened() {
   fillForms();
 }
 
-// ---------- Home refresh ----------
+// ---------- Home: the sync icon's panel and the refresh timer ----------
+
+function openPanel() {
+  say(panelStatus, '');
+  panel.hidden = false;
+  indicator.setAttribute('aria-expanded', 'true');
+  refresh();
+}
+
+function closePanel({ restoreFocus = false } = {}) {
+  if (panel.hidden) return;
+  panel.hidden = true;
+  indicator.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) indicator.focus({ preventScroll: true });
+}
 
 const homeVisible = () => !home.hidden && document.visibilityState === 'visible';
 
 /** On Home: refresh now and every minute; elsewhere: no timer. */
 function onVisibility() {
+  if (home.hidden) closePanel();
   if (homeVisible()) {
     if (!timer) {
       refresh();
@@ -330,10 +386,23 @@ export function initSync(hooks) {
   git.disconnect.addEventListener('click', () => disconnect(git, 'set_sync', { remote: '' }, git.remote));
   webdav.disconnect.addEventListener('click', () => disconnect(webdav, 'set_webdav', { url: '', username: '', password: '' }, webdav.url));
   syncNowButton.addEventListener('click', () => syncNow(syncNowButton));
-  homeSyncNow.addEventListener('click', () => syncNow(homeSyncNow));
+  panelNow.addEventListener('click', () => syncNow(panelNow));
   $('sync-banner-retry').addEventListener('click', (e) => syncNow(e.currentTarget));
   $('sync-banner-review').addEventListener('click', () => openSyncSettings('attention'));
-  indicator.addEventListener('click', () => openSyncSettings());
+  indicator.addEventListener('click', () => (panel.hidden ? openPanel() : closePanel()));
+  $('sync-panel-settings').addEventListener('click', () => {
+    closePanel();
+    openSyncSettings();
+  });
+  wrap.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !panel.hidden) {
+      e.preventDefault();
+      closePanel({ restoreFocus: true });
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!wrap.contains(e.target)) closePanel();
+  });
   $('sync-acknowledge').addEventListener('click', (e) => acknowledge(e.currentTarget));
   if (!available) return;
   new MutationObserver(onVisibility).observe(home, { attributes: true, attributeFilter: ['hidden'] });

@@ -493,8 +493,16 @@ Live reply (`#live`):
 Desktop:
 
 ```
- P's Learning Harness                  Synced 5 min ago  Sync now  Map  Settings
- (wordmark, --fs-ui 600 --ink-2, plain text)    (text buttons; the sync pair only when a target is set)
+ P's Learning Harness                                       Map   Settings   ⟳•
+ (wordmark, --fs-ui 600 --ink-2, plain text)    (text buttons; the sync icon only when a target is set)
+
+                                                    ┌─────────────────────────────┐
+                                                    │ Git · Last synced 5 min ago │ ← the icon's panel, open on
+                                                    │ WebDAV · Not synced         │   click, top-right corner at
+                                                    │ the server …  (--danger)    │   the icon's bottom-right
+                                                    │ 2 files need a look         │
+                                                    │ [Sync now]  Sync settings   │
+                                                    └─────────────────────────────┘
 
             ┌────────────────────────────────────────────┐
             │ CONTINUE                                   │ ← secondary button, only when the
@@ -518,8 +526,16 @@ Desktop:
               Old learn session                    Read-only · 1 Jan  Delete
 ```
 
-- **Column:** the same `--measure` column as the session page, so it widens with it (§5.2). The top bar holds the wordmark (plain text, no logo mark) and two text buttons, "Map" (§7.6) and "Settings". "Map" is hidden when there is no app backend. Vertical offset: `--s9` above the display line on desktop, `--s7` on phone.
-- **Sync indicator** (before "Map", only when git or WebDAV is configured, §7.5.2): a text button reading "Syncing…" while a sync started from this window runs, "Not synced" when a configured target has a last error or unsent changes, otherwise "Synced ⟨just now | 5 min ago | 3 h ago | yesterday | on 3 Nov⟩" from the newest `lastSyncAt`, with the full time as its `title`. Its accessible name adds the destination ("Synced 5 min ago. Sync settings"); pressing it opens Settings with the Sync section expanded and scrolled to, and its heading button takes focus. Next to it a "Sync now" text button runs `sync_now` (disabled while it runs). Both hide when nothing is configured or `sync_status` fails; the failure is not shown. The links wrap under the wordmark on a narrow phone.
+- **Column:** the same `--measure` column as the session page, so it widens with it (§5.2). The top bar holds the wordmark (plain text, no logo mark), two text buttons, "Map" (§7.6) and "Settings", and the sync icon. "Map" is hidden when there is no app backend. Vertical offset: `--s9` above the display line on desktop, `--s7` on phone.
+- **One line at every width.** The bar never wraps (`.home-bar` is exactly `--head-h` tall). On touch the text buttons' own padding is the spacing, and the icon's 44 px target reaches 13 px into the gutter so its glyph lines up with the column edge. The wordmark keeps its full name at 390 px. Below that it is the part that gives way, ending in an ellipsis ("P's Lear…" at 320 px); the links never do.
+- **Sync icon** (last in the bar, only when git or WebDAV is configured, §7.5.2): an icon button holding an inline SVG of the two-arrow sync glyph, 18 px, `stroke="currentColor"`, no fill, `aria-hidden`. It takes the links' colour in both themes, the existing focus ring, a `--raised` hover fill, and a 44 px target on coarse pointers. State is shown without motion. "Not synced" (a configured target has a last error or unsent changes) adds a 7 px `--danger` dot at the glyph's top-right; that dot is the only colour. While a sync started from this window runs, the icon has `aria-busy="true"` and turns `--ink-3`. Otherwise the icon is plain. Its accessible name is "Sync: ⟨Syncing… | Not synced | Synced ⟨just now | 5 min ago | 3 h ago | yesterday | on 3 Nov⟩⟩" from the newest `lastSyncAt`, and its `title` gives the full time. It hides when nothing is configured or `sync_status` fails; the failure is not shown.
+- **Sync panel:** the icon is a disclosure (`aria-expanded`, `aria-controls`) for a small panel. The panel is the session head's `.menu` dropdown, right-aligned under the icon, at most 280 px and never wider than the column, so it stays inside the viewport at 320 px. It holds:
+  - one line per configured target ("Git · Last synced 5 min ago", "WebDAV · Not synced · last 3 h ago"), with that target's last error under it in `--danger`, small and wrapping;
+  - "⟨n⟩ files need a look" when the needs-attention list isn't empty;
+  - a secondary "Sync now" button that reads "Syncing…" and is disabled while it runs, with the report or the error in a status line below;
+  - a "Sync settings" text button. It closes the panel and opens Settings with Sync expanded, focus on its heading button.
+
+  Opening the panel re-reads `sync_status`, and a refresh or a sync redraws it in place, so it stays open. Escape closes it and returns focus to the icon; a click outside or on the icon closes it too, and leaving Home closes it.
 - **Sync banner** (Home only, never in sessions): above "Your sessions", `role="status"`, in the `sessions-error` style. "Not synced: ⟨first target's last error⟩" in `--danger` with a "Try again" text button (runs `sync_now`), and/or "⟨n⟩ files changed on two devices need a look." in `--ink-2` with a "Review" text button (opens Settings at the needs-attention list). Hidden when neither applies.
 - **Sync refresh:** `sync_status` is read when Home shows, every 60 s while Home is visible and the window is in front (no timer otherwise), when Settings opens and after every sync command.
 - **Background sync:** when the document becomes hidden (`visibilitychange` → `hidden`; on mobile this is the app going to the background) the UI calls `sync_if_changed()` once, fire-and-forget. The backend syncs only when a configured target has local changes; nothing is shown.
@@ -1000,7 +1016,7 @@ Settings is a modal `<dialog>` that fills the viewport (`inline-size: 100vw; blo
 - **Appearance** is new and UI-only: a radio group bound to `localStorage["lh.theme"]`.
 - **Learning** is new (§7.7.7): one radio group, "Starting point for new sessions" (Measure me / Quick check / I'm new to this), read from `get_settings().startingPoint` and written with `set_starting_point({ value })`. Each option carries one help line under it; a `<p class="status" role="status">` beside the group says "Saving…" → "Saved." or the error, and the stored choice is put back on failure. It sits between Model roles and Focus.
 - **Focus** is UI-only and sits right after Model roles: three checkboxes bound to `localStorage["lh.focus.fullscreen" | "lh.focus.dnd" | "lh.focus.breaks"]` (`"on"`/`"off"`, default on). No help text: the labels say what each does (§7.8).
-- **Collapsible sections:** Providers and Sync are closed by default, to keep the dialog short. Their `h2` holds one full-width button (`aria-expanded`, `aria-controls` the body) with a chevron drawn in `--ink-2` (right when closed, down when open; no motion, §8), the section name and a one-line summary in `--fs-small` `--ink-3`. The summary shows whether the section is open or closed and updates with the data: Providers "⟨n⟩ connected" / "None connected"; Sync the Home indicator's text, or "Off" when no target is set (nothing when `sync_status` fails). Enter and Space toggle it (native button). The learner's own open/close is kept per device in `localStorage["lh.settings.providers" | "lh.settings.sync"]` (`"open"`/`"closed"`) and put back on every Settings open (`ui/disclosure.js`). Navigating into a section opens it for that visit only and leaves the stored choice alone: the Home sync indicator and the banner's "Review" open Sync (§7.5.2); Home's "Connect a model to start → Settings" opens Providers; every "Choose a model first" path and a model error's "Settings" button open Providers when no provider is connected (Model roles then says "Connect a provider below"). Focus lands on the section's heading button (or the needs-attention heading), never inside a closed body. A waiting sign-in (WorkBuddy, Claude, ChatGPT) keeps running while Providers is collapsed: its rows are only hidden, and the result shows when the section opens again.
+- **Collapsible sections:** Providers and Sync are closed by default, to keep the dialog short. Their `h2` holds one full-width button (`aria-expanded`, `aria-controls` the body) with a chevron drawn in `--ink-2` (right when closed, down when open; no motion, §8), the section name and a one-line summary in `--fs-small` `--ink-3`. The summary shows whether the section is open or closed and updates with the data: Providers "⟨n⟩ connected" / "None connected"; Sync the Home sync icon's status ("Synced 5 min ago", "Not synced", "Syncing…"), or "Off" when no target is set (nothing when `sync_status` fails). Enter and Space toggle it (native button). The learner's own open/close is kept per device in `localStorage["lh.settings.providers" | "lh.settings.sync"]` (`"open"`/`"closed"`) and put back on every Settings open (`ui/disclosure.js`). Navigating into a section opens it for that visit only and leaves the stored choice alone: the sync panel's "Sync settings" and the banner's "Review" open Sync (§7.5.2); Home's "Connect a model to start → Settings" opens Providers; every "Choose a model first" path and a model error's "Settings" button open Providers when no provider is connected (Model roles then says "Connect a provider below"). Focus lands on the section's heading button (or the needs-attention heading), never inside a closed body. A waiting sign-in (WorkBuddy, Claude, ChatGPT) keeps running while Providers is collapsed: its rows are only hidden, and the result shows when the section opens again.
 - **Sync** sits right after Providers; see §7.5.2.
 - Phone: the same single column; button rows wrap.
 
@@ -1026,7 +1042,7 @@ Every install, update, reinstall from the lock and folder addition opens the sam
 
 #### 7.5.2 Sync
 
-The **Sync** section sits right after Providers (`#sync-section`, `ui/sync.js`). It is collapsible like Providers (§7.5): closed by default, its heading reads "Sync" plus the Home indicator's text (or "Off"). Help line, inside the body: "Settings stay on this device."
+The **Sync** section sits right after Providers (`#sync-section`, `ui/sync.js`). It is collapsible like Providers (§7.5): closed by default, its heading reads "Sync" plus the Home sync icon's status (or "Off"). Help line, inside the body: "Settings stay on this device."
 
 ```
  ▾ Sync  Synced 5 min ago                      ← heading button (open)
