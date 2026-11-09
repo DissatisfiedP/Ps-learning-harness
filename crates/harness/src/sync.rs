@@ -1520,10 +1520,8 @@ fn trust_store_detail() -> String {
     #[cfg(target_os = "android")]
     {
         let var = |name: &str| {
-            std::env::var_os(name).map_or_else(
-                || "unset".to_owned(),
-                |v| v.to_string_lossy().into_owned(),
-            )
+            std::env::var_os(name)
+                .map_or_else(|| "unset".to_owned(), |v| v.to_string_lossy().into_owned())
         };
         format!(
             "; trust store: {}; SSL_CERT_FILE={}; SSL_CERT_DIR={}",
