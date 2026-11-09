@@ -52,18 +52,20 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
       # Fails if any bundle did not upload (failed, skipped or cancelled): the
-      # AppImage and one signed release APK per ABI (arm64-v8a, armeabi-v7a, x86_64).
+      # AppImage, one signed release APK per ABI (arm64-v8a, armeabi-v7a, x86_64),
+      # the macOS DMG and the unsigned iOS IPA.
       - name: Download the bundles
         run: |
           gh run download "$RUN_ID" --dir dist --name appimage \
-            --name android-apk-arm64-v8a --name android-apk-armeabi-v7a --name android-apk-x86_64
+            --name android-apk-arm64-v8a --name android-apk-armeabi-v7a --name android-apk-x86_64 \
+            --name macos-dmg --name ios-ipa-unsigned
         env:
           RUN_ID: ${{ steps.ci.outputs.run_id }}
       - name: Create the release
         env:
           SHA: ${{ steps.ci.outputs.sha }}
         run: |
-          mapfile -t files < <(find dist -type f \( -name '*.AppImage' -o -name '*.apk' \))
+          mapfile -t files < <(find dist -type f \( -name '*.AppImage' -o -name '*.apk' -o -name '*.dmg' -o -name '*.ipa' \))
           printf 'asset: %s\n' "${files[@]}"
           flags=()
           if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi

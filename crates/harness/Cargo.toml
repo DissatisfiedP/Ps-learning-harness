@@ -29,9 +29,12 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # HTTPS goes through OpenSSL, and SSH is out of scope.
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https"] }
 
-# Android has no system OpenSSL to link (git2's HTTPS transport needs one), so
-# build it from source there. Desktop keeps the system library.
-[target.'cfg(target_os = "android")'.dependencies]
+# git2's HTTPS transport pulls in openssl-sys on every Unix. Android and iOS
+# have no system OpenSSL to link, and on macOS the one found is Homebrew's,
+# which the machines the app ships to may lack; so build it from source on
+# those targets (on Apple, libgit2 itself uses Secure Transport). Linux keeps
+# the system library.
+[target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
 
 [lints]
