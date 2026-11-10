@@ -102,6 +102,16 @@ impl Harness {
             .and_then(|cached| cached.models.iter().find(|m| m.id == id).cloned())
     }
 
+    /// The model's own output limit, sent as the request's `max_tokens`. The
+    /// models are never capped below it: a cap costs nothing when unused
+    /// (billing and rate limits count generated tokens) and a small one cuts
+    /// thinking-heavy replies off mid tool call. `None` (not in the cache)
+    /// leaves the choice to the wire (`providers::ChatRequest::max_tokens`).
+    pub fn max_tokens(&self, provider: ProviderId, id: &str) -> Option<u32> {
+        self.model_info(provider, id)
+            .and_then(|m| m.max_output_tokens)
+    }
+
     /// A cached list younger than [`LIST_TTL`], for the current base URL.
     fn cached_list(&self, provider: ProviderId, base: &str, now: u64) -> Option<Vec<ModelInfo>> {
         lock(&self.model_cache)

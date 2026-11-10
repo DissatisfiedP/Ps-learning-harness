@@ -57,8 +57,6 @@ const MAX_CLAIMS_PER_CALL: usize = 40;
 const MAX_COMPACT_CLAIMS_PER_CALL: usize = 120;
 /// Longest statement sent to the model (characters).
 const MAX_STATEMENT_CHARS: usize = 600;
-/// Room for a full batch of edges plus their justifications.
-const MAX_TOKENS: u32 = 4096;
 const CACHE_KEY: &str = "edge-extractor";
 const PROMPT: &str = "jobs/edge-extractor.md";
 const GRAPH: &str = "the graph";
@@ -691,11 +689,17 @@ struct Access {
     effort: Option<String>,
     credential: Credential,
     base: Option<String>,
+    /// The model's own output limit from the app's model cache, if known.
+    max_tokens: Option<u32>,
 }
 
 impl Access {
-    fn resolve(role: ModelRole, settings: &Settings, dir: &Path) -> Res<Self> {
-        let choice = model_for(role, settings)?;
+    /// Through the same harness the app uses, so the legacy single-model
+    /// migration has run and the model cache is the app's.
+    fn resolve(role: ModelRole, repo: &Path, dir: &Path) -> Res<Self> {
+        let harness = harness::Harness::open(repo, dir)?;
+        let settings = harness.settings();
+        let choice = model_for(role, &settings)?;
         let credential = saved_credentials(dir)?
             .get(&choice.provider)
             .cloned()
@@ -711,6 +715,7 @@ impl Access {
             })?;
         Ok(Self {
             base: settings.base_urls.get(&choice.provider).cloned(),
+            max_tokens: harness.max_tokens(choice.provider, &choice.model),
             provider: choice.provider,
             model: choice.model,
             effort: choice.effort,
@@ -731,7 +736,7 @@ async fn call(
         model: &access.model,
         system,
         messages: &messages,
-        max_tokens: MAX_TOKENS,
+        max_tokens: access.max_tokens,
         effort: access.effort.as_deref(),
         tools: &[],
         cache_key: Some(CACHE_KEY),
@@ -879,7 +884,7 @@ fn accept(args: &Args, _map: &KnowledgeMap) -> Res<()> {
 async fn extract(args: &Args, map: &KnowledgeMap) -> Res<()> {
     let system = Composer::new(&args.repo).load(PROMPT)?;
     let dir = config_dir();
-    let access = Access::resolve(args.role, &settings(&args.repo)?, &dir)?;
+    let access = Access::resolve(args.role, &args.repo, &dir)?;
     let client = Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()

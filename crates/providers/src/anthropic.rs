@@ -14,6 +14,12 @@ use crate::{
     ToolSpec, Wire,
 };
 
+/// `max_tokens` for a model whose limit the caller doesn't know. The field is
+/// required here, and this is the smallest output limit of any Claude model
+/// the API still serves (Haiku/Sonnet/Opus 4.5; everything newer allows
+/// 128000), so no live model refuses it.
+pub(crate) const FALLBACK_MAX_TOKENS: u32 = 64_000;
+
 pub(crate) fn body(req: &ChatRequest, claude_code: bool) -> Value {
     // Roles must alternate: merge consecutive same-role messages (e.g. tool
     // results followed by a delivered job message), keeping block order.
@@ -43,11 +49,16 @@ pub(crate) fn body(req: &ChatRequest, claude_code: bool) -> Value {
     }));
     let mut body = json!({
         "model": req.model,
-        "max_tokens": req.max_tokens,
+        "max_tokens": req.max_tokens.unwrap_or(FALLBACK_MAX_TOKENS),
         "stream": true,
         "system": system,
         "messages": messages,
     });
+    if let Some(effort) = req.effort {
+        // Effort also sets thinking depth on adaptive-thinking models, and
+        // thinking counts toward `max_tokens`.
+        body["output_config"] = json!({ "effort": effort });
+    }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(req.tools.iter().map(replay_tool).collect());
     }
@@ -87,7 +98,18 @@ fn replay_message(m: &crate::Message) -> Value {
                 id,
                 name,
                 arguments,
-            } => Some(json!({ "type": "tool_use", "id": id, "name": name, "input": arguments })),
+            } => {
+                // `input` must be an object. Arguments that never parsed (a
+                // call cut off at the output cap) are kept as a string; the
+                // tool result already told the model so, and sending the
+                // string would get the whole request rejected with a 400.
+                let input = if arguments.is_object() {
+                    arguments.clone()
+                } else {
+                    json!({})
+                };
+                Some(json!({ "type": "tool_use", "id": id, "name": name, "input": input }))
+            }
             ContentBlock::ToolResult {
                 call_id,
                 content,

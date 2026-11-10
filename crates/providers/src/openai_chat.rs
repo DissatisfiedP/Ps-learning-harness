@@ -22,11 +22,13 @@ pub(crate) fn body(req: &ChatRequest) -> Value {
         "model": req.model,
         "stream": true,
         "stream_options": { "include_usage": true },
-        "max_tokens": req.max_tokens,
         "messages": messages,
     });
     if let Some(effort) = req.effort {
         body["reasoning_effort"] = effort.into();
+    }
+    if let Some(max) = req.max_tokens {
+        body["max_tokens"] = max.into();
     }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(req.tools.iter().map(replay_tool).collect());

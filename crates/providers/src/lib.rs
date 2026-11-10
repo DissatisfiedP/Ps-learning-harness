@@ -122,7 +122,11 @@ pub struct ChatRequest<'a> {
     pub model: &'a str,
     pub system: &'a str,
     pub messages: &'a [Message],
-    pub max_tokens: u32,
+    /// The model's own output limit, when known. Never a budget: `None` lets
+    /// the wire decide. Chat omits the field (the server's limit applies),
+    /// Responses never sends one, and Anthropic, where it is required, sends
+    /// `anthropic::FALLBACK_MAX_TOKENS` (64000).
+    pub max_tokens: Option<u32>,
     /// Reasoning effort (`low`/`medium`/`high`/…); sent only when set.
     pub effort: Option<&'a str>,
     /// Tools offered to the model. Empty means none are sent.
@@ -494,7 +498,7 @@ mod tests {
             model: "m",
             system: "s",
             messages: &messages,
-            max_tokens: 8,
+            max_tokens: Some(8),
             effort: None,
             tools: &[],
             cache_key: None,
@@ -529,6 +533,83 @@ mod tests {
         let oauth = anthropic::body(&req, true);
         assert_eq!(oauth["system"][0]["text"], claude_oauth::CLAUDE_CODE_PREFIX);
         assert_eq!(oauth["system"][1]["text"], "s");
+    }
+
+    #[test]
+    fn anthropic_replays_malformed_tool_input_as_an_object() {
+        // A tool call cut off mid-JSON (output cap) is kept as a string; the
+        // Messages API rejects any non-object `input` with a 400, so replaying
+        // it verbatim would kill the next request of the loop.
+        let messages = [Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolCall {
+                id: "t1".into(),
+                name: "brief_submit".into(),
+                arguments: json!("{\"kind\":\"scope\",\"summary\":\"cut"),
+            }],
+        }];
+        let req = ChatRequest {
+            model: "m",
+            system: "s",
+            messages: &messages,
+            max_tokens: Some(8),
+            effort: None,
+            tools: &[],
+            cache_key: None,
+        };
+        let body = anthropic::body(&req, false);
+        assert_eq!(body["messages"][0]["content"][0]["input"], json!({}));
+    }
+
+    #[test]
+    fn anthropic_sends_effort_as_output_config_only_when_set() {
+        let messages = [Message::text(Role::User, "hi")];
+        let mut req = ChatRequest {
+            model: "m",
+            system: "s",
+            messages: &messages,
+            max_tokens: Some(8),
+            effort: Some("low"),
+            tools: &[],
+            cache_key: None,
+        };
+        assert_eq!(
+            anthropic::body(&req, true)["output_config"],
+            json!({ "effort": "low" })
+        );
+        req.effort = None;
+        assert!(anthropic::body(&req, true).get("output_config").is_none());
+    }
+
+    #[test]
+    fn output_limit_is_the_models_own_or_left_to_the_server() {
+        let messages = [Message::text(Role::User, "hi")];
+        let mut req = ChatRequest {
+            model: "m",
+            system: "s",
+            messages: &messages,
+            max_tokens: Some(128_000),
+            effort: None,
+            tools: &[],
+            cache_key: None,
+        };
+        assert_eq!(openai_chat::body(&req)["max_tokens"], 128_000);
+        assert_eq!(anthropic::body(&req, false)["max_tokens"], 128_000);
+        assert!(openai_responses::body(&req)
+            .get("max_output_tokens")
+            .is_none());
+
+        // Unknown limit: chat leaves it to the server; Anthropic requires the
+        // field and gets the floor every live Claude model accepts.
+        req.max_tokens = None;
+        assert!(openai_chat::body(&req).get("max_tokens").is_none());
+        assert_eq!(
+            anthropic::body(&req, false)["max_tokens"],
+            anthropic::FALLBACK_MAX_TOKENS
+        );
+        assert!(openai_responses::body(&req)
+            .get("max_output_tokens")
+            .is_none());
     }
 
     #[test]

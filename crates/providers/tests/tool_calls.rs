@@ -71,7 +71,7 @@ async fn run_full(
         model: "m",
         system: "sys",
         messages,
-        max_tokens: 512,
+        max_tokens: Some(512),
         effort: None,
         tools,
         cache_key: Some("sess-1"),

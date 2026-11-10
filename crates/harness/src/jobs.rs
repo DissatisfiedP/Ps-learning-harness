@@ -26,7 +26,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use providers::{ContentBlock, Message, Role, ToolCall};
+use providers::{ContentBlock, Message, Role, StopReason, ToolCall};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
@@ -399,6 +399,7 @@ impl Harness {
                 )
                 .await?;
             let calls = reply.completion.tool_calls.clone();
+            let cut_off = reply.completion.stop == StopReason::MaxTokens;
             if !reply.text.trim().is_empty() {
                 last_text = reply.text.clone();
             }
@@ -421,8 +422,22 @@ impl Harness {
             let mut brief = None;
             let mut shown: Vec<(String, String, String)> = Vec::new();
             for c in &calls {
-                let (content, is_error) = match self.research_tool(&kind, c, &mut page_images).await
-                {
+                let step = if cut_off && !c.arguments.is_object() {
+                    // The reply hit the output cap mid-call: say so, or the
+                    // model resubmits the same oversized call and is cut
+                    // off again.
+                    ResearchStep::Result(
+                        format!(
+                            "{} failed: your reply hit the output limit before the arguments \
+                             were complete. Send it again, shorter: tighter wording, fewer items.",
+                            c.name
+                        ),
+                        true,
+                    )
+                } else {
+                    self.research_tool(&kind, c, &mut page_images).await
+                };
+                let (content, is_error) = match step {
                     ResearchStep::Brief(b) => {
                         brief = Some(b);
                         ("Brief submitted.".to_owned(), false)

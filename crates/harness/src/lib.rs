@@ -65,7 +65,6 @@ pub use sync::{
     ConflictPath, SyncConfig, SyncReport, SyncStatus, WebdavConfig, WebdavReport, WebdavStatus,
 };
 
-const MAX_TOKENS: u32 = 8192;
 const LOGIN_POLL: Duration = Duration::from_millis(1500);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
@@ -548,7 +547,7 @@ impl Harness {
             model: &choice.model,
             system: &system,
             messages: &history,
-            max_tokens: MAX_TOKENS,
+            max_tokens: self.max_tokens(choice.provider, &choice.model),
             effort: choice.effort.as_deref(),
             tools: &[],
             cache_key: Some(session_id),
@@ -797,7 +796,7 @@ impl Harness {
             model: &choice.model,
             system: "You must call the ping tool. Call it now.",
             messages: &messages,
-            max_tokens: 64,
+            max_tokens: self.max_tokens(choice.provider, &choice.model),
             effort: choice.effort.as_deref(),
             tools: &tools,
             cache_key: None,

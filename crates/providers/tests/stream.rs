@@ -65,7 +65,7 @@ async fn run(
         model: "m",
         system: "be a tutor",
         messages: &msgs,
-        max_tokens: 512,
+        max_tokens: Some(512),
         effort: Some("high"),
         tools: &[],
         cache_key: None,

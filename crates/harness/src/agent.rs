@@ -249,7 +249,7 @@ impl Harness {
             model: &choice.model,
             system,
             messages,
-            max_tokens: crate::MAX_TOKENS,
+            max_tokens: self.max_tokens(choice.provider, &choice.model),
             effort: choice.effort.as_deref(),
             tools,
             cache_key: Some(cache_key),
