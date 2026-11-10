@@ -148,8 +148,9 @@ async fn decide_edge_proposals(
     blocking(&h, move |h| h.decide_edge_proposals(&accept, &dismiss)).await
 }
 
-/// Build the knowledge graph from a session's transcript (the `graph` job).
-/// Returns the job id; it never writes into the conversation.
+/// Extract by hand: build the knowledge graph from the session's teaching
+/// not yet in it (the `graph` job). Returns the job id; it never writes into
+/// the conversation.
 #[tauri::command]
 async fn graph_build(h: H<'_>, session_id: String) -> Result<String> {
     let harness = Arc::clone(&h);
@@ -157,6 +158,13 @@ async fn graph_build(h: H<'_>, session_id: String) -> Result<String> {
         .await
         .map_err(err)?
         .map_err(err)
+}
+
+/// What the Home list's Extract item needs: uncovered tutor tokens, the
+/// manual minimum and whether a build is running.
+#[tauri::command]
+async fn graph_status(h: H<'_>, session_id: String) -> Result<harness::ExtractionStatus> {
+    blocking(&h, move |h| h.graph_status(&session_id)).await
 }
 
 /// Recompute the topic-split proposals for the Map page.
@@ -895,6 +903,7 @@ pub fn run() {
             edge_proposals,
             decide_edge_proposals,
             graph_build,
+            graph_status,
             graph_splits,
             decide_splits,
             subscribe_events,

@@ -356,13 +356,20 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .session-meta { flex: none; font-size: var(--fs-small); color: var(--ink-3); }
 /* Locked on this phone (desktop-only plugin): the title greys to --ink-3, like a known plan node; still openable. */
 .session.locked .session-title { color: var(--ink-3); }
-.session-delete { font-size: var(--fs-small); }
+/* The row's "…" menu: Extract (greyed until enough new teaching) and Delete. */
+.session-more-wrap { position: relative; }
+.session-more { font-size: var(--fs-small); min-inline-size: 44px; }
+.menu.session-menu { min-inline-size: 220px; }
+.menu-item:disabled { color: var(--ink-3); cursor: default; }
+.menu-item:disabled:hover { background: none; }
+.menu-note { display: block; font-size: var(--fs-meta); color: var(--ink-3); }
 .session-delete.armed { color: var(--ink); font-weight: 600; }
 @media (hover: hover) {
-  .session-delete { opacity: 0; }
-  .session:hover .session-delete, .session:focus-within .session-delete, .session-delete.armed { opacity: 1; }
+  .session-more { opacity: 0; }
+  .session:hover .session-more, .session:focus-within .session-more, .session.menu-open .session-more { opacity: 1; }
 }
 .session-status { grid-column: 1 / -1; font-size: var(--fs-small); color: var(--danger); }
+.session-status.note { color: var(--ink-3); }
 .session-status:not(:empty) { padding-block-end: var(--s2); }
 .session-empty { margin-block-start: var(--s3); color: var(--ink-3); }
 

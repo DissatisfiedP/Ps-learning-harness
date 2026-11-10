@@ -180,6 +180,11 @@ let composer = null;
 const sessions = createSessionList(els.sessionList, {
   onOpen: (id) => openSession(id),
   onDelete: (id) => deleteSession(id),
+  onExtractStatus: (id) => cmd('graph_status', { sessionId: id }),
+  // The row's status line (role="status") reports the outcome.
+  onExtract: async (id) => {
+    await cmd('graph_build', { sessionId: id });
+  },
 });
 
 const map = createMap(els.mapPage, {

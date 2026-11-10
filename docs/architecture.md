@@ -341,12 +341,15 @@ What uses each type:
 
 ### 4.7 Extraction timing
 
-**Chosen:** post-hoc extraction in the background:
-- at session end;
-- every ~20 turns in long sessions;
+**Chosen:** post-hoc extraction in the background, in parts, as the session goes:
+- after a tutor turn, once **4,096 tutor tokens** (characters / 4 of the tutor's messages and conversation tool calls) have accumulated since the last build finished;
+- at session end, whatever is left;
+- by hand, from the session's "…" → Extract on Home, once a quarter of that (1,024) is new;
 - after each imported file.
 
-The session's plan map is given to the graph builder as a hint. The graph builder is one job that extracts propositions, judges identity against the graph, places new nodes and draws edges, all in one pass, so that every judgement is made while the source passage is visible (`crates/harness/prompts/jobs/graph-builder.md`).
+Sessions run over days and practice happens between sittings, so the graph cannot wait for `session_end`. Each `graph` job reads only the part after the last *done* build's cut, through a cut fixed when it is queued (`after`/`through` in its args, keyed by `at` then `opId` like a compaction cut, so sync merges cannot move it). A done build that leaves enough behind starts the next one under the same rules. A failed build is read again by the next one, which waits for another 4,096 new tokens rather than retrying on every turn. Tokens rather than turns, because turns vary from "ok" to a full derivation; 4,096 because one build pays ~4–5k tokens of prompt, graph summary and plan on every call of its loop, so a part that size keeps that overhead near half of what is read, and ~8–10 ordinary tutor replies is a short enough lag (`crates/harness/src/extraction.rs`).
+
+The builder's prompt holds the session's plan as a hint, the newest compaction notes that stop inside its part (context, not a source), and a numbered list of the part's messages (who wrote each, and its length). It reads each message whole with `message_read { index }`; nothing is clipped. The log records which message was read, not a second copy of it. The graph builder is one job that extracts propositions, judges identity against the graph, places new nodes and draws edges, all in one pass, so that every judgement is made while the source passage is visible (`crates/harness/prompts/jobs/graph-builder.md`). Claims from an earlier part are found through `graph_search`.
 
 | Alternative | How it works | For | Against |
 |---|---|---|---|
@@ -355,6 +358,8 @@ The session's plan map is given to the graph builder as a hint. The graph builde
 | **Post-hoc** (chosen) | The graph builder reads the finished transcript | Extracts what was actually taught *and* checked; can include the learner's demonstrated misconceptions | Graph lags the session by minutes |
 | Split extractor (sees the source) + linker (sees the graph), as LH does | Each call has a smaller input | The linker judges identity from a bare statement without the passage; two calls to keep consistent |
 | Manual only | The learner writes nodes | Highest quality | Logistics burden |
+| Every N turns | Count tutor turns since the last build | Simple, predictable | Turns vary from "ok" to a full derivation: fires on chatter, lags on dense teaching |
+| Only at session end | One build per session | Fewest builds | Multi-day sessions leave the graph empty for practice between sittings |
 
 ### 4.8 Learner model
 
@@ -643,7 +648,7 @@ Priority per node, recomputed daily:
 
 - shared fragments, then the live agent's base prompt with its pinned session state, then the current phase's instructions; in the teach phase, also the section header + mode fragment + active plugin fragments (§4.10);
 - a **graph slice**: plan nodes + 1-hop neighbors + learner state for those nodes;
-- the transcript with compaction: near the context limit, the tutor or coach spends one turn writing notes under seven fixed headings (state, held, misconceptions, the learner's phrasings, commitments, corrections, references), and those notes replace the older turns. Recent turns stay verbatim, and the pinned session state is never compacted.
+- the transcript with compaction: once the conversation passes 20% of the context window (the system prompt not counted), the tutor or coach spends one turn writing notes under seven fixed headings (state, held, misconceptions, the learner's phrasings, commitments, corrections, references), and those notes replace the older turns. The last 5% of the window stays verbatim, and the pinned session state is never compacted. A lesson needs its recent turns and the pinned state, not a long verbatim history, so compacting early keeps every call small.
 
 The system prompt changes only at phase changes, section boundaries, replans and plugin grants, never turn by turn. This keeps provider prefix caching effective.
 

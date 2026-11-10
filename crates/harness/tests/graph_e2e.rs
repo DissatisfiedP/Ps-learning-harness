@@ -52,6 +52,160 @@ fn graph_jobs(h: &Arc<harness::Harness>, id: &str) -> Vec<(String, Option<Value>
         .collect()
 }
 
+/// A tutor reply of about `tokens` tutor tokens (characters / 4), opening
+/// with `marker` so a builder's transcript can be checked for it.
+fn teaching(marker: &str, tokens: usize) -> &'static str {
+    let mut text = format!("{marker}. ");
+    while text.len() < tokens * 4 {
+        text.push_str("In a series circuit every element carries the same current. ");
+    }
+    text.leak()
+}
+
+/// The `reason` of each queued graph job, in order.
+fn graph_reasons(h: &Arc<harness::Harness>, id: &str) -> Vec<String> {
+    ops(h, id)
+        .into_iter()
+        .filter_map(|o| match o {
+            Op::Job(j) if j.kind == "graph" && j.state == "queued" => {
+                Some(j.args?["reason"].as_str()?.to_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The message list of a builder request's system prompt.
+fn builder_messages(request: &Value) -> String {
+    let system = request["messages"][0]["content"].as_str().unwrap();
+    let start = system.find("The session's messages").unwrap();
+    let end = system.find("## Tools").unwrap();
+    system[start..end].to_owned()
+}
+
+/// Sessions run over days: the graph is built from the teaching as it
+/// accumulates, each build reads only what the last one didn't, and a manual
+/// build needs a quarter of what starts one automatically.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn teaching_is_extracted_in_parts_as_the_session_goes() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("graph-parts");
+    let h = harness(&repo, &config, &base).await;
+    let id = session_awaiting_approval(
+        &h,
+        &script,
+        &release,
+        vec![Reply::Calls("", vec![("w1", "plan_write", plan_args(&[]))])],
+    )
+    .await;
+    assert!(
+        graph_reasons(&h, &id).is_empty(),
+        "short turns build nothing"
+    );
+
+    // One long teaching turn crosses the automatic threshold.
+    let first_part = teaching("FIRST PART", 4200);
+    script.push("tutor", Reply::Text(first_part));
+    script.push(
+        "graph",
+        Reply::Calls("", vec![("s1", "graph_submit", submission())]),
+    );
+    h.approve(&id, vec![]).await.unwrap();
+    h.wait_background(&id).await;
+    assert_eq!(graph_reasons(&h, &id), vec!["turn"]);
+    let first = builder_messages(&script.requests_of("graph")[0]);
+    assert!(first.contains("from the start of the session"), "{first}");
+    assert!(
+        first.contains(&format!(
+            "Tutor — {} characters",
+            first_part.chars().count()
+        )),
+        "listed whole, not clipped: {first}"
+    );
+    assert!(
+        !first.contains("FIRST PART"),
+        "listed, not inlined: {first}"
+    );
+    assert_eq!(h.knowledge_map().unwrap().nodes.len(), 2);
+
+    // Nothing new: a manual build is refused and says what it needs.
+    let refused = h.graph_build(&id).unwrap_err().to_string();
+    assert!(refused.contains("1024 needed"), "{refused}");
+
+    // A shorter stretch stays below the automatic threshold but is enough by
+    // hand.
+    script.push("tutor", Reply::Text(teaching("SECOND PART", 1500)));
+    h.send_learner_message(&id, "Go on.").await.unwrap();
+    h.wait_background(&id).await;
+    assert_eq!(graph_reasons(&h, &id), vec!["turn"], "below the threshold");
+    let status = h.graph_status(&id).unwrap();
+    assert!(
+        status.uncovered_tokens >= 1500 && !status.running,
+        "{status:?}"
+    );
+
+    // The builder reads a message by number; restating the same claims
+    // upserts them: no copies.
+    script.push(
+        "graph",
+        Reply::Calls(
+            "",
+            vec![
+                ("r1", "message_read", json!({"index": 2})),
+                ("r2", "message_read", json!({"index": 3})),
+            ],
+        ),
+    );
+    script.push(
+        "graph",
+        Reply::Calls(
+            "",
+            vec![(
+                "s2",
+                "graph_submit",
+                json!({"nodes": [
+                    {"nodeId": "divider-rule", "title": "The divider rule",
+                     "statement": "The output of an unloaded two-resistor divider is V_in R2/(R1+R2).",
+                     "kind": "mechanism", "home": "circuits"}
+                ]}),
+            )],
+        ),
+    );
+    h.graph_build(&id).unwrap();
+    h.wait_background(&id).await;
+    assert_eq!(graph_reasons(&h, &id), vec!["turn", "manual"]);
+    let requests = script.requests_of("graph");
+    let second = builder_messages(&requests[1]);
+    assert!(
+        second.contains("earlier runs already extracted"),
+        "{second}"
+    );
+    assert!(
+        second.contains("1. Learner — 6 characters") && second.contains("2. Tutor — "),
+        "only the new part: {second}"
+    );
+    assert!(!second.contains("3. "), "only the new part: {second}");
+    let read = tool_message(&requests[2], "r1").unwrap();
+    assert!(read.starts_with("Tutor:\nSECOND PART"), "{read}");
+    let out_of_range = tool_message(&requests[2], "r2").unwrap();
+    assert!(out_of_range.contains("from 1 to 2"), "{out_of_range}");
+    // The log records which message was read, not a second copy of it.
+    let logged = results(&h, &id, "message_read");
+    assert!(
+        logged.iter().any(|(text, _)| text == "read message 2"),
+        "{logged:?}"
+    );
+    assert_eq!(h.knowledge_map().unwrap().nodes.len(), 2, "the same ids");
+    assert_eq!(h.graph_status(&id).unwrap().uncovered_tokens, 0);
+    assert!(
+        script.unexpected.lock().unwrap().is_empty(),
+        "{:?}",
+        script.unexpected.lock().unwrap()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn close_builds_the_graph_refuses_once_then_lands_ops() {
     let script = Arc::new(Script::default());
@@ -177,77 +331,24 @@ async fn close_builds_the_graph_refuses_once_then_lands_ops() {
     assert!(system.starts_with("# Graph builder"), "{system}");
     assert!(system.contains("Nodes (id [home] title)"), "{system}");
     assert!(
-        system.contains("Voltage dividers"),
-        "the plan or goal: {system}"
+        system.contains(r#""goal": "Dividers""#),
+        "the plan: {system}"
     );
-    assert!(system.contains("Learner:"), "the transcript: {system}");
-    let offered = tool_names(&graph_requests[0]);
-    assert_eq!(offered, vec!["graph_search", "graph_submit"]);
-
-    // Building again does not duplicate the structure. Re-sending the same
-    // edges is refused as duplicates (the graph already holds them); the same
-    // claims as upserts are accepted and change nothing.
-    script.push(
-        "graph",
-        Reply::Calls("", vec![("s3", "graph_submit", submission())]),
-    );
-    script.push(
-        "graph",
-        Reply::Calls(
-            "",
-            vec![(
-                "s4",
-                "graph_submit",
-                json!({
-                    "topics": [{"topicId": "circuits", "title": "Circuits", "parent": null}],
-                    "nodes": [
-                        {"nodeId": "series-current", "title": "Series current",
-                         "statement": "In a series circuit the same current flows through every element.",
-                         "kind": "mechanism", "home": "circuits"},
-                        {"nodeId": "divider-rule", "title": "The divider rule",
-                         "statement": "The output of an unloaded two-resistor divider is V_in R2/(R1+R2).",
-                         "kind": "mechanism", "home": "circuits"}
-                    ]
-                }),
-            )],
-        ),
-    );
-    h.graph_build(&id).unwrap();
-    h.wait_background(&id).await;
-    let again = h.knowledge_map().unwrap();
-    assert_eq!(again.nodes.len(), 2, "the same ids, no copies");
-    assert_eq!(again.edges.len(), 2);
-    assert_eq!(again.topics.len(), 1);
-    assert_eq!(again.chains.len(), 1);
-    let rebuild = results(&h, &id, "graph_submit");
     assert!(
-        rebuild
-            .iter()
-            .any(|(text, error)| *error && text.contains("already exists")),
-        "a duplicate edge is refused: {rebuild:?}"
+        system.contains("1. Learner — "),
+        "the message list: {system}"
+    );
+    let offered = tool_names(&graph_requests[0]);
+    assert_eq!(
+        offered,
+        vec!["message_read", "graph_search", "graph_submit"]
     );
 
-    // And a third build: still two nodes and two edges.
-    script.push(
-        "graph",
-        Reply::Calls(
-            "",
-            vec![(
-                "s5",
-                "graph_submit",
-                json!({"nodes": [
-                    {"nodeId": "divider-rule", "statement": "The output of an unloaded two-resistor divider is V_in R2/(R1+R2).",
-                     "kind": "mechanism", "home": "circuits"}
-                ]}),
-            )],
-        ),
-    );
-    h.graph_build(&id).unwrap();
-    h.wait_background(&id).await;
-    let third = h.knowledge_map().unwrap();
-    assert_eq!(third.nodes.len(), 2);
-    assert_eq!(third.edges.len(), 2);
-    assert_eq!(script.requests_of("graph").len(), 5);
+    // The close read everything: a manual build has nothing left to read.
+    let refused = h.graph_build(&id).unwrap_err().to_string();
+    assert!(refused.contains("not enough new teaching"), "{refused}");
+    assert_eq!(h.graph_status(&id).unwrap().uncovered_tokens, 0);
+    assert_eq!(script.requests_of("graph").len(), 2);
 
     // Reaching the model again would mean something woke the tutor.
     assert_eq!(script.requests_of("tutor").len(), tutor_requests);
@@ -272,6 +373,10 @@ async fn graph_build_refuses_while_one_is_open_for_the_session() {
         vec![Reply::Calls("", vec![("w1", "plan_write", plan_args(&[]))])],
     )
     .await;
+    // Enough teaching for a manual build, below the automatic threshold.
+    script.push("tutor", Reply::Text(teaching("TEACHING", 1500)));
+    h.approve(&id, vec![]).await.unwrap();
+    h.wait_background(&id).await;
 
     // Hold the builder's model call so the job stays open.
     let gate = Arc::new(Semaphore::new(0));
@@ -362,6 +467,9 @@ async fn a_graph_job_lands_venues_on_their_topics() {
         vec![Reply::Calls("", vec![("w1", "plan_write", plan_args(&[]))])],
     )
     .await;
+    script.push("tutor", Reply::Text(teaching("CALCULUS", 1500)));
+    h.approve(&id, vec![]).await.unwrap();
+    h.wait_background(&id).await;
 
     script.push(
         "graph",
@@ -435,6 +543,11 @@ async fn a_graph_job_lands_venues_on_their_topics() {
 
     // A later build that restates the same venue replaces it, keyed by
     // (topic, name), and leaves the other venue alone.
+    script.push("tutor", Reply::Text(teaching("MORE CALCULUS", 1500)));
+    h.send_learner_message(&id, "Where else can I ask?")
+        .await
+        .unwrap();
+    h.wait_background(&id).await;
     script.push(
         "graph",
         Reply::Calls(

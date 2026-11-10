@@ -546,11 +546,13 @@ Desktop:
 - **Setup notice** (no model ready): a paragraph above the input, "Connect a model to start." followed by the text button "Settings". Start stays enabled. Pressing it without a model shows the inline status "Choose a model first." under the input and opens Settings (today's toast becomes inline).
 - **Session list** under the heading "Your sessions" (`h2`, `--fs-ui` 600):
   - Groups Today / Yesterday / Previous 7 days / Older, as small-caps `h3` in `--fs-meta` `--ink-3`.
-  - Each row is an `li` containing an open button (title in `--fs-ui` `--ink`; meta "Learn · 10:42", "Practice · Tue" or "Read-only · 1 Jan" in `--fs-small` `--ink-3`, right-aligned) and a sibling "Delete" text button.
+  - Each row is an `li` containing an open button (title in `--fs-ui` `--ink`; meta "Learn · 10:42", "Practice · Tue" or "Read-only · 1 Jan" in `--fs-small` `--ink-3`, right-aligned) and a sibling "…" text button (`aria-haspopup="menu"`, labelled "More actions for ⟨title⟩") that opens the row's menu.
   - **Locked** (on a phone, `readOnlyReason === "desktop-plugin"`, docs/sync-build.md "Sessions on mobile"): the meta reads "Locked · 10:42" instead of "Learn"/"Read-only", and the row gets `.locked`, which greys the title to `--ink-3` (the same dimming as a known plan node). The open button stays enabled; its accessible name (title + meta) includes "Locked", and opening it shows the desktop-plugin desk note with "Continue here anyway" (§6.3). Legacy read-only rows are unchanged.
   - Row height is at least 48 px.
-  - Delete is visible on `:hover`/`:focus-within` for `(hover: hover)` devices, and always visible on `(hover: none)`.
-  - First press arms the button ("Delete? Press again", `aria-live` polite); a second press within 4 s deletes. This is today's armed pattern, restyled as text.
+  - "…" is visible on `:hover`/`:focus-within` (and while its menu is open) for `(hover: hover)` devices, and always visible on `(hover: none)`.
+  - The menu (`.menu`, right-aligned under "…"; arrow keys, Home/End, Escape back to "…") holds two items:
+    - **Extract** runs the graph builder now over the session's teaching not yet in the map (`graph_build`, architecture §4.7). Opening the menu asks `graph_status`; the item stays greyed ("Checking…") until it answers, and stays greyed while a build is running ("Running now") or while fewer than a quarter of the automatic threshold's tutor tokens are new ("312 of 1,024 new tokens needed"). Enabled, its note reads "2,380 new tokens". Pressing it closes the menu and the row's status line reads "Extracting into the map in the background." in `--ink-3`; a refusal reads "Couldn’t extract this session: …" in `--danger`.
+    - **Delete**: the first press arms it ("Delete? Press again", `aria-live` polite); a second press within 4 s deletes. Closing the menu disarms it.
   - Incremental updates stay exactly as today: one entry per `session` event, moved or updated in place; no re-list.
   - Empty state: "No sessions yet." in `--ink-3`.
 - **Errors:**
@@ -948,7 +950,7 @@ Visual changes only:
 
 - The session list exists only on Home (§7.1).
 - From a session: "← Sessions" goes Home. Focus lands on the open button of the session just left, or on the input if it was deleted.
-- Delete is available from Home only.
+- Delete and Extract are available from Home only (the row's "…" menu).
 - The open session is not marked "active" in a list, because no list is visible in sessions.
 - Practice-busy navigation guard: unchanged rule, with an inline message instead of a toast (§6.2).
 
@@ -1077,9 +1079,9 @@ sessions — no prompt text, plan goal, phase or "in progress" appears on it, an
 ever *highlight* part of it (architecture §4.2, §4.5). The store is `<repo>/graph/` (`topics.json`
 tree, `nodes.jsonl` propositions, `edges.jsonl` prerequisites, `checks.jsonl` per-topic totals),
 separate from the session op logs, so the map's structure never depends on which sessions exist. It
-is written today by `cargo run -p harness --bin import_learnharness -- <learnharness-data> <repo>`
-from the learner's own data; extracting claims from live sessions is not built
-(`docs/agent-system-plan.md`, "Not built yet" 1).
+is written by the graph builder from live sessions as they go (architecture §4.7: after a tutor turn once
+enough new teaching has accumulated, at `session_end`, and from a session's Extract on Home), and was
+seeded once by `cargo run -p harness --bin import_learnharness -- <learnharness-data> <repo>`.
 
 **Where it lives, and why there.** A separate page reached only from Home ("Map" in the top bar).
 It is never Home's background (LearnHarness draws its graph behind the start input) and never
@@ -2061,7 +2063,7 @@ Use the mocked backend: serve `ui/` with `index.html` patched to load a `window.
 
 - [ ] S1 Session `legacy`: there is no composer. The desk shows the read-only note and "Start a new session", which goes to Home.
 - [ ] S2 Session `pr` (Practice): sending calls `send_message` with `mode:"practice"` and a fresh channel. Retry calls `retry_reply`. The head shows "Practice", and there is no phase or Plan.
-- [ ] S3 Home: the mode control is a radio group with descriptions. There is no "Or try:" line and no visible Enter hint. The list shows group headings and rows at least 48 px tall. Delete needs two presses.
+- [ ] S3 Home: the mode control is a radio group with descriptions. There is no "Or try:" line and no visible Enter hint. The list shows group headings and rows at least 48 px tall. Each row's "…" opens Extract (greyed below a quarter of the automatic threshold) and Delete; Delete needs two presses.
 - [ ] S4 Settings: role fieldsets with inline status after "Use this model". Appearance → Dark switches the theme, and the choice persists across a reload.
 - [ ] S5 At 390 px nothing scrolls horizontally (`document.documentElement.scrollWidth <= 390`), and every button is at least 44 px tall under `pointer: coarse` emulation.
 

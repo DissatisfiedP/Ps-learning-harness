@@ -57,12 +57,12 @@ Measure, Teach and Close are the tutor's. Plan is the planner's.
 | **Coach** | `coach/base.md` + the active plugins' `prompts/practice.md` | yes | Whole practice session | Tutor | `problem_conclude` per problem |
 | Researcher | `jobs/researcher.md` | no | `scope` on `goal_set`; `verify`, `scope` and `source` on request from any agent | Reader | `brief_submit` |
 | Problem checker | `jobs/problem-checker.md` | no | After each `problem_commit`: turn 1 blind, turn 2 told the target | Planner | `audit_submit`, `necessity_submit` |
-| Graph builder | `jobs/graph-builder.md` | no | Once per session, after `session_end`; on demand through `graph_build` | Librarian | `graph_submit` |
+| Graph builder | `jobs/graph-builder.md` | no | Over the teaching not yet extracted: after a tutor turn once 4,096 new tutor tokens have accumulated, after `session_end` for the rest, and on demand through `graph_build` (from 1,024) | Librarian | `graph_submit` |
 | Topic splitter | `jobs/topic-splitter.md` | via a suggestion card | When a topic passes ~30 nodes | Librarian | `split_suggest` |
 | Demo builder | `jobs/demo-builder.md` | no | On `demo_request` | Builder | `demo_submit` |
 | Figure maker | `jobs/figure-maker.md` | no | On `figure_request` | Builder | `figure_submit` |
 
-**Compaction is a turn, not an agent.** Near the context limit, the live agent gets `compaction.md` as the instruction for one turn. The notes it writes replace the older turns. The turn runs on that agent's own role.
+**Compaction is a turn, not an agent.** Once the conversation passes 20% of the context window, the live agent gets `compaction.md` as the instruction for one turn. The notes it writes replace the older turns. The turn runs on that agent's own role.
 
 Things that are code, not agents:
 - the scheduler;
@@ -159,6 +159,7 @@ Tools are scoped by agent and phase. A tool that is absent is never described to
 | `problem_commit`, `problem_conclude` | coach | See `coach/base.md` |
 | `audit_submit`, `necessity_submit` | problem checker | See `jobs/problem-checker.md` |
 | `web_search`, `page_fetch`, `source_outline`, `source_search`, `source_read`, `source_page_image`, `brief_submit` | researcher | See `jobs/researcher.md`; search via `crates/research-search` (Brave → Wikipedia); `page_fetch` returns a PDF's page-tagged text, and `source_page_image { path \| url, page }` attaches one scanned page's image (≤ 4 per run) |
+| `message_read` | graph builder | `{ index }` → one message of the prompt's numbered list, whole (`<who>:\n<text>`); an index outside the list is refused with the valid range |
 | `graph_search` | graph builder | `{ query }` → up to 20 graph nodes and topics matching the query, with ids, titles and homes. Read-only |
 | `graph_submit` | graph builder | See `jobs/graph-builder.md` |
 | `split_suggest` | topic splitter | See `jobs/topic-splitter.md` |

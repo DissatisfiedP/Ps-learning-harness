@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
 use crate::events::{AgentEvent, AgentName};
+use crate::extraction::Trigger;
 use crate::files;
 use crate::plugins::PluginContext;
 use crate::prompts::{render, Composer, TemplateValues};
@@ -590,6 +591,9 @@ impl Harness {
         );
         let started = std::time::Instant::now();
         let result = self.tutor_loop(session_id).await;
+        // Sessions run over days and practice happens between sittings, so
+        // the graph keeps up during the session, not only at its end.
+        self.spawn_graph_after(session_id, Trigger::Turn);
         tracing::debug!(
             session = session_id,
             ms = started.elapsed().as_millis() as u64,
@@ -636,8 +640,11 @@ impl Harness {
             );
             ensure_user_last(&mut messages);
 
+            // Compact once the conversation itself (not the system prompt,
+            // which compaction can't shrink) passes a fifth of the window:
+            // a lesson needs its recent turns, not a long verbatim history.
             let window = self.context_window(ModelRole::Tutor);
-            if !compacted && replay::estimate_tokens(&system, &messages) > window * 7 / 10 {
+            if !compacted && replay::estimate_tokens("", &messages) > window / 5 {
                 compacted = true;
                 if self.compact(session_id, &ops, window).await? {
                     continue;
@@ -768,7 +775,8 @@ impl Harness {
         ops: &[Op],
         window: usize,
     ) -> Result<bool, Error> {
-        let Some(cut) = replay::compaction_cut(ops, window / 5) else {
+        // Keep a quarter of the trigger verbatim after the cut.
+        let Some(cut) = replay::compaction_cut(ops, window / 20) else {
             return Ok(false);
         };
         let (previous, tail) = replay::after_cut(ops);
@@ -869,10 +877,10 @@ impl Harness {
                 if state.phase != Phase::Close {
                     self.append(session_id, phase_op(Phase::Close, None))?;
                 }
-                // Once per session: the graph is built from the finished
-                // transcript. It never delivers anything into the
-                // conversation and never wakes the tutor.
-                self.spawn_graph_on_close(session_id);
+                // The rest of the teaching goes into the graph. It never
+                // delivers anything into the conversation and never wakes
+                // the tutor.
+                self.spawn_graph_after(session_id, Trigger::Close);
                 // The transcript is complete: push it in the background (the
                 // graph job's own ops go out with the next trigger).
                 self.sync_in_background();

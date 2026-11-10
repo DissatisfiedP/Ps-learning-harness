@@ -852,47 +852,67 @@ fn op_chars(op: &Op) -> usize {
     }
 }
 
-/// Plain-text transcript of the conversation ops in `ops` for the compaction
-/// prompt's `{{turns_to_summarize}}`.
+/// Plain-text transcript of the conversation ops in `ops`, every item whole,
+/// for the compaction prompt's `{{turns_to_summarize}}`.
 pub(crate) fn transcript(ops: &[Op]) -> String {
-    const ITEM_CAP: usize = 4000;
     let mut out = String::new();
-    for op in ops {
-        let line = match op {
-            Op::Message(m) if m.content.trim().is_empty() => continue,
-            Op::Message(m) => {
-                let who = match (m.role, m.tag.as_deref()) {
-                    (Role::Assistant, _) => "Tutor",
-                    (Role::User, Some(_)) => "App",
-                    (Role::User, None) => "Learner",
-                };
-                format!("{who}: {}", clip(&m.content, ITEM_CAP))
-            }
-            Op::Tool(t) if is_conversation_tool(t) => match &t.result {
-                None => format!(
-                    "[tutor called {} {}]",
-                    t.name,
-                    clip(&t.args.to_string(), ITEM_CAP)
-                ),
-                Some(r) => format!(
-                    "[{} result{}: {}]",
-                    t.name,
-                    if r.is_error { " (error)" } else { "" },
-                    clip(&r.content, ITEM_CAP)
-                ),
-            },
-            _ => continue,
-        };
-        out.push_str(&line);
+    for item in transcript_items(ops) {
+        out.push_str(&item.label);
+        out.push_str(": ");
+        out.push_str(&item.text);
         out.push_str("\n\n");
     }
     out
 }
 
-fn clip(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
-        Some((i, _)) => format!("{}…", &s[..i]),
-        None => s.to_owned(),
+/// One conversation op as the transcript shows it: who wrote it (or which
+/// tool call or result it is) and its full text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TranscriptItem {
+    pub label: String,
+    pub text: String,
+}
+
+/// The conversation ops of `ops` in order: non-empty messages and the
+/// tutor's tool calls and results. Nothing is clipped.
+pub(crate) fn transcript_items(ops: &[Op]) -> Vec<TranscriptItem> {
+    ops.iter()
+        .filter(|op| in_transcript(op))
+        .filter_map(|op| {
+            let (label, text) = match op {
+                Op::Message(m) => {
+                    let who = match (m.role, m.tag.as_deref()) {
+                        (Role::Assistant, _) => "Tutor",
+                        (Role::User, Some(_)) => "App",
+                        (Role::User, None) => "Learner",
+                    };
+                    (who.to_owned(), m.content.clone())
+                }
+                Op::Tool(t) => match &t.result {
+                    None => (format!("Tutor called {}", t.name), t.args.to_string()),
+                    Some(r) => (
+                        format!(
+                            "{} result{}",
+                            t.name,
+                            if r.is_error { " (error)" } else { "" }
+                        ),
+                        r.content.clone(),
+                    ),
+                },
+                _ => return None,
+            };
+            Some(TranscriptItem { label, text })
+        })
+        .collect()
+}
+
+/// Whether `op` is a [`transcript_items`] entry: a non-empty message or a
+/// conversation tool call or result.
+pub(crate) fn in_transcript(op: &Op) -> bool {
+    match op {
+        Op::Message(m) => !m.content.trim().is_empty(),
+        Op::Tool(t) => is_conversation_tool(t),
+        _ => false,
     }
 }
 

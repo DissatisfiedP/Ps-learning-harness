@@ -7,6 +7,7 @@ mod artifacts;
 mod attachments;
 mod config;
 pub mod events;
+mod extraction;
 mod files;
 mod frontier;
 pub mod graph;
@@ -45,6 +46,7 @@ use tokio::sync::{oneshot, Semaphore};
 
 pub use config::{ModelChoice, ModelRole, Roles, Settings};
 pub use events::{AgentEvent, AgentName, Coalescer, Envelope, EventSink};
+pub use extraction::ExtractionStatus;
 pub use files::Mention;
 pub use frontier::FrontierItem;
 pub use knowledge::{
@@ -200,6 +202,9 @@ pub struct Harness {
     pub(crate) reader_slots: Arc<Semaphore>,
     pub(crate) planner_slots: Arc<Semaphore>,
     pub(crate) librarian_slots: Arc<Semaphore>,
+    /// Held while deciding and queueing a graph build, so a manual Extract
+    /// and an end-of-turn build can't both queue one for a session.
+    pub(crate) graph_spawn: Mutex<()>,
     /// Where runtime events go (the UI); `None` drops them.
     pub(crate) sink: Mutex<Option<EventSink>>,
     /// session → artifact → latest view-state summary since the learner's
@@ -245,6 +250,7 @@ impl Harness {
             reader_slots: Arc::new(Semaphore::new(3)),
             planner_slots: Arc::new(Semaphore::new(1)),
             librarian_slots: Arc::new(Semaphore::new(1)),
+            graph_spawn: Mutex::new(()),
             sink: Mutex::new(None),
             view_states: Mutex::new(HashMap::new()),
             session_locks: Mutex::new(None),
@@ -399,12 +405,21 @@ impl Harness {
         proposals::decide(&self.repo, accept, dismiss)
     }
 
-    /// Start the graph builder for this session (architecture §4.7). Runs
-    /// in the background on the Librarian role, appends ops, and never
+    /// Extract by hand (the Home list's Extract): start the graph builder
+    /// over this session's teaching not yet in the graph (architecture §4.7).
+    /// Runs in the background on the Librarian role, appends ops, and never
     /// delivers anything into the conversation. Refuses with a readable
-    /// message while one is already open for the session.
+    /// message while a build is open or with less than a quarter of the
+    /// automatic threshold to read.
     pub fn graph_build(self: &Arc<Self>, session_id: &str) -> Result<String, Error> {
-        self.spawn_graph_job(session_id, "manual")
+        self.spawn_graph_job(session_id, extraction::Trigger::Manual)?
+            .ok_or_else(|| Error::Invalid("nothing new to extract".into()))
+    }
+
+    /// How much of this session's teaching is not in the graph yet, and
+    /// whether a build is running: what the Home list's Extract shows.
+    pub fn graph_status(&self, session_id: &str) -> Result<ExtractionStatus, Error> {
+        Ok(extraction::status(&self.store.ops(session_id)?))
     }
 
     /// Recompute the topic-split proposals (writing

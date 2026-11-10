@@ -14,11 +14,12 @@
 //! persisted (tagged `agent: "planner"`) for the record and the UI, but are
 //! not part of the tutor's messages.
 //!
-//! The graph builder (architecture §4.7) is stranger still: it reads a
-//! session's transcript and appends ops to `<repo>/graph/ops.jsonl`. Its result
-//! is never delivered and never wakes the tutor — the graph is not
-//! conversation material — so the job op is the only trace, and its tool calls
-//! are tagged `agent: "librarian"` to stay out of the replay.
+//! The graph builder (architecture §4.7) is stranger still: it reads a slice
+//! of a session's transcript (`extraction`) and appends ops to
+//! `<repo>/graph/ops.jsonl`. Its result is never delivered and never wakes the
+//! tutor — the graph is not conversation material — so the job op is the only
+//! trace, and its tool calls are tagged `agent: "librarian"` to stay out of
+//! the replay.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -31,6 +32,7 @@ use tokio::sync::oneshot;
 
 use crate::agent::{done, ensure_user_last, phase_op, refuse, result_op, tool_op, Exec, MAX_LOOP};
 use crate::events::{AgentEvent, AgentName};
+use crate::extraction::{self, Chunk, Trigger};
 use crate::files;
 use crate::prompts::{Composer, TemplateValues};
 use crate::replay::{self, replay_state};
@@ -61,15 +63,6 @@ const MIN_SALVAGE_CHARS: usize = 200;
 /// What a salvaged brief admits about itself, in `uncertain`.
 const SALVAGE_NOTE: &str =
     "answered in prose without the structured brief; fields the tutor may need are missing";
-
-/// Most characters of a session's transcript the graph builder reads
-/// (architecture §4.7): a long session is clipped at the end, because the
-/// goal, the plan and the first teaching are what most of the extraction rests
-/// on.
-const MAX_GRAPH_TRANSCRIPT: usize = 24_000;
-
-/// Cap on the session plan shown to the builder as a hint.
-const MAX_GRAPH_PLAN: usize = 4_000;
 
 const TITLE_SYSTEM: &str = "Session title\n\nWrite a title of at most six words for a learning session with the goal below. Reply with the title only: no quotes, no punctuation at the end.";
 
@@ -196,6 +189,7 @@ impl Harness {
         lock(&self.jobs).remove(&job_id);
         let mut op = self.job_op(&job_id, &kind, "done");
         op.question = Some(question);
+        let built = matches!(end, JobEnd::Done(_)) && kind == "graph";
         match end {
             JobEnd::Done(result) => op.result = result,
             JobEnd::Failed(e) => {
@@ -208,6 +202,9 @@ impl Harness {
         if let Err(e) = self.append(&sid, Op::Job(op)) {
             tracing::warn!("job {job_id}: could not persist its end: {e}");
             return;
+        }
+        if built {
+            self.continue_graph(&sid);
         }
         self.flush_deliveries(&sid).await;
     }
@@ -242,7 +239,7 @@ impl Harness {
             }
             // The graph builder never touches the conversation (see
             // `spawn_graph_job`); its result is the counts it appended.
-            "graph" => match self.graph_body(sid).await {
+            "graph" => match self.graph_body(sid, args).await {
                 Ok(summary) => JobEnd::Done(Some(summary)),
                 Err(e) => JobEnd::Failed(e.to_string()),
             },
@@ -931,61 +928,90 @@ impl Harness {
 
     // ---- graph builder -----------------------------------------------------
 
-    /// Persist and start a graph build for a session. `reason` is `manual`
-    /// (the `graph_build` command) or `close` (after `session_end`). Refuses
-    /// with a readable message while one is already open for that session.
+    /// Queue a graph build when `trigger` calls for one (`extraction::plan`):
+    /// `Ok(None)` when it doesn't, `Err` with the reason when a manual build
+    /// is refused. The job's args carry the slice it reads.
     pub(crate) fn spawn_graph_job(
         self: &Arc<Self>,
         session_id: &str,
-        reason: &str,
-    ) -> Result<String, Error> {
-        let state = replay_state(&self.store.ops(session_id)?);
-        if state.open_jobs.iter().any(|j| j.kind == "graph") {
-            return Err(Error::Invalid(
-                "the graph builder is already running for this session".into(),
-            ));
-        }
-        let args = json!({ "sessionId": session_id, "reason": reason });
-        self.spawn_job(session_id, "graph", args, "graph build")
-    }
-
-    /// After `session_end`: build the graph once per session. A failure here
-    /// must never affect the close turn, so it is only logged.
-    pub(crate) fn spawn_graph_on_close(self: &Arc<Self>, session_id: &str) {
-        let Ok(ops) = self.store.ops(session_id) else {
-            return;
+        trigger: Trigger,
+    ) -> Result<Option<String>, Error> {
+        let _one = lock(&self.graph_spawn);
+        let Some(chunk) =
+            extraction::plan(&self.store.ops(session_id)?, trigger).map_err(Error::Invalid)?
+        else {
+            return Ok(None);
         };
-        if ops
-            .iter()
-            .any(|o| matches!(o, Op::Job(j) if j.kind == "graph"))
-        {
-            return; // once per session
-        }
-        if let Err(e) = self.spawn_graph_job(session_id, "close") {
-            tracing::warn!("graph build on close: {e}");
+        let args = json!({
+            "sessionId": session_id,
+            "reason": trigger.as_str(),
+            "after": chunk.after,
+            "through": chunk.through,
+        });
+        self.spawn_job(session_id, "graph", args, "graph build")
+            .map(Some)
+    }
+
+    /// After a tutor turn (`Turn`) or `session_end` (`Close`). A failure here
+    /// must never affect the turn, so it is only logged.
+    pub(crate) fn spawn_graph_after(self: &Arc<Self>, session_id: &str, trigger: Trigger) {
+        if let Err(e) = self.spawn_graph_job(session_id, trigger) {
+            tracing::warn!("graph build ({}): {e}", trigger.as_str());
         }
     }
 
-    /// Run the graph builder (role Librarian, `jobs/graph-builder.md`) until
-    /// `graph_submit` passes. The tool loop stays in memory; only the ops it
-    /// appends are kept, so nothing reaches the conversation.
-    async fn graph_body(self: &Arc<Self>, sid: &str) -> Result<Value, Error> {
+    /// After a done build: what is left gets the rules it would have got had
+    /// no build been running — the whole remainder once the session has
+    /// ended, otherwise the automatic threshold.
+    fn continue_graph(self: &Arc<Self>, sid: &str) {
+        let ended = self
+            .store
+            .ops(sid)
+            .map(|ops| replay_state(&ops).ended)
+            .unwrap_or(false);
+        self.spawn_graph_after(sid, if ended { Trigger::Close } else { Trigger::Turn });
+    }
+
+    /// Run the graph builder (role Librarian, `jobs/graph-builder.md`) over
+    /// the slice in `args` until `graph_submit` passes. The prompt lists the
+    /// slice's messages (after the session's compaction notes, when there
+    /// are any) and the builder reads each with `message_read`. The tool
+    /// loop stays in memory; only the ops it appends are kept, so nothing
+    /// reaches the conversation.
+    async fn graph_body(self: &Arc<Self>, sid: &str, args: &Value) -> Result<Value, Error> {
+        let chunk = Chunk::from_args(args).ok_or_else(|| {
+            Error::Invalid(
+                "this graph build was queued without the part of the session it reads".into(),
+            )
+        })?;
         let ops = self.store.ops(sid)?;
         let state = replay_state(&ops);
+        let items = replay::transcript_items(chunk.slice(&ops));
         let map = crate::knowledge::load(&self.repo)?;
         let composer = Composer::new(&self.repo);
         let mut values = TemplateValues::new();
+        let mut flags = HashSet::new();
         values.set("graph_summary", crate::graph::summary(&map));
         values.set(
-            "transcript",
-            crate::agent::clip(&replay::transcript(&ops), MAX_GRAPH_TRANSCRIPT),
+            "transcript_scope",
+            if chunk.after.is_some() {
+                "continuing after the parts earlier runs already extracted"
+            } else {
+                "from the start of the session"
+            },
         );
+        values.set("messages", message_list(&items));
+        if let Some(notes) = chunk.notes_before(&ops) {
+            flags.insert("compacted".to_owned());
+            values.set("compacted_context", notes);
+        }
         values.set("plan", plan_hint(&state));
-        let system = composer.compose_job("jobs/graph-builder.md", &values, &HashSet::new())?;
+        let system = composer.compose_job("jobs/graph-builder.md", &values, &flags)?;
         let tools = tools::graph_tools();
         let cache_key = format!("{sid}-graph");
         let mut messages = vec![Message::text(Role::User, "Begin the task.")];
-        for _ in 0..MAX_LOOP {
+        // Reading is one call per message at worst, on top of the usual loop.
+        for _ in 0..MAX_LOOP + items.len() {
             let reply = self
                 .call_role(
                     ModelRole::Librarian,
@@ -1021,12 +1047,18 @@ impl Harness {
                         None,
                     )
                 } else {
-                    self.graph_tool(sid, c)?
+                    self.graph_tool(sid, &items, c)?
                 };
                 let Exec::Done { content, is_error } = exec else {
                     continue;
                 };
-                self.append(sid, result_op(c, &content, is_error, Some("librarian")))?;
+                // A read message is already in the log: record which one,
+                // not a second copy of its text.
+                let logged = match (c.name.as_str(), is_error) {
+                    ("message_read", false) => format!("read message {}", c.arguments["index"]),
+                    _ => content.clone(),
+                };
+                self.append(sid, result_op(c, &logged, is_error, Some("librarian")))?;
                 results.push(ContentBlock::ToolResult {
                     call_id: c.id.clone(),
                     content,
@@ -1051,7 +1083,12 @@ impl Harness {
 
     /// Execute one graph-builder tool. The second value is the job's result
     /// when `graph_submit` was accepted — the run ends there.
-    fn graph_tool(&self, sid: &str, call: &ToolCall) -> Result<(Exec, Option<Value>), Error> {
+    fn graph_tool(
+        &self,
+        sid: &str,
+        items: &[replay::TranscriptItem],
+        call: &ToolCall,
+    ) -> Result<(Exec, Option<Value>), Error> {
         let name = call.name.as_str();
         let args = &call.arguments;
         if !args.is_object() {
@@ -1061,6 +1098,22 @@ impl Harness {
             ));
         }
         match name {
+            "message_read" => {
+                let item = args["index"]
+                    .as_u64()
+                    .and_then(|i| usize::try_from(i).ok()?.checked_sub(1))
+                    .and_then(|i| items.get(i));
+                Ok((
+                    match item {
+                        Some(item) => done(format!("{}:\n{}", item.label, item.text)),
+                        None => refuse(
+                            name,
+                            format!("`index` must be a message number from 1 to {}", items.len()),
+                        ),
+                    },
+                    None,
+                ))
+            }
             "graph_search" => match req_str(args, "query") {
                 Ok(query) => {
                     let map = crate::knowledge::load(&self.repo)?;
@@ -1245,11 +1298,32 @@ fn page_decision(scanned: bool, vision: Option<bool>) -> PageDecision {
 fn plan_hint(state: &SessionState) -> String {
     match &state.plan {
         Some(plan) => match serde_json::to_string_pretty(plan) {
-            Ok(text) => crate::agent::clip(&text, MAX_GRAPH_PLAN),
+            Ok(text) => text,
             Err(_) => "(the plan could not be rendered)".to_owned(),
         },
         None => "(no plan yet)".to_owned(),
     }
+}
+
+/// The builder's `{{messages}}`: one numbered line per message of its slice,
+/// with who wrote it and its length, for `message_read { index }`.
+fn message_list(items: &[replay::TranscriptItem]) -> String {
+    if items.is_empty() {
+        return "(no messages)".to_owned();
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            format!(
+                "{}. {} — {} characters",
+                i + 1,
+                item.label,
+                item.text.chars().count()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn assistant_message(text: &str, native: &[ContentBlock], calls: &[ToolCall]) -> Message {

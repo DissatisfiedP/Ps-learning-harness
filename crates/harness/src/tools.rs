@@ -607,11 +607,18 @@ pub fn researcher_tools() -> Vec<ToolSpec> {
     ]
 }
 
-/// The graph builder's tools (`jobs/graph-builder.md`): search the graph, then
-/// submit what the session established. `graph_submit` is validated by code
-/// (`graph::check`) and the run continues on a refusal.
+/// The graph builder's tools (`jobs/graph-builder.md`): read the session's
+/// messages, search the graph, then submit what the session established.
+/// `graph_submit` is validated by code (`graph::check`) and the run continues
+/// on a refusal.
 pub fn graph_tools() -> Vec<ToolSpec> {
     vec![
+        tool(
+            "message_read",
+            "Read one message of the list in full, by its number. Several calls may go in one reply.",
+            json!({ "index": { "type": "integer", "minimum": 1 } }),
+            &["index"],
+        ),
         tool(
             "graph_search",
             "Search the knowledge graph for candidate nodes and topics. Returns up to 20 matches with their ids, titles and home topics. Search for each proposition before deciding identity, and for the ideas it depends on.",

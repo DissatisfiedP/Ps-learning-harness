@@ -40,9 +40,22 @@ function metaText(s) {
 /** Read-only on this phone because the session used a desktop-only plugin (docs/sync-build.md, "Sessions on mobile"). */
 const isLocked = (s) => s.readOnly && s.readOnlyReason === 'desktop-plugin';
 
+/** "Extract" item note: why it is greyed, or how much it would read. */
+function extractNote(st) {
+  if (st.running) return 'Running now';
+  const n = st.uncoveredTokens.toLocaleString();
+  if (st.uncoveredTokens < st.manualTokens) return `${n} of ${st.manualTokens.toLocaleString()} new tokens needed`;
+  return `${n} new tokens`;
+}
+
 /**
  * @param {HTMLElement} root   container for the groups
- * @param {{ onOpen(id: string): void, onDelete(id: string): Promise<void> }} hooks
+ * @param {{
+ *   onOpen(id: string): void,
+ *   onDelete(id: string): Promise<void>,
+ *   onExtractStatus(id: string): Promise<{ uncoveredTokens: number, manualTokens: number, running: boolean }>,
+ *   onExtract(id: string): Promise<void>,
+ * }} hooks
  */
 export function createSessionList(root, hooks) {
   let sessions = []; // SessionSummary, newest first
@@ -54,7 +67,13 @@ export function createSessionList(root, hooks) {
     li.dataset.id = s.id;
     li.innerHTML = `
       <button class="session-open" type="button"><span class="session-title"></span><span class="session-meta"></span></button>
-      <button class="btn text session-delete" type="button" aria-live="polite">Delete</button>
+      <div class="session-more-wrap">
+        <button class="btn text session-more" type="button" aria-haspopup="menu" aria-expanded="false">…</button>
+        <div class="menu session-menu" role="menu" hidden>
+          <button class="menu-item session-extract" type="button" role="menuitem" disabled>Extract<span class="menu-note"></span></button>
+          <button class="menu-item session-delete" type="button" role="menuitem" aria-live="polite">Delete</button>
+        </div>
+      </div>
       <p class="session-status" role="status"></p>`;
     fillRow(li, s);
     return li;
@@ -65,7 +84,55 @@ export function createSessionList(root, hooks) {
     li.querySelector('.session-meta').textContent = metaText(s);
     // Dimmed but still openable: the session shows its lock note and "Continue here anyway".
     li.classList.toggle('locked', isLocked(s));
-    li.querySelector('.session-delete').setAttribute('aria-label', `Delete ${s.title || 'session'}`);
+    li.querySelector('.session-more').setAttribute('aria-label', `More actions for ${s.title || 'this session'}`);
+  }
+
+  // ---------- the row's "…" menu ----------
+
+  let openMenu = null; // the li whose menu is open
+
+  const menuItems = (li) => [...li.querySelectorAll('.session-menu [role="menuitem"]')].filter((b) => !b.disabled);
+
+  function disarm(del) {
+    clearTimeout(del._disarm);
+    del.classList.remove('armed');
+    del.textContent = 'Delete';
+  }
+
+  function closeMenu({ restoreFocus = false } = {}) {
+    const li = openMenu;
+    if (!li) return;
+    openMenu = null;
+    li.classList.remove('menu-open');
+    li.querySelector('.session-menu').hidden = true;
+    const more = li.querySelector('.session-more');
+    more.setAttribute('aria-expanded', 'false');
+    disarm(li.querySelector('.session-delete'));
+    if (restoreFocus) more.focus({ preventScroll: true });
+  }
+
+  /** Opens a row's menu; Extract stays greyed until its status says it may run. */
+  function openRowMenu(li, { focusFirst = false } = {}) {
+    closeMenu();
+    openMenu = li;
+    li.classList.add('menu-open');
+    li.querySelector('.session-menu').hidden = false;
+    li.querySelector('.session-more').setAttribute('aria-expanded', 'true');
+    const extract = li.querySelector('.session-extract');
+    const note = extract.querySelector('.menu-note');
+    extract.disabled = true;
+    note.textContent = 'Checking…';
+    if (focusFirst) menuItems(li)[0]?.focus({ preventScroll: true });
+    hooks
+      .onExtractStatus(li.dataset.id)
+      .then((st) => {
+        if (openMenu !== li) return;
+        note.textContent = extractNote(st);
+        extract.disabled = st.running || st.uncoveredTokens < st.manualTokens;
+      })
+      .catch((err) => {
+        if (openMenu === li) note.textContent = `Unavailable: ${err}`;
+      });
   }
 
   function groupEl(label, create) {
@@ -92,6 +159,7 @@ export function createSessionList(root, hooks) {
   }
 
   function render() {
+    openMenu = null;
     rows.clear();
     root.textContent = '';
     if (!sessions.length) {
@@ -176,9 +244,11 @@ export function createSessionList(root, hooks) {
   const newestLearn = () => sessions.find((x) => x.mode === 'learn' && !x.readOnly) ?? null;
   const openButton = (id) => rows.get(id)?.querySelector('.session-open') ?? null;
 
-  function setRowStatus(id, text) {
+  function setRowStatus(id, text, { error = true } = {}) {
     const p = rows.get(id)?.querySelector('.session-status');
-    if (p) p.textContent = text;
+    if (!p) return;
+    p.textContent = text;
+    p.classList.toggle('note', !error);
   }
 
   root.addEventListener('click', (e) => {
@@ -190,25 +260,68 @@ export function createSessionList(root, hooks) {
       hooks.onOpen(id);
       return;
     }
+    if (e.target.closest('.session-more')) {
+      if (openMenu === li) closeMenu();
+      else openRowMenu(li);
+      return;
+    }
+    if (e.target.closest('.session-extract')) {
+      closeMenu({ restoreFocus: true });
+      setRowStatus(id, 'Extracting into the map…', { error: false });
+      hooks.onExtract(id).then(
+        () => setRowStatus(id, 'Extracting into the map in the background.', { error: false }),
+        (err) => setRowStatus(id, `Couldn’t extract this session: ${err}`),
+      );
+      return;
+    }
     const del = e.target.closest('.session-delete');
     if (!del) return;
-    // Two presses: the first arms the button for a few seconds.
+    // Two presses: the first arms the item for a few seconds.
     if (!del.classList.contains('armed')) {
       del.classList.add('armed');
       del.textContent = 'Delete? Press again';
       clearTimeout(del._disarm);
-      del._disarm = setTimeout(() => {
-        del.classList.remove('armed');
-        del.textContent = 'Delete';
-      }, ARM_MS);
+      del._disarm = setTimeout(() => disarm(del), ARM_MS);
       return;
     }
-    clearTimeout(del._disarm);
+    closeMenu();
     hooks.onDelete(id).catch((err) => {
-      del.classList.remove('armed');
-      del.textContent = 'Delete';
       setRowStatus(id, `Couldn’t delete this session: ${err}`);
     });
+  });
+
+  root.addEventListener('keydown', (e) => {
+    const li = e.target.closest('.session');
+    if (!li) return;
+    if (e.target.closest('.session-more')) {
+      if (e.key === 'ArrowDown' || ((e.key === 'Enter' || e.key === ' ') && openMenu !== li)) {
+        e.preventDefault();
+        openRowMenu(li, { focusFirst: true });
+      } else if (e.key === 'Escape') {
+        closeMenu();
+      }
+      return;
+    }
+    if (!e.target.closest('.session-menu')) return;
+    const items = menuItems(li);
+    const index = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next = e.key === 'ArrowDown' ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+      items[next]?.focus({ preventScroll: true });
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      items[e.key === 'Home' ? 0 : items.length - 1]?.focus({ preventScroll: true });
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMenu({ restoreFocus: true });
+    } else if (e.key === 'Tab') {
+      closeMenu();
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (openMenu && !openMenu.querySelector('.session-more-wrap').contains(e.target)) closeMenu();
   });
 
   return { render, upsert, bump, remove, reset, has, get, newest, newestLearn, openButton, setRowStatus };
