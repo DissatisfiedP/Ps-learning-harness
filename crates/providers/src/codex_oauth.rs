@@ -28,6 +28,10 @@ pub const CALLBACK_PATH: &str = "/auth/callback";
 pub const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 pub const BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const ORIGINATOR: &str = "codex_cli_rs";
+/// Codex CLI release whose model catalog we request. The backend's `/models`
+/// drops every preset whose `minimal_client_version` is above this, so our own
+/// crate version (0.1.0) gets an empty list. Bump with new Codex releases.
+pub const CLIENT_VERSION: &str = "0.161.0";
 /// How long the loopback listener waits for the browser.
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Claim namespace OpenAI puts the ChatGPT account id under.

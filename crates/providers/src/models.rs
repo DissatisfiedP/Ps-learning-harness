@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    claude_oauth, workbuddy, Capabilities, Client, Credential, ModelInfo, ProviderError, ProviderId,
+    claude_oauth, codex_oauth, workbuddy, Capabilities, Client, Credential, ModelInfo,
+    ProviderError, ProviderId,
 };
 
 /// A hung catalog call must not block Settings.
@@ -26,8 +27,6 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// Anthropic pages at up to 1000 models per request; ten pages is far more
 /// than any account has.
 const MAX_PAGES: usize = 10;
-/// Codex's `/models` filters the presets by client version.
-const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const APP_USER_AGENT: &str = concat!("ps-learning-harness/", env!("CARGO_PKG_VERSION"));
 
 /// Effort levels in the order the providers report them.
@@ -120,7 +119,10 @@ pub async fn list(
             Ok(out)
         }
         ProviderId::OpenaiCodex => {
-            let url = format!("{base}/models?client_version={CLIENT_VERSION}");
+            let url = format!(
+                "{base}/models?client_version={}",
+                codex_oauth::CLIENT_VERSION
+            );
             let body = get(client, &url, &headers).await?;
             Ok(models_array(&body)?
                 .iter()
@@ -230,12 +232,12 @@ fn openai_model(m: &Value, chat_only: bool) -> Option<ModelInfo> {
     })
 }
 
-/// Codex `/models` preset (`{ "models": [ { "slug": … } ] }`).
+/// Codex `/models` preset (`{ "models": [ { "slug": … } ] }`). Sign-in is
+/// always ChatGPT, where the Codex CLI keeps presets with
+/// `supported_in_api: false` (that flag gates API-key use only).
 fn codex_model(m: &Value) -> Option<ModelInfo> {
     let id = str_at(m, "/slug")?;
-    if bool_at(m, "/supported_in_api") == Some(false)
-        || matches!(str_at(m, "/visibility").as_deref(), Some("hide" | "hidden"))
-    {
+    if matches!(str_at(m, "/visibility").as_deref(), Some("hide" | "hidden")) {
         return None;
     }
     let efforts = m
@@ -576,15 +578,15 @@ mod tests {
                 "supported_in_api": true
             },
             { "slug": "hidden-one", "visibility": "hide", "supported_in_api": true },
-            { "slug": "not-in-api", "visibility": "list", "supported_in_api": false }
+            { "slug": "chatgpt-only", "visibility": "list", "supported_in_api": false }
         ]});
         let models: Vec<ModelInfo> = models_array(&body)
             .unwrap()
             .iter()
             .filter_map(codex_model)
             .collect();
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "gpt-6-astra");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-6-astra", "chatgpt-only"]);
         assert_eq!(models[0].context_window, Some(272_000));
         assert_eq!(models[0].capabilities.vision, Some(true));
         assert_eq!(models[0].efforts, ["low", "high"]);
