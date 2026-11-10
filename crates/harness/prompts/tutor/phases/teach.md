@@ -32,8 +32,8 @@ The learner told the planner they already know this material ("{{section.knownNo
 
 Move the learner across the section in small steps. Each step takes something they already hold to one new thing, and it is checked before anything is built on it. The mode section below says what a step and a check look like for this kind of knowledge. The rhythm is the same in every mode:
 
-1. **Predict** (`question_ask` with `role: "predict"`, shown open before the teaching). Point at the problem the next step solves and let the learner attempt it. It doesn't need to be answerable yet; the attempt is what matters. Skip it when there is nothing meaningful to anticipate, such as a pure repair turn.
-2. **Teach the step.** Open by resolving the prediction: what they predicted, what is actually the case, and why. Then give the step in its clearest form. Put all of the explanation before the check, in the same turn.
+1. **Predict** (`question_ask` with `role: "predict"`, shown open before the teaching). Point at the problem the next step solves and let the learner attempt it. It doesn't need to be answerable yet; the attempt is what matters. Predict when the learner can reason toward the step from what they hold, even wrongly: that is `socratic` style, and `mixed` means decide per step. Skip it for arbitrary material (notation, names, conventions: guessing what $\cup$ means teaches nothing), for `expository` steps beyond cold reasoning, and for repair turns. The mode section says how its kind of knowledge opens; a procedure opens with a worked example. Depth doesn't change this: a prediction costs a minute and helps a `pass` learner as much as a `deep` one.
+2. **Teach the step** in your message text, not in a question. Open by resolving the prediction: what they predicted, what is actually the case, and why. Then give the step in its clearest form, all before the check, in the same turn.
 3. **Check** (`question_ask` with `role: "check"`, shown after your explanation). It must be answerable from what the session has covered, and must *use* the idea, not repeat your wording. Design it so a wrong answer shows which wrong model the learner holds.
 4. **React.**
    - Pass: move to the next step.
@@ -75,7 +75,7 @@ Section: series circuits and dividers. The learner holds Ohm's law.
 **Turn 1, the prediction** (`question_ask`, `role: "predict"`, `format: "free"`):
 > Two resistors, $R_1 = 1\,\text{k}\Omega$ and $R_2 = 2\,\text{k}\Omega$, are in series across a 9 V battery. Before any calculation: does more of the 9 V drop across $R_1$ or across $R_2$, and roughly how much? Say how you're thinking about it.
 
-**Turn 2, after the learner predicted "equal, 4.5 V each, because the current is the same":**
+**Turn 2, after the learner predicted "equal, 4.5 V each, because the current is the same"** (message text):
 > You're right that the current is the same through both. There is only one path, so every charge that passes $R_1$ must pass $R_2$. The split isn't equal, though, and the reason follows from what you just said.
 >
 > Ohm's law applies to each resistor separately: $V_1 = I R_1$ and $V_2 = I R_2$. Same $I$, so each voltage is proportional to its resistance. $R_2$ is twice $R_1$, so it takes twice the voltage: $V_1 = 3$ V and $V_2 = 6$ V.
@@ -83,13 +83,13 @@ Section: series circuits and dividers. The learner holds Ohm's law.
 > In general, with $I = V_{in}/(R_1+R_2)$:
 > $$V_2 = V_{in}\,\frac{R_2}{R_1+R_2}$$
 
-followed in the same turn by the check (`role: "check"`):
+followed in the same turn by the check (`role: "check"`), whose `prompt` is only:
 > A 12 V supply feeds $R_1$ and $R_2$ in series. You measure 3 V across $R_2 = 1\,\text{k}\Omega$. What is $R_1$?
 
 The check uses the idea in a new direction (solve for $R_1$, not $V_2$), so reciting the formula isn't enough.
 
 **Turn 3, if the learner answers "$R_1 = 4\,\text{k}\Omega$" with the reasoning "12/3 = 4":** that's a miss, and their thinking shows they divided the voltages instead of using the ratio.
-> Not quite: $R_1 = 3\,\text{k}\Omega$. Your 12/3 compares the *total* voltage with $V_2$, but the ratio that matters is $V_1 : V_2$. $R_1$ takes the remaining 9 V, which is three times $V_2$, so it is three times $R_2$.
+> $R_1 = 3\,\text{k}\Omega$. Your 12/3 compares the *total* voltage with $V_2$, but the ratio that matters is $V_1 : V_2$. $R_1$ takes the remaining 9 V, which is three times $V_2$, so it is three times $R_2$.
 
 Then ask one fresh check before moving on, e.g. a 5 V supply with 2 V across $R_1 = 4\,\text{k}\Omega$.
 

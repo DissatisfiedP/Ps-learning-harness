@@ -16,7 +16,7 @@ The graph as it is now — topics, then up to 200 node ids, homes and titles, th
 
 {{graph_summary}}
 
-The session's plan, as a hint about what was being taught (not a constraint):
+The session's plan, as a hint about what was being taught (not a constraint, and never a source of claims or names):
 
 {{plan}}
 
@@ -42,11 +42,22 @@ Nodes already carry ids. Reuse an existing id to correct a claim you have just r
 
 ## 1. Extract
 
+The graph holds the field's knowledge as the learner was taught it, not a record of the session. Extract a claim only when the **tutor taught it** in the conversation: explained it in its messages or question prompts, or corrected the learner toward it during teaching.
+
+Not sources, however much they say:
+- **Measuring.** Everything before `probe_done`, and every `role: "probe"` question with its feedback, measures what the learner already held. A correction given while probing is not teaching; the plan teaches it later.
+- **What the learner never saw:** a question's committed `answer`, a `verdict_record` note, `probe_done`, the plan and its notes, research briefs (`[research brief] …`) and the past papers or files they describe. Use them to understand the conversation, never as claims.
+- **Exercises.** A specific problem and its answer ("the inverse of $\frac{3^x+3^{-x}}{2}$ is …", "$27^{-2/3}=1/9$") is practice, not knowledge. Extract the general rule it exercised, if the tutor taught that rule, and never reuse the exercise or its numbers as the rule's example.
+- **Local conventions and logistics:** what one course, teacher or exam uses ("in this course log is base 10"), mark schemes, exam formats, study advice.
+
 A proposition is one self-contained claim the learner could hold, stated so someone who never saw the session understands it.
-- No pointers into the session ("this", "the above", "step 3", "our example") and no variable names local to the lesson.
+- No pointers into the session ("this", "the above", "step 3", "our example"), no variable names local to the lesson, and no course, exam or session names.
+- State the general claim. When it is hard to read without an illustration, use a fresh, minimal one of your own, never one from the session.
 - **Atomic.** Split "A, and therefore B" into A, B and the relation between them.
 - **Load-bearing.** Keep it only if the session's reasoning ran through it or it was a fact the learner was meant to keep. Drop examples nothing depends on, restatements and asides.
 - Extract only what was actually **established**. Where the tutor corrected something, extract the corrected version. What the learner believed wrongly is not a node.
+
+A session that only measured, or taught nothing general, gets the empty submission `{}`.
 
 For each proposition give: `nodeId` (a lowercase slug), `statement` (math in LaTeX), `kind`, `home`, and `title` when the statement is long.
 
@@ -62,8 +73,10 @@ They are **different** when one is a special case or a generalisation of the oth
 
 ## 3. Home
 
+Topics name **the field, never the session.** The tree is the subject's own hierarchy, from a broad discipline down: `Mathematics › Calculus › Limits`, `Mathematics › Algebra › Inequalities`, `Physics › Electricity › Circuits`. A course code, exam, goal, plan section title, learner or date never appears in a topic title, and neither does "mid-term", "review" or "toolkit". Two sessions on the same subject from different courses land in the same topics.
+
 Each new claim gets exactly one home: the most specific existing topic whose nodes a learner would study alongside it. Physics claims live under physics even when they are mostly mathematics; their dependence on the maths is an edge, not a placement.
-Create a topic only when nothing fits: `topics: [{ topicId, title, parent }]` with `parent` an existing or submitted topic id (omit it for a root). Then place claims there by giving that id as their `home`.
+Create a topic only when nothing fits: `topics: [{ topicId, title, parent }]` with `parent` an existing or submitted topic id (omit it for a root, which is a discipline such as Mathematics). Reuse an existing root rather than starting a second one for the same discipline. `topicId` is a slug of the field's name (`calculus-limits`), never of the course. Then place claims there by giving that id as their `home`. A topic with no claims of its own is only for grouping subtopics; don't create one empty leaf.
 
 ## 4. Edges and chains
 

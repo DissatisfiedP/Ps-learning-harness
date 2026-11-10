@@ -598,9 +598,10 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   /**
    * Cluster titles are screen-space: pinned inside the stage at a fixed size,
    * so the whole-map view still says which topic sits where (a world-space
-   * title shrinks to nothing at that zoom). They are placed above their
-   * cluster, else below it, and dropped rather than overprinted when neither
-   * fits — zooming in separates the clusters and brings them back. `titleBox`
+   * title shrinks to nothing at that zoom). A title reads as the heading of
+   * the ideas under it, so it is only ever placed above its cluster, and
+   * dropped rather than overprinted when that doesn't fit — zooming in
+   * separates the clusters and brings it back. `titleBox`
    * is screen space: the click hit test compares pointer coordinates.
    */
   function drawClusterTitles() {
@@ -620,19 +621,15 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
       const lineH = 20;
       const height = c.lines.length * lineH + (sub ? 20 : 0) + 4;
       const top = toScreen(c.cx, c.y0).y;
-      const bottom = toScreen(c.cx, c.y1).y;
       const x = clamp(toScreen(c.cx, c.y0).x, totalW / 2 + 10, Math.max(totalW / 2 + 10, W - totalW / 2 - 10));
       const boxFor = (y0) => ({ x0: x - totalW / 2, x1: x + totalW / 2, y0, y1: y0 + height });
       const hits = (b) => placed.some((p) => p.x0 < b.x1 && b.x0 < p.x1 && p.y0 < b.y1 && b.y0 < p.y1);
       // A title may not sit on another cluster's ideas either: the map's job at
       // this zoom is to show where each topic is, not to overprint it.
       const clears = (b) => !nodePts.some((p) => p.x > b.x0 - 6 && p.x < b.x1 + 6 && p.y > b.y0 - 6 && p.y < b.y1 + 6);
-      const candidates = [
-        boxFor(top - 10 - height),
-        boxFor(bottom + 12),
-        boxFor(top - 10 - 2 * height - 8),
-        boxFor(bottom + 12 + height + 8),
-      ].filter((b) => b.y0 > 52 && b.y1 < H - 8);
+      const candidates = [boxFor(top - 10 - height), boxFor(top - 10 - 2 * height - 8)].filter(
+        (b) => b.y0 > 52 && b.y1 < H - 8,
+      );
       const box = c === focusCluster ? (candidates[0] ?? null) : (candidates.find((b) => !hits(b) && clears(b)) ?? null);
       if (!box) {
         c.titleBox = null;

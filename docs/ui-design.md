@@ -638,12 +638,12 @@ Answered state (fill removed; becomes part of the page):
  │ It approaches 2.                              ← learner style; reasoning below in --ink-3 if given
  │ Reasoning: slope of tangent is 2x
  │ Fairly sure (≈70%)
- ✓ Correct. You were Fairly sure.                ← verdict line, --font-ui 600 --ink
- The slope of the tangent at x = 1 is 2 …        ← verdict note + explanation, --font-read
+ ✓ Correct.                                      ← verdict line, --font-ui 600 --ink
+ The slope of the tangent at x = 1 is 2 …        ← args.explanation, when the question has one, --font-read
 ```
 
 - Verdict words are unchanged ("Correct", "Partly right", "Not quite"). Each gets a leading glyph `✓` / `◐` / `✗` (`aria-hidden`), always in `--ink`. No green/red, no pill.
-- The verdict sentence appends the confidence: "You were ⟨label⟩." With `dontKnow`, it reads "You said you didn't know."
+- The verdict line is the verdict alone. The answer, reasoning and confidence sit right above it, so it doesn't repeat them. The `verdict_record` note is the tutor's diagnosis for the planner, compaction and its own later turns, and is never rendered; the tutor's reaction to the answer arrives as its next message, below the block.
 - **Before a free-recall verdict arrives:** the line "Waiting for feedback." in `--ink-3` (static). It is replaced in place when `verdict_record` arrives (`rerenderItem`, unchanged).
 - **Read-only unanswered:** the prompt plus "Not answered." in `--ink-3`.
 - **Failed tool call** (`item.failed`): not rendered (unchanged).
@@ -1221,9 +1221,11 @@ home position):
 
 **Cluster titles are screen-space labels.** Drawn at a fixed 16px/13px in the canvas rather than in
 world units, so a zoomed-out view still says which topic sits where; each is pinned inside the
-stage and placed above its cluster, else below it, else one title-height further out, and is
-**dropped rather than overprinted** when it would collide with another title or with another
-topic's claim. Zooming in separates the clusters and the dropped titles return.
+stage and placed above its cluster, else one title-height further up, and never below it: a title
+reads as the heading of the ideas under it, and one under its cluster looked like a topic with no
+ideas (owner report, 2026-11-10). It is **dropped rather than overprinted** when it would collide
+with another title or with another topic's claim. Zooming in separates the clusters and the
+dropped titles return.
 
 **Interaction.**
 
@@ -2041,7 +2043,7 @@ Use the mocked backend: serve `ui/` with `index.html` patched to load a `window.
 - [ ] E2 For a pending question, `document.body.innerText` does not contain the mock `args.answer` (use a distinctive answer string).
 - [ ] E3 No confidence radio is checked initially. Submitting with an answer but no confidence shows "How sure are you? Pick one." and does not call `answer`.
 - [ ] E4 Choosing "Fairly sure" and submitting calls `answer` with `confidence: 70`. "I don't know — show me" calls `answer` with `dontKnow: true` and no `confidence`. Check via `__mock.calls`.
-- [ ] E5 After a `verdict_record`, the block shows "✓ Correct. You were Fairly sure." and the explanation, in ink color, with no pill.
+- [ ] E5 After a `verdict_record`, the block shows "✓ Correct." (no confidence echo, no `note`) and the explanation, in ink color, with no pill.
 - [ ] E6 A choice card with `recommended` shows "(suggested)", and no option is preselected.
 - [ ] E7 Focus lands in the answer field when the question arrives while focus was in the composer, and `scrollTop` did not change.
 

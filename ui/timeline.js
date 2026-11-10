@@ -7,7 +7,7 @@
 //   user / assistant  { msg }
 //   notice            { text, error? }               plan-notice messages
 //   job               { jobId, jobKind, state, question, error, result, brief }
-//   question          { callId, args, answer, failed, verdict, note }
+//   question          { callId, args, answer, failed, verdict }
 //   choice            { callId, args, answer, failed }
 //   divider           { text }                       compaction
 //   section           { sectionId, close, plan }     UI-only, from `phase` ops
@@ -177,7 +177,7 @@ function applyTool(tl, op) {
   const args = op.args ?? {};
   if (op.name === 'question_ask' || op.name === 'choice_ask') {
     const item = op.name === 'question_ask'
-      ? { kind: 'question', key, callId: op.callId, args, answer: null, failed: null, verdict: null, note: null }
+      ? { kind: 'question', key, callId: op.callId, args, answer: null, failed: null, verdict: null }
       : { kind: 'choice', key, callId: op.callId, args, answer: null, failed: null };
     tl.lastExercise = item;
     return add(tl, item);
@@ -186,7 +186,6 @@ function applyTool(tl, op) {
     const item = tl.byKey.get(`call:${args.questionId}`);
     if (!item) return null;
     item.verdict = args.verdict ?? item.verdict;
-    item.note = args.note ?? item.note;
     return { updated: item };
   }
   if (op.name === 'hunt_send') {

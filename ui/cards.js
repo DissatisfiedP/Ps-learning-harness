@@ -197,10 +197,6 @@ const CONFIDENCE = [
 
 export const verdictText = (verdict) => VERDICT[verdict]?.text ?? verdict;
 
-function confidenceLabel(n) {
-  return CONFIDENCE.find(([v]) => v === n)?.[1] ?? `${n}% sure`;
-}
-
 function confidenceLine(a) {
   // With no typed answer the answer line already says "I don't know."
   if (a.dontKnow) return a.answer ? 'I don’t know' : '';
@@ -220,20 +216,17 @@ function exerciseShell(kicker, pending) {
   return block;
 }
 
+// The verdict alone: the learner's answer and confidence sit right above it,
+// and the tutor's reaction follows in its own message. The `verdict_record`
+// note is the tutor's diagnosis for the planner and later turns, not shown.
 function verdictLine(item) {
-  const a = item.answer;
   const v = VERDICT[item.verdict];
   const p = h('p', 'verdict');
   p.tabIndex = -1;
   p.dataset.refocus = '';
   const glyph = h('span', 'glyph', `${v?.glyph ?? '•'} `);
   glyph.setAttribute('aria-hidden', 'true');
-  const sure = a.dontKnow
-    ? ' You said you didn’t know.'
-    : typeof a.confidence === 'number'
-      ? ` You were ${confidenceLabel(a.confidence)}.`
-      : '';
-  p.append(glyph, document.createTextNode(`${v?.text ?? item.verdict}.${sure}`));
+  p.append(glyph, document.createTextNode(`${v?.text ?? item.verdict}.`));
   return p;
 }
 
@@ -376,7 +369,6 @@ export function questionCard(item, { onAnswer, readOnly, ctx = {} }) {
       block.append(youBlock([[viewAnswerSummary(item.answer.answer), 'you-text']]));
       if (item.verdict) {
         block.append(verdictLine(item));
-        if (item.note) block.append(prose(item.note, 'prose feedback'));
         if (args.explanation) block.append(prose(args.explanation, 'prose feedback'));
       } else {
         const wait = h('p', 'waiting', 'Waiting for feedback.');
@@ -403,7 +395,6 @@ export function questionCard(item, { onAnswer, readOnly, ctx = {} }) {
     );
     if (item.verdict) {
       block.append(verdictLine(item));
-      if (item.note) block.append(prose(item.note, 'prose feedback'));
       if (args.explanation) block.append(prose(args.explanation, 'prose feedback'));
     } else {
       const wait = h('p', 'waiting', 'Waiting for feedback.');

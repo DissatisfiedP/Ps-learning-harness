@@ -137,7 +137,7 @@ Tools are scoped by agent and phase. A tool that is absent is never described to
 |---|---|---|
 | `choice_ask` | tutor (all phases) | `{ question, options[], recommended? }` → a choice or free text |
 | `question_ask` | tutor: measure (`probe`), teach (`predict`, `check`) | `{ role, nodeId?, strand?, format: free \| choice, prompt, options?, answer, explanation?, view? }` → `{ questionId, answer, thinking, thinkingWhileReading?, confidence?, dontKnow, verdict? }`. `questionId` is the id `verdict_record` and `probe_done.evidence` use. In teach, `nodeId` must be in the current section. With `levels`: `level: explain \| use \| analyze \| design`, in every phase schema's `required` list; the gate refuses a `probe` or `check` without one. `view: { artifactId, task, target }` makes an artifact's view the answer surface: refused unless `task` is non-empty, `target` is an object, the artifact is in this session, its plugin is installed **and enabled**, lists this device's platform, and its view has `answer = true`. `target` is the grading target, committed in the call op and never shown. A view question's result is `{ questionId, artifactId, answer, view }`: `answer` is what the view submitted, `view` the plugin's `grade` result (`{ correct, detail }`); `verdict_record` is still yours |
-| `verdict_record` | tutor: measure, teach | `{ questionId, verdict: correct \| partial \| wrong, note }` |
+| `verdict_record` | tutor: measure, teach | `{ questionId, verdict: correct \| partial \| wrong, note }`. `note` is the tutor's diagnosis for the planner, compaction and its own later turns; the UI shows only the verdict, and the tutor's reaction to the answer is its next message text |
 | `workspace_write` | tutor: teach, only when a workspace is attached | `{ path, content }` → `Wrote <path> (<n> bytes) in the workspace. The learner may edit it in their own editor; re-read before relying on it.` `path` is relative to the workspace; folders are created; nothing is ever deleted; text only (binary extensions refused), ≤ 256 KiB; an existing file is overwritten only when its sha256 matches your last `file_read` or `workspace_write` of it, otherwise the error tells you to `file_read` first. Called on a device with no folder for the session (e.g. one attached on another device): refused with "no workspace is attached to this session" |
 | `research_request` | tutor, coach (all phases) | `{ kind: verify \| scope, question, context }` or `{ kind: source, path, question }` → ack; the brief arrives as a message. Several can run at once |
 | `research` | planner | Same arguments; **blocks** and returns the brief as the tool result |
@@ -225,10 +225,10 @@ The learner's attachments are readable through `file_find` / `file_read`: home, 
 
 | File | Ceiling | File | Ceiling |
 |---|---|---|---|
-| `shared/voice.md` | 127 | `tutor/base.md` | 1183 |
+| `shared/voice.md` | 150 | `tutor/base.md` | 1183 |
 | `shared/accuracy.md` | 174 | `tutor/phases/measure.md` | 1595 |
-| `shared/learner-signals.md` | 406 | `tutor/phases/teach.md` | 1730 |
-| `shared/questions.md` | 662 | `tutor/hunt.md` | 690 |
+| `shared/learner-signals.md` | 406 | `tutor/phases/teach.md` | 1809 |
+| `shared/questions.md` | 733 | `tutor/hunt.md` | 690 |
 | `shared/formatting.md` | 216 | `tutor/modes/argument.md` | 463 |
 | `shared/learner-files.md` | 228 | `tutor/modes/fact.md` | 378 |
 | `shared/workspace.md` | 122 | `tutor/modes/mechanism.md` | 460 |
@@ -236,8 +236,10 @@ The learner's attachments are readable through `file_find` / `file_read`: home, 
 | `planner/exam.md` | 351 | `tutor/modes/procedure.md` | 483 |
 | `coach/base.md` | 1676 | `practice.md` | 326 |
 | `compaction.md` | 288 | `jobs/researcher.md` | 1021 |
-| `jobs/graph-builder.md` | 1070 | `jobs/topic-splitter.md` | 198 |
+| `jobs/graph-builder.md` | 1902 | `jobs/topic-splitter.md` | 198 |
 | `jobs/problem-checker.md` | 244 | `jobs/demo-builder.md` | 367 (302 + the moved demo brief rules) |
 | `jobs/figure-maker.md` | 252 (210 + the moved figure brief rules) | | |
 
 Raised on 2026-11-07 for the learning-system blocks: `planner/base.md` (the `plan_ask` run-end rule, unmeasured strands), `tutor/phases/teach.md` (verbatim calibration, the field-guide breakdown), `tutor/hunt.md` (exact `lookAt` kinds), `jobs/researcher.md` (ask vs discussion venues).
+
+Raised on 2026-11-10 for answer feedback placement: `shared/voice.md` (address the learner, don't echo the screen), `shared/questions.md` (the prompt holds only the question; the `---` separator; the private verdict note), `tutor/phases/teach.md` (when a step opens with a prediction). Same day, `jobs/graph-builder.md` (already 1542 against 1070; now what is not a source of claims, and field-named topics).

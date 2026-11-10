@@ -46,7 +46,7 @@ fn question_ask(roles: &[&str], teach: bool) -> ToolSpec {
     let mut props = json!({
         "role": { "type": "string", "enum": roles },
         "format": { "type": "string", "enum": ["free", "choice"] },
-        "prompt": { "type": "string" },
+        "prompt": { "type": "string", "description": "The question alone: the task and the data it needs. Feedback on the last answer and any teaching go in your message text before this call, never here." },
         "options": strings(),
         "answer": { "type": "string", "description": "Your committed answer; for choice format, the exact text of the correct option." },
         "explanation": { "type": "string" },
@@ -80,11 +80,11 @@ fn question_ask(roles: &[&str], teach: bool) -> ToolSpec {
 fn verdict_record() -> ToolSpec {
     tool(
         "verdict_record",
-        "Record your verdict on a free-recall answer, judged strictly against your committed answer.",
+        "Record your verdict on a free-recall answer, judged strictly against your committed answer. The learner sees only the verdict; say what they need in your message text.",
         json!({
             "questionId": { "type": "string" },
             "verdict": { "type": "string", "enum": ["correct", "partial", "wrong"] },
-            "note": { "type": "string" }
+            "note": { "type": "string", "description": "Your diagnosis for the record, never shown to the learner: what was present, what was missing, which wrong model shows. Read by the planner and your later turns." }
         }),
         &["questionId", "verdict", "note"],
     )
