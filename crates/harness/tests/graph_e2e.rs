@@ -153,7 +153,7 @@ async fn teaching_is_extracted_in_parts_as_the_session_goes() {
         Reply::Calls(
             "",
             vec![
-                ("r1", "message_read", json!({"index": 2})),
+                ("r1", "message_read", json!({"from": 1})),
                 ("r2", "message_read", json!({"index": 3})),
             ],
         ),
@@ -188,13 +188,16 @@ async fn teaching_is_extracted_in_parts_as_the_session_goes() {
     );
     assert!(!second.contains("3. "), "only the new part: {second}");
     let read = tool_message(&requests[2], "r1").unwrap();
-    assert!(read.starts_with("Tutor:\nSECOND PART"), "{read}");
+    assert!(
+        read.starts_with("1. Learner:\nGo on.\n\n2. Tutor:\nSECOND PART"),
+        "the whole list in one read: {read}"
+    );
     let out_of_range = tool_message(&requests[2], "r2").unwrap();
-    assert!(out_of_range.contains("from 1 to 2"), "{out_of_range}");
-    // The log records which message was read, not a second copy of it.
+    assert!(out_of_range.contains("1 to 2"), "{out_of_range}");
+    // The log records which messages were read, not a second copy of them.
     let logged = results(&h, &id, "message_read");
     assert!(
-        logged.iter().any(|(text, _)| text == "read message 2"),
+        logged.iter().any(|(text, _)| text == "read messages 1–2"),
         "{logged:?}"
     );
     assert_eq!(h.knowledge_map().unwrap().nodes.len(), 2, "the same ids");

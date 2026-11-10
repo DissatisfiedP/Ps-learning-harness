@@ -1010,8 +1010,8 @@ impl Harness {
         let tools = tools::graph_tools();
         let cache_key = format!("{sid}-graph");
         let mut messages = vec![Message::text(Role::User, "Begin the task.")];
-        // Reading is one call per message at worst, on top of the usual loop.
-        for _ in 0..MAX_LOOP + items.len() {
+        // Reading takes a step or two (`message_read` takes a range).
+        for _ in 0..MAX_LOOP + 2 {
             let reply = self
                 .call_role(
                     ModelRole::Librarian,
@@ -1052,10 +1052,14 @@ impl Harness {
                 let Exec::Done { content, is_error } = exec else {
                     continue;
                 };
-                // A read message is already in the log: record which one,
-                // not a second copy of its text.
+                // Read messages are already in the log: record which ones,
+                // not a second copy of their text.
                 let logged = match (c.name.as_str(), is_error) {
-                    ("message_read", false) => format!("read message {}", c.arguments["index"]),
+                    ("message_read", false) => match message_range(items.len(), &c.arguments) {
+                        Ok((from, to)) if from == to => format!("read message {from}"),
+                        Ok((from, to)) => format!("read messages {from}–{to}"),
+                        Err(_) => content.clone(),
+                    },
                     _ => content.clone(),
                 };
                 self.append(sid, result_op(c, &logged, is_error, Some("librarian")))?;
@@ -1098,22 +1102,21 @@ impl Harness {
             ));
         }
         match name {
-            "message_read" => {
-                let item = args["index"]
-                    .as_u64()
-                    .and_then(|i| usize::try_from(i).ok()?.checked_sub(1))
-                    .and_then(|i| items.get(i));
-                Ok((
-                    match item {
-                        Some(item) => done(format!("{}:\n{}", item.label, item.text)),
-                        None => refuse(
-                            name,
-                            format!("`index` must be a message number from 1 to {}", items.len()),
-                        ),
-                    },
-                    None,
-                ))
-            }
+            "message_read" => Ok((
+                match message_range(items.len(), args) {
+                    Ok((from, to)) => done(
+                        (from..=to)
+                            .map(|n| {
+                                let item = &items[n - 1];
+                                format!("{n}. {}:\n{}", item.label, item.text)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                    ),
+                    Err(why) => refuse(name, why),
+                },
+                None,
+            )),
             "graph_search" => match req_str(args, "query") {
                 Ok(query) => {
                     let map = crate::knowledge::load(&self.repo)?;
@@ -1305,8 +1308,30 @@ fn plan_hint(state: &SessionState) -> String {
     }
 }
 
+/// The messages a `message_read` call asks for, as 1-based inclusive
+/// numbers: `{ index }` for one, `{ from, to }` for a range (`to` defaults
+/// to the last message). `Err` says what a valid call looks like.
+fn message_range(count: usize, args: &Value) -> Result<(usize, usize), String> {
+    let number = |key: &str| args.get(key).and_then(Value::as_u64).map(|n| n as usize);
+    let (from, to) = match (number("index"), number("from")) {
+        (Some(i), None) => (i, i),
+        (None, Some(from)) => (from, number("to").unwrap_or(count)),
+        _ => {
+            return Err(format!(
+                "give `index` for one message or `from` (and `to`) for a range; the messages are numbered 1 to {count}"
+            ))
+        }
+    };
+    if from == 0 || from > to || to > count {
+        return Err(format!(
+            "{from}–{to} is not a range of messages; they are numbered 1 to {count}"
+        ));
+    }
+    Ok((from, to))
+}
+
 /// The builder's `{{messages}}`: one numbered line per message of its slice,
-/// with who wrote it and its length, for `message_read { index }`.
+/// with who wrote it and its length, for `message_read`.
 fn message_list(items: &[replay::TranscriptItem]) -> String {
     if items.is_empty() {
         return "(no messages)".to_owned();
@@ -1480,6 +1505,28 @@ async fn planner_file_tool(name: &str, args: &Value) -> Exec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_read_takes_one_message_or_a_range_inside_the_list() {
+        assert_eq!(message_range(5, &json!({"index": 3})), Ok((3, 3)));
+        assert_eq!(message_range(5, &json!({"from": 2, "to": 4})), Ok((2, 4)));
+        assert_eq!(
+            message_range(5, &json!({"from": 2})),
+            Ok((2, 5)),
+            "to the end"
+        );
+        for bad in [
+            json!({"index": 0}),
+            json!({"index": 6}),
+            json!({"from": 4, "to": 2}),
+            json!({"from": 1, "to": 9}),
+            json!({}),
+            json!({"index": 1, "from": 1}),
+        ] {
+            let why = message_range(5, &bad).unwrap_err();
+            assert!(why.contains("1 to 5"), "{bad}: {why}");
+        }
+    }
 
     #[test]
     fn briefs_must_match_the_task_kind_and_shape() {

@@ -615,9 +615,13 @@ pub fn graph_tools() -> Vec<ToolSpec> {
     vec![
         tool(
             "message_read",
-            "Read one message of the list in full, by its number. Several calls may go in one reply.",
-            json!({ "index": { "type": "integer", "minimum": 1 } }),
-            &["index"],
+            "Read messages of the list in full, in order: `from` and `to` for a range (read the whole list at once with from 1), or `index` for one.",
+            json!({
+                "from": { "type": "integer", "minimum": 1 },
+                "to": { "type": "integer", "minimum": 1, "description": "Defaults to the last message." },
+                "index": { "type": "integer", "minimum": 1 }
+            }),
+            &[],
         ),
         tool(
             "graph_search",

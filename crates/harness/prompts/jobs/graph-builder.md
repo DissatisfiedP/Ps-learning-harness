@@ -26,13 +26,13 @@ Notes on the session so far, written when its earlier turns were compacted. They
 {{compacted_context}}
 
 {{/compacted}}
-The session's messages, {{transcript_scope}}: number, who wrote it (`Tutor`, `Learner`, `App` for the app, or a tutor tool call or its result) and length. Read every one, in order, with `message_read` before you submit. Claims from earlier parts are already in the graph: search before adding one again.
+The session's messages, {{transcript_scope}}: number, who wrote it (`Tutor`, `Learner`, `App` for the app, or a tutor tool call or its result) and length. Read all of them first, in one call (`message_read { from: 1 }`), before you search or submit. Claims from earlier parts are already in the graph: search before adding one again.
 
 {{messages}}
 
 ## Tools
 
-`message_read { index }` — one message in full. Put several calls in one reply to read faster.
+`message_read { from, to? }` — messages `from` to `to` (default: the last) in full, each headed by its number and who wrote it; `{ index }` reads one.
 
 `graph_search { query }` — up to 20 matching nodes and topics with their ids, titles and homes. Search for every proposition before deciding identity, and search for the ideas it depends on too.
 
