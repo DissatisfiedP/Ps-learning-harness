@@ -5,7 +5,7 @@
 //
 // Item kinds:
 //   user / assistant  { msg }
-//   notice            { text, error? }               plan-notice messages
+//   notice            { text, error?, branch? }      plan-notice / branch-notice messages
 //   job               { jobId, jobKind, state, question, error, result, brief }
 //   question          { callId, args, answer, failed, verdict }
 //   choice            { callId, args, answer, failed }
@@ -22,6 +22,7 @@
 
 const RESEARCH_PREFIX = /^\[research brief\]\s*/;
 const NOTICE_PREFIX = /^\[plan update\]\s*/;
+const BRANCH_PREFIX = /^\[branches\]\s*/;
 
 export function createTimeline() {
   return {
@@ -139,6 +140,9 @@ function applyMessage(tl, op) {
   }
   if (op.tag === 'plan-notice') {
     return add(tl, { kind: 'notice', key: op.opId, text: content.replace(NOTICE_PREFIX, '') });
+  }
+  if (op.tag === 'branch-notice') {
+    return add(tl, { kind: 'notice', key: op.opId, text: content.replace(BRANCH_PREFIX, ''), branch: true });
   }
   if (op.role === 'assistant' && !content.trim()) return null;
   const kind = op.role === 'user' ? 'user' : 'assistant';

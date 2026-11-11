@@ -321,7 +321,48 @@ impl Composer {
                             out.push_str(&format!(" · hunt: {hunt}"));
                         }
                     }
+                    // A split plan (architecture §4.26): which sections this
+                    // session doesn't teach, and the app's revision section.
+                    if s.revision {
+                        out.push_str(" · revision");
+                    }
+                    if state.completed_sections.contains(&s.id) && state.branch.is_some() {
+                        out.push_str(" · done");
+                    }
+                    if let Some(track) = state.own_track() {
+                        if !track.section_ids.contains(&s.id) {
+                            out.push_str(" · other session");
+                        }
+                    }
                     out.push('\n');
+                }
+                if !plan.tracks.is_empty() {
+                    out.push_str("Tracks (each runs as its own session):\n");
+                    for t in &plan.tracks {
+                        out.push_str(&format!(
+                            "- {} \"{}\": {}",
+                            t.id,
+                            t.title,
+                            t.section_ids.join(" → ")
+                        ));
+                        if !t.after.is_empty() {
+                            out.push_str(&format!(" (merges {})", t.after.join(" + ")));
+                        }
+                        out.push('\n');
+                    }
+                }
+                if let (Some(branch), Some(track)) = (&state.branch, state.own_track()) {
+                    out.push_str(&format!(
+                        "This session ({}) teaches track {} only; sections marked \"other session\" are taught in other sessions.",
+                        branch.kind, track.id
+                    ));
+                    match state.feeds() {
+                        Some(merge) => out.push_str(&format!(
+                            " When its sections are done, it hands off to the merge track {}.\n",
+                            merge.id
+                        )),
+                        None => out.push('\n'),
+                    }
                 }
             }
         }
@@ -479,6 +520,7 @@ mod tests {
             known_note: String::new(),
             learner_note: String::new(),
             hunt: None,
+            revision: false,
         }
     }
     #[test]
@@ -546,6 +588,7 @@ mod tests {
                 exit: "exit".into(),
                 ..blank_section("s1", "First", &["n1"])
             }],
+            tracks: vec![],
         };
         let mut state = SessionState {
             plan: Some(plan),
@@ -580,6 +623,7 @@ mod tests {
                     &["series-current", "divider-rule"],
                 )
             }],
+            tracks: vec![],
         };
         SessionState {
             phase: crate::state::Phase::Teach,
@@ -895,6 +939,7 @@ mod tests {
                     blank_section("s1", "First", &["n1"]),
                     blank_section("s2", "Second", &["n2"]),
                 ],
+                tracks: vec![],
             }),
             current_section: Some("s1".into()),
             platform: "desktop".into(),
@@ -943,6 +988,7 @@ mod tests {
                 style: "socratic".into(),
                 nodes: vec![],
                 sections: vec![plan_section],
+                tracks: vec![],
             }),
             current_section: Some("s1".into()),
             platform: "desktop".into(),

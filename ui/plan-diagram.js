@@ -17,6 +17,11 @@
 // randomness, no measurement) so the same plan always draws the same way —
 // boxes are sized from a per-character width estimate, the same trick the
 // Map's text measure uses.
+//
+// A plan split into tracks (parallel branch sessions that merge) draws one
+// lane per track: the root tracks side by side, each merge track below the
+// lanes it joins, with a join connector from every input lane. Each lane is
+// laid out with the same layered pass on its own sections.
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -154,6 +159,9 @@ function layerize(ids, edges) {
  * `aria-label`/`aria-expanded`/`aria-controls` and `data-section-id`; the
  * caller wires click and keys by querying `.plan-node-action`.
  *
+ * With `plan.tracks`, sections are drawn in lanes; `track` (a branched
+ * session's own track id) emphasises that lane and dims the others.
+ *
  * Returns `{ svg, width, height }` — the caller decides the frame.
  */
 export function planDiagram(
@@ -165,6 +173,7 @@ export function planDiagram(
     sectionStatus = () => 'open',
     nodeStatus = () => 'open',
     annotate = null,
+    track = null,
   } = {},
 ) {
   // `maxW` is the surface's own width: at or below it the diagram draws 1:1
@@ -214,7 +223,10 @@ export function planDiagram(
       kind: s.mode,
       section: s.id,
       status: sectionStatus(s.id),
-      count: counts.get(s.id) ?? 0,
+      // A revision section re-checks other sections' ideas: it owns none of
+      // them (sectionOf), so its count is the ideas it revisits.
+      count: s.revision ? (s.nodeIds ?? []).length : counts.get(s.id) ?? 0,
+      revision: Boolean(s.revision),
     }));
     const seen = new Set();
     edges = [];
@@ -232,7 +244,6 @@ export function planDiagram(
   }
 
   const ids = items.map((n) => n.id);
-  const layers = layerize(ids, edges);
   const byId = new Map(items.map((n) => [n.id, n]));
 
   // Size every box from its wrapped text.
@@ -245,7 +256,8 @@ export function planDiagram(
     // 8 % slack plus the padding keeps every line inside its box.
     const textW = Math.max(1, ...lines.map((l) => lineWidth(l, spec.font))) * 1.08;
     const count = item.count ?? 0;
-    const meta = count ? `${count} idea${count === 1 ? '' : 's'}` : '';
+    const ideas = count ? `${count} idea${count === 1 ? '' : 's'}` : '';
+    const meta = item.revision ? ['Revision', ideas].filter(Boolean).join(' · ') : ideas;
     // The card's boxes carry their section's state and its "⋯" (topics level:
     // one box per section, so the box is the section's own control).
     const info = level === 'topics' && annotate ? annotate(item.id) : null;
@@ -274,45 +286,66 @@ export function planDiagram(
     if (info) annotations.set(item.id, info);
   }
 
-  // Pack each layer into rows no wider than the level's ceiling (a 49-node
-  // layer would otherwise be one 3 000 px strip), then center every row.
-  const rowsOf = (layer) => {
-    const rows = [];
-    let row = [];
-    let w = 0;
-    for (const id of layer) {
-      const bw = box.get(id).width;
-      const next = w + (row.length ? spec.gapX : 0) + bw;
-      if (row.length && next > spec.maxW) {
-        rows.push({ ids: row, w });
-        row = [];
-        w = 0;
-      }
-      w += (row.length ? spec.gapX : 0) + bw;
-      row.push(id);
-    }
-    if (row.length) rows.push({ ids: row, w });
-    return rows;
-  };
-  const layerRows = layers.map(rowsOf);
-  const totalW = Math.max(1, ...layerRows.flat().map((r) => r.w));
+  // Pack each layer into rows no wider than `maxW` (a 49-node layer would
+  // otherwise be one 3 000 px strip), then center every row. Positions are
+  // the block's own; `w`/`h` its extent.
   const rowGap = Math.round(spec.gapY * 0.4);
-  const positions = new Map();
-  let y = 0;
-  for (const rows of layerRows) {
-    for (const row of rows) {
-      let x = (totalW - row.w) / 2;
-      const rowH = Math.max(1, ...row.ids.map((id) => box.get(id).height));
-      for (const id of row.ids) {
-        const b = box.get(id);
-        positions.set(id, { x, y: y + (rowH - b.height) / 2, ...b });
-        x += b.width + spec.gapX;
+  const packBlock = (layers, maxW) => {
+    const rowsOf = (layer) => {
+      const rows = [];
+      let row = [];
+      let w = 0;
+      for (const id of layer) {
+        const bw = box.get(id).width;
+        const next = w + (row.length ? spec.gapX : 0) + bw;
+        if (row.length && next > maxW) {
+          rows.push({ ids: row, w });
+          row = [];
+          w = 0;
+        }
+        w += (row.length ? spec.gapX : 0) + bw;
+        row.push(id);
       }
-      y += rowH + rowGap;
+      if (row.length) rows.push({ ids: row, w });
+      return rows;
+    };
+    const layerRows = layers.map(rowsOf);
+    const w = Math.max(1, ...layerRows.flat().map((r) => r.w));
+    const pos = new Map();
+    let y = 0;
+    for (const rows of layerRows) {
+      for (const row of rows) {
+        let x = (w - row.w) / 2;
+        const rowH = Math.max(1, ...row.ids.map((id) => box.get(id).height));
+        for (const id of row.ids) {
+          const b = box.get(id);
+          pos.set(id, { x, y: y + (rowH - b.height) / 2 });
+          x += b.width + spec.gapX;
+        }
+        y += rowH + rowGap;
+      }
+      y += spec.gapY - rowGap;
     }
-    y += spec.gapY - rowGap;
+    return { pos, w, h: Math.max(1, y - spec.gapY) };
+  };
+
+  const positions = new Map();
+  const tracks = planTracks(plan);
+  let lanes = [];
+  let totalW;
+  let totalH;
+  if (!tracks) {
+    const block = packBlock(layerize(ids, edges), spec.maxW);
+    for (const [id, p] of block.pos) positions.set(id, { ...p, ...box.get(id) });
+    totalW = block.w;
+    totalH = block.h;
+  } else {
+    ({ lanes, totalW, totalH } = layoutLanes(tracks, { items, edges, box, spec, packBlock, positions, own: track }));
   }
-  const totalH = Math.max(1, y - spec.gapY);
+  // With lanes, a link between two tracks is the lanes' join connector; the
+  // per-box arrows stay inside their lane (a cross-lane curve would run
+  // through the merge lane's revision box).
+  const drawn = lanes.length ? edges.filter((e) => byId.get(e.from)?.lane === byId.get(e.to)?.lane) : edges;
 
   const pad = 10;
   const svg = document.createElementNS(SVG_NS, 'svg');
@@ -323,7 +356,8 @@ export function planDiagram(
   svg.setAttribute('class', `plan-diagram plan-diagram-${level}`);
   svg.style.fontSize = `${spec.font}px`;
   svg.setAttribute('role', carriesActions ? 'group' : 'img');
-  svg.setAttribute('aria-label', `Plan structure: ${items.length} ${level === 'ideas' ? 'ideas' : 'topics'}, ${edges.length} prerequisite links`);
+  const trackNote = tracks ? `, ${tracks.length} tracks` : '';
+  svg.setAttribute('aria-label', `Plan structure: ${items.length} ${level === 'ideas' ? 'ideas' : 'topics'}${trackNote}, ${drawn.length} prerequisite links`);
   svg.setAttribute('preserveAspectRatio', 'xMidYMin meet');
 
   const defs = document.createElementNS(SVG_NS, 'defs');
@@ -342,9 +376,11 @@ export function planDiagram(
   defs.append(marker);
   svg.append(defs);
 
+  if (lanes.length) svg.append(laneLayer(lanes, level));
+
   const edgeLayer = document.createElementNS(SVG_NS, 'g');
   edgeLayer.setAttribute('class', 'plan-edges');
-  for (const e of edges) {
+  for (const e of drawn) {
     const a = positions.get(e.from);
     const b = positions.get(e.to);
     if (!a || !b) continue;
@@ -355,7 +391,8 @@ export function planDiagram(
     const mid = (y1 + y2) / 2;
     const path = document.createElementNS(SVG_NS, 'path');
     path.setAttribute('d', `M${x1},${y1} C${x1},${mid} ${x2},${mid} ${x2},${y2 - 2}`);
-    path.setAttribute('class', `plan-edge${statusClass(byId.get(e.to))}`);
+    const other = byId.get(e.from)?.otherLane && byId.get(e.to)?.otherLane ? ' is-other-lane' : '';
+    path.setAttribute('class', `plan-edge${statusClass(byId.get(e.to))}${other}`);
     path.setAttribute('marker-end', `url(#plan-arrow-${level})`);
     edgeLayer.append(path);
   }
@@ -370,7 +407,16 @@ export function planDiagram(
     const g = document.createElementNS(SVG_NS, 'g');
     g.setAttribute(
       'class',
-      ['plan-node', statusClass(item).trim(), topicClass(item).trim(), info?.known ? 'is-known' : ''].filter(Boolean).join(' '),
+      [
+        'plan-node',
+        statusClass(item).trim(),
+        topicClass(item).trim(),
+        info?.known ? 'is-known' : '',
+        item.revision ? 'is-revision' : '',
+        item.otherLane ? 'is-other-lane' : '',
+      ]
+        .filter(Boolean)
+        .join(' '),
     );
     g.setAttribute('transform', `translate(${p.x}, ${p.y})`);
     g.dataset.nodeId = item.id;
@@ -383,12 +429,14 @@ export function planDiagram(
     const tooltip = document.createElementNS(SVG_NS, 'title');
     const needs = (nodesById.get(item.id)?.requires ?? []).length;
     const knownNote = info?.known ? 'you said you know this' : '';
+    const laneNote = item.otherLane ? 'taught in another session' : '';
     tooltip.textContent =
       level === 'ideas'
-        ? `${item.title} — ${item.kind}${needs ? ` · needs ${needs}` : ''}`
+        ? [`${item.title} — ${item.kind}${needs ? ` · needs ${needs}` : ''}`, laneNote].filter(Boolean).join(' · ')
         : [
-            `${item.title} — ${item.count ?? 0} idea${(item.count ?? 0) === 1 ? '' : 's'}, ${item.kind}`,
+            `${item.title} — ${item.revision ? 'revision, ' : ''}${item.count ?? 0} idea${(item.count ?? 0) === 1 ? '' : 's'}, ${item.kind}`,
             knownNote,
+            laneNote,
           ]
             .filter(Boolean)
             .join(' · ');
@@ -467,6 +515,178 @@ export function planDiagram(
   svg.append(nodeLayer);
 
   return { svg, width: totalW, height: totalH };
+}
+
+/**
+ * Lanes for a plan with tracks. Each track's boxes get their own layered
+ * block; root tracks stand side by side and a merge track sits centred under
+ * the lanes it joins (`after`), recursively — the tracks form an in-tree with
+ * one final track. Fills `positions` with the boxes' absolute positions, marks
+ * items in another session's lane (`otherLane`) when `own` names a lane, and
+ * returns the placed lanes plus the drawing's extent.
+ */
+function layoutLanes(tracks, { items, edges, box, spec, packBlock, positions, own }) {
+  const REST = '\u0000rest'; // sections no track lists (a malformed plan) still draw
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const known = new Set(tracks.map((t) => t.id));
+  const trackOfSection = new Map();
+  for (const t of tracks) {
+    for (const sid of t.sectionIds ?? []) if (!trackOfSection.has(sid)) trackOfSection.set(sid, t.id);
+  }
+  const members = new Map(tracks.map((t) => [t.id, []]));
+  const laneOf = (item) => trackOfSection.get(item.section) ?? REST;
+  for (const item of items) {
+    const id = laneOf(item);
+    if (!members.has(id)) members.set(id, []);
+    members.get(id).push(item.id);
+  }
+  const all = members.has(REST) ? [...tracks, { id: REST, title: 'Other sections', after: [] }] : tracks;
+  const ownLane = own && known.has(own) ? own : null;
+  for (const item of items) {
+    item.lane = laneOf(item);
+    item.otherLane = Boolean(ownLane) && item.lane !== ownLane;
+  }
+
+  const inputsOf = new Map(
+    all.map((t) => [t.id, [...new Set(t.after ?? [])].filter((a) => known.has(a) && a !== t.id)]),
+  );
+  const fed = new Set([...inputsOf.values()].flat());
+  const leaves = Math.max(1, all.filter((t) => !inputsOf.get(t.id).length).length);
+
+  const pad = Math.round(spec.gapX * 0.4);
+  const labelFont = spec.font * BADGE_SCALE;
+  const labelH = Math.round(spec.lineH * 1.6);
+  const laneGap = Math.round(spec.gapX * 0.8);
+  // Parallel lanes share the width; a merge lane has the whole of it.
+  const leafW = Math.max(spec.minW, (spec.maxW - laneGap * (leaves - 1)) / leaves - 2 * pad);
+  const lanes = new Map();
+  for (const t of all) {
+    const ids = members.get(t.id) ?? [];
+    const inLane = new Set(ids);
+    const inner = edges.filter((e) => inLane.has(e.from) && inLane.has(e.to));
+    // A revision section opens its track: it sits above the lane's other
+    // boxes (a layout-only link; nothing is drawn for it).
+    const revisions = ids.filter((id) => itemById.get(id).revision);
+    for (const r of revisions) {
+      for (const id of ids) if (!revisions.includes(id)) inner.push({ from: r, to: id });
+    }
+    const merge = inputsOf.get(t.id).length > 0;
+    const block = ids.length
+      ? packBlock(layerize(ids, inner), merge ? spec.maxW - 2 * pad : leafW)
+      : { pos: new Map(), w: spec.minW, h: 1 };
+    const other = Boolean(ownLane) && t.id !== ownLane;
+    const label = `${t.title || t.id}${other ? ' · other session' : ''}`;
+    const labelW = lineWidth(label, labelFont) * 1.08 + 2 * pad;
+    lanes.set(t.id, {
+      id: t.id,
+      label,
+      labelFont,
+      labelH,
+      pad,
+      block,
+      merge,
+      own: ownLane === t.id,
+      other,
+      inputs: inputsOf.get(t.id),
+      w: Math.max(block.w + 2 * pad, labelW),
+      h: labelH + block.h + pad,
+    });
+  }
+
+  // A lane's column: its inputs' columns side by side, the lane under them.
+  const size = new Map();
+  const measure = (id, seen) => {
+    if (size.has(id)) return size.get(id);
+    seen.add(id);
+    const lane = lanes.get(id);
+    const ins = lane.inputs.filter((i) => !seen.has(i));
+    let s = { w: lane.w, h: lane.h, ins, inW: 0, inH: 0 };
+    if (ins.length) {
+      const parts = ins.map((i) => measure(i, seen));
+      const inW = parts.reduce((a, p) => a + p.w, 0) + laneGap * (parts.length - 1);
+      const inH = Math.max(...parts.map((p) => p.h));
+      s = { w: Math.max(inW, lane.w), h: inH + spec.gapY + lane.h, ins, inW, inH };
+    }
+    size.set(id, s);
+    return s;
+  };
+  const place = (id, x, y) => {
+    const s = size.get(id);
+    const lane = lanes.get(id);
+    lane.x = x + (s.w - lane.w) / 2;
+    lane.y = s.ins.length ? y + s.inH + spec.gapY : y;
+    let cx = x + (s.w - s.inW) / 2;
+    for (const i of s.ins) {
+      if (lanes.get(i).x !== undefined) continue;
+      place(i, cx, y);
+      cx += size.get(i).w + laneGap;
+    }
+  };
+  // The final track (fed by nobody) first; anything a broken `after` left
+  // unreached stands beside it.
+  let cx = 0;
+  let totalH = 1;
+  for (const t of [...all.filter((t) => !fed.has(t.id)), ...all]) {
+    if (lanes.get(t.id).x !== undefined) continue;
+    const s = measure(t.id, new Set());
+    place(t.id, cx, 0);
+    cx += s.w + laneGap;
+    totalH = Math.max(totalH, s.h);
+  }
+
+  for (const lane of lanes.values()) {
+    const ox = lane.x + (lane.w - lane.block.w) / 2;
+    const oy = lane.y + lane.labelH;
+    for (const [id, p] of lane.block.pos) positions.set(id, { x: ox + p.x, y: oy + p.y, ...box.get(id) });
+  }
+  return { lanes: [...lanes.values()], totalW: Math.max(1, cx - laneGap), totalH };
+}
+
+/** The lanes' frames and titles, and a join connector into every merge lane. */
+function laneLayer(lanes, level) {
+  const layer = document.createElementNS(SVG_NS, 'g');
+  layer.setAttribute('class', 'plan-lanes');
+  const byId = new Map(lanes.map((l) => [l.id, l]));
+  for (const lane of lanes) {
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute(
+      'class',
+      ['plan-lane', lane.merge ? 'is-merge' : '', lane.own ? 'is-own' : '', lane.other ? 'is-other' : ''].filter(Boolean).join(' '),
+    );
+    g.dataset.trackId = lane.id;
+    const rect = document.createElementNS(SVG_NS, 'rect');
+    rect.setAttribute('x', String(lane.x));
+    rect.setAttribute('y', String(lane.y));
+    rect.setAttribute('width', String(lane.w));
+    rect.setAttribute('height', String(lane.h));
+    rect.setAttribute('rx', '6');
+    const label = document.createElementNS(SVG_NS, 'text');
+    label.setAttribute('class', 'plan-lane-label');
+    label.setAttribute('x', String(lane.x + lane.pad));
+    label.setAttribute('y', String(lane.y + lane.labelH * 0.68));
+    label.setAttribute('style', `font-size:${lane.labelFont.toFixed(1)}px`);
+    label.textContent = lane.label;
+    g.append(rect, label);
+    layer.append(g);
+  }
+  for (const lane of lanes) {
+    const n = lane.inputs.length;
+    lane.inputs.forEach((id, k) => {
+      const from = byId.get(id);
+      if (!from) return;
+      const x1 = from.x + from.w / 2;
+      const y1 = from.y + from.h;
+      const x2 = lane.x + (lane.w * (k + 1)) / (n + 1);
+      const y2 = lane.y;
+      const mid = (y1 + y2) / 2;
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', `M${x1},${y1} C${x1},${mid} ${x2},${mid} ${x2},${y2 - 2}`);
+      path.setAttribute('class', `plan-join${from.other && lane.other ? ' is-other' : ''}`);
+      path.setAttribute('marker-end', `url(#plan-arrow-${level})`);
+      layer.append(path);
+    });
+  }
+  return layer;
 }
 
 /** 'done' / 'current' / 'open' → the className suffix the CSS keys off. */
@@ -601,18 +821,47 @@ function topicClass(item) {
   return '';
 }
 
-/** The section a plan node lives in (a node is in exactly one section). */
+/** The section a plan node lives in. A revision section (the start of a merge
+ *  track) re-checks nodes other sections own, so a node's home is its
+ *  non-revision section; a node only a revision section names lives there. */
 export function sectionOf(plan, nodeId) {
+  let revision = null;
   for (const s of plan?.sections ?? []) {
-    if ((s.nodeIds ?? []).includes(nodeId)) return s.id;
+    if (!(s.nodeIds ?? []).includes(nodeId)) continue;
+    if (!s.revision) return s.id;
+    revision ??= s.id;
   }
-  return null;
+  return revision;
+}
+
+/** The plan's tracks (parallel branches that merge), or null for an ordinary plan. */
+export function planTracks(plan) {
+  const tracks = plan?.tracks;
+  return Array.isArray(tracks) && tracks.length ? tracks : null;
+}
+
+/** The track a section is taught in, or null. */
+export function trackOf(plan, sectionId) {
+  return planTracks(plan)?.find((t) => (t.sectionIds ?? []).includes(sectionId)) ?? null;
+}
+
+/**
+ * The sections this session teaches, in order: in a branched session
+ * (`st.branch`) only its own track's, otherwise every section. Progress,
+ * "section n of m" and the head's place count these.
+ */
+export function ownSections(st) {
+  const sections = st?.plan?.sections ?? [];
+  const track = st?.branch ? planTracks(st.plan)?.find((t) => t.id === st.branch.track) : null;
+  if (!track) return sections;
+  const byId = new Map(sections.map((s) => [s.id, s]));
+  return (track.sectionIds ?? []).map((id) => byId.get(id)).filter(Boolean);
 }
 
 /** Progress per plan node and section, from derived session state. */
 export function progressOf(st) {
   const done = new Set(st?.completedSections ?? []);
-  const sections = st?.plan?.sections ?? [];
+  const sections = ownSections(st);
   // "Where we are" is the open section; with none open (a plan whose current
   // topic has no claims behind it, e.g. an imported one) it is the next
   // unfinished section — the same place the desk and the head point at.

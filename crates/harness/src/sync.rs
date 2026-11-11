@@ -211,6 +211,9 @@ pub struct Sync {
     /// The periodic timer's wake-up channel. Dropping the engine drops the
     /// sender, which ends the timer thread.
     ticker: OnceLock<mpsc::Sender<()>>,
+    /// Called after a run that changed files on this device (pulled commits,
+    /// downloaded or deleted files), so open views re-read them.
+    on_change: OnceLock<Box<dyn Fn() + Send + std::marker::Sync>>,
 }
 
 impl Sync {
@@ -237,7 +240,14 @@ impl Sync {
             running: AtomicBool::new(false),
             stage: AtomicU8::new(STAGE_IDLE),
             ticker: OnceLock::new(),
+            on_change: OnceLock::new(),
         }
+    }
+
+    /// Install the hook [`Sync`] calls after a run changed local files. A
+    /// second call does nothing.
+    pub fn set_on_change(&self, hook: Box<dyn Fn() + Send + std::marker::Sync>) {
+        let _ = self.on_change.set(hook);
     }
 
     pub fn config(&self) -> SyncConfig {
@@ -607,6 +617,18 @@ impl Sync {
             }
         }
         self.stage.store(STAGE_IDLE, Ordering::SeqCst);
+        // A WebDAV pass that failed part-way may still have written files, so
+        // it counts as a change; re-reading is cheap.
+        let dav_changed = dav.configured()
+            && report
+                .webdav
+                .as_ref()
+                .is_none_or(|w| w.downloaded + w.deleted_local + w.merged > 0);
+        if report.pulled > 0 || dav_changed {
+            if let Some(hook) = self.on_change.get() {
+                hook();
+            }
+        }
         if errors.is_empty() {
             Ok(report)
         } else {
@@ -726,12 +748,19 @@ impl Sync {
         let fetched = fetch(&repo, branch, token)?;
         let local = head_oid(&repo)?;
         if let Some(remote) = fetched {
-            let (_, behind) = repo
+            let (ahead, behind) = repo
                 .graph_ahead_behind(local, remote)
                 .map_err(|e| fail("could not compare with the remote", &e, token))?;
 
-            // 4–5. Merge, resolving every conflicted path by file type.
-            if behind > 0 {
+            // 4–5. Bring the remote's work in. With nothing of our own on top,
+            // fast-forward: a merge commit here would be new work the other
+            // device has to pull and merge again, so two devices would trade
+            // "1 pulled, 1 pushed" on every sync forever.
+            if behind > 0 && ahead == 0 {
+                fast_forward(&repo, &self.repo, local, remote, branch, token)?;
+                report.pulled = behind.min(u32::MAX as usize) as u32;
+            } else if behind > 0 {
+                // Otherwise merge, resolving every conflicted path by file type.
                 let merged = merge_commit(&repo, &self.repo, local, remote, branch, token)?;
                 report.pulled = behind.min(u32::MAX as usize) as u32;
                 report.conflicts = merged.conflicts;
@@ -1078,6 +1107,41 @@ fn merge_commit(
     repo.set_head(&refname)
         .map_err(|e| fail("could not select the branch", &e, token))?;
     Ok(merged)
+}
+
+/// Move the branch to `remote`, which already contains `local`: write the
+/// paths that changed, point the index at the remote tree, move the branch.
+/// No commit is made, so the remote has nothing new to pull back.
+fn fast_forward(
+    repo: &Repository,
+    workdir: &Path,
+    local: Oid,
+    remote: Oid,
+    branch: &str,
+    token: Option<&str>,
+) -> Result<(), Error> {
+    let old_tree = repo
+        .find_commit(local)
+        .and_then(|c| c.tree())
+        .map_err(|e| fail("could not read the local tree", &e, token))?;
+    let tree = repo
+        .find_commit(remote)
+        .and_then(|c| c.tree())
+        .map_err(|e| fail("could not read the fetched tree", &e, token))?;
+    write_merged_paths(repo, workdir, &old_tree, &tree)?;
+    let mut disk = repo
+        .index()
+        .map_err(|e| fail("could not read the index", &e, token))?;
+    disk.read_tree(&tree)
+        .map_err(|e| fail("could not update the index", &e, token))?;
+    disk.write()
+        .map_err(|e| fail("could not write the index", &e, token))?;
+    let refname = format!("refs/heads/{branch}");
+    repo.reference(&refname, remote, true, "sync: fast-forward")
+        .map_err(|e| fail("could not move the branch", &e, token))?;
+    repo.set_head(&refname)
+        .map_err(|e| fail("could not select the branch", &e, token))?;
+    Ok(())
 }
 
 /// One conflicted path, resolved by file type (docs/sync-build.md):
@@ -1790,6 +1854,63 @@ mod tests {
         assert!(pulled.pulled >= 1, "a pulls b's commit");
         assert!(a.repo.join("sessions/2026/b.jsonl").exists());
         assert!(a.read("sessions/2026/b.jsonl").contains("from b"));
+    }
+
+    #[test]
+    fn idle_devices_settle_instead_of_trading_merges() {
+        let (_remote_root, remote) = bare("settle");
+        let a = Device::connected("settle-a", &remote);
+        let b = Device::connected("settle-b", &remote);
+        let session = |id: &str, text: &str| {
+            format!(
+                "{}\n{}\n",
+                header(
+                    &format!("01H00000000000000000000{id}"),
+                    "2026-01-01T00:00:00Z"
+                ),
+                op(
+                    &format!("01H00000000000000000001{id}"),
+                    "2026-01-01T00:00:01Z",
+                    text
+                )
+            )
+        };
+        // Both devices have work of their own: one real merge.
+        a.write("sessions/2026/a.jsonl", &session("00A", "from a"));
+        b.write("sessions/2026/b.jsonl", &session("00B", "from b"));
+        a.run();
+        b.run();
+
+        // a has nothing new: it fast-forwards to b's merge and pushes nothing.
+        let caught_up = a.run();
+        assert!(caught_up.pulled >= 1, "a takes b's merge");
+        assert_eq!(caught_up.pushed, 0, "a fast-forward is not new work");
+        assert!(a.read("sessions/2026/b.jsonl").contains("from b"));
+
+        // From here on, idle syncs on either device move nothing.
+        for device in [&b, &a, &b] {
+            let idle = device.run();
+            assert_eq!((idle.pulled, idle.pushed), (0, 0), "{idle:?}");
+        }
+
+        // Work on one device reaches the other without a merge commit back.
+        a.write(
+            "sessions/2026/a.jsonl",
+            &format!(
+                "{}{}\n",
+                session("00A", "from a"),
+                op(
+                    "01H0000000000000000000002A",
+                    "2026-01-01T00:00:02Z",
+                    "more from a"
+                )
+            ),
+        );
+        assert_eq!(a.run().pushed, 1);
+        let pulled = b.run();
+        assert_eq!((pulled.pulled, pulled.pushed), (1, 0), "{pulled:?}");
+        assert!(b.read("sessions/2026/a.jsonl").contains("more from a"));
+        assert_eq!(a.run().pulled, 0);
     }
 
     #[test]

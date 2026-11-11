@@ -194,6 +194,7 @@ fn build_plan(chat: &Value, graph: &KnowledgeMap) -> Plan {
             known_note: String::new(),
             learner_note: String::new(),
             hunt: None,
+            revision: false,
         });
     }
 
@@ -240,6 +241,7 @@ fn build_plan(chat: &Value, graph: &KnowledgeMap) -> Plan {
         style: String::new(),
         nodes,
         sections,
+        tracks: Vec::new(),
     }
 }
 
@@ -419,6 +421,8 @@ impl Port<'_> {
                 id: session_id.to_owned(),
                 mode: Mode::Learn,
                 title,
+                fork: None,
+                merge: None,
             })
         });
         w.emit(&at, |op_id, at| {

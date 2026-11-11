@@ -26,8 +26,11 @@
 //              Sync now, acknowledge, disconnect), the other Settings sections
 //              still in place, and phone widths with notch insets.
 //              UI_CHECK_SHOTS=<dir> also saves screenshots there.
+//   library    Home's "+" menu: a folder imported as a reference library
+//              becomes a "Reference library" chip, the menu then lists it as
+//              linked, Escape closes the menu; Settings → Libraries lists it.
 //
-// Exit code 0 when every check passes. Usage: run.js [ipc|placement|sync]...
+// Exit code 0 when every check passes. Usage: run.js [ipc|placement|sync|library]...
 
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -426,7 +429,7 @@ async function sync() {
   await page.evaluate(click('open-settings'));
   await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
   const order = await page.evaluate(`[...document.querySelectorAll('#settings .settings-section > h2')].map((h) => (h.querySelector('.section-name') ?? h).textContent)`);
-  expect(JSON.stringify(order) === JSON.stringify(['Model roles', 'Learning', 'Focus', 'Providers', 'Sync', 'Plugins', 'Registries', 'Appearance']), `Settings sections: ${order}`);
+  expect(JSON.stringify(order) === JSON.stringify(['Model roles', 'Learning', 'Focus', 'Providers', 'Sync', 'Libraries', 'Plugins', 'Registries', 'Appearance']), `Settings sections: ${order}`);
   const others = await page.evaluate(`({ providers: document.querySelectorAll('#provider-list .provider').length, plugins: document.querySelectorAll('#plugin-list .plugin').length, roles: document.getElementById('model-form').textContent.trim() })`);
   expect(others.providers === 3 && others.plugins === 2 && others.roles.length > 0, `other Settings sections did not render: ${JSON.stringify(others)}`);
 
@@ -753,7 +756,46 @@ async function sync() {
   console.log('sync: sync icon (states, names, one-line header at 1440/390/320), its panel (placement, Escape/icon/outside close, Sync now, Sync settings), banner, collapsible Providers/Sync, Settings → Sync (save, refuse, Sync now, keep secret, disconnect, acknowledge), phone layout and notch/gesture-bar insets checked');
 }
 
-const cases = { ipc, placement, sync };
+async function library() {
+  const page = await openApp('none');
+  const MENU = `(() => {
+    const m = document.getElementById('add-menu');
+    return { open: !m.hidden, items: [...m.querySelectorAll('.menu-item')].map((b) => [b.firstChild.textContent, b.disabled]),
+      heading: m.querySelector('.menu-heading')?.textContent ?? null, expanded: document.getElementById('add-files').getAttribute('aria-expanded'),
+      focus: document.activeElement?.id || document.activeElement?.className };
+  })()`;
+  await page.evaluate(click('add-files'));
+  await until('the add menu', () => page.evaluate(`!document.getElementById('add-menu').hidden`));
+  let menu = await page.evaluate(MENU);
+  expect(menu.expanded === 'true' && JSON.stringify(menu.items) === JSON.stringify([['Files…', false], ['Folder as a reference library…', false]]) && menu.heading === null,
+    `empty add menu: ${JSON.stringify(menu)}`);
+  await page.shot('library-menu-empty');
+  await page.evaluate(`document.querySelectorAll('#add-menu .menu-item')[1].click()`);
+  await until('the library chip', () => page.evaluate(`[...document.querySelectorAll('#attach-chips .chip')].some((c) => c.dataset.kind === 'library')`));
+  const chip = await page.evaluate(`(() => { const c = document.querySelector('#attach-chips .chip[data-kind="library"]'); return { name: c.querySelector('.chip-name').textContent, kind: c.querySelector('.chip-kind').textContent, status: document.getElementById('attach-error').textContent }; })()`);
+  expect(chip.name === 'huawei-ict' && chip.kind === 'Reference library' && chip.status === 'huawei-ict: 2 files (2 added).', `library chip: ${JSON.stringify(chip)}`);
+  await page.shot('library-chip');
+  await page.evaluate(click('add-files'));
+  await until('the library list in the menu', () => page.evaluate(`Boolean(document.querySelector('#add-menu .menu-heading'))`));
+  menu = await page.evaluate(MENU);
+  expect(menu.heading === 'Link a library' && JSON.stringify(menu.items[2]) === JSON.stringify(['huawei-ict', true]), `menu after import: ${JSON.stringify(menu)}`);
+  await page.shot('library-menu-linked');
+  await page.evaluate(escape);
+  menu = await page.evaluate(MENU);
+  expect(!menu.open && menu.focus === 'add-files', `Escape: ${JSON.stringify(menu)}`);
+  await page.evaluate(click('open-settings'));
+  await until('Settings → Libraries', () => page.evaluate(`document.querySelectorAll('#library-list .library').length === 1`));
+  const row = await page.evaluate(`document.querySelector('#library-list .library').textContent`);
+  expect(/1 guide · 1 question bank/.test(row) && /From \/home\/learner\/huawei-ict on this device/.test(row) && /Refresh/.test(row), `library row: ${row}`);
+  await page.evaluate(`document.querySelector('#library-list .library').scrollIntoView({ block: 'center' })`);
+  await page.shot('library-settings');
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+  console.log('library: Home + menu (files, folder as library, link list), import → chip with result line, linked state, Escape, Settings → Libraries row checked');
+}
+
+const cases = { ipc, placement, sync, library };
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases);
 try {
   for (const name of wanted) {

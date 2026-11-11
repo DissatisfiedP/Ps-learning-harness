@@ -176,6 +176,42 @@ pub struct Section {
     /// in older sessions and in sections with no hunt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hunt: Option<Hunt>,
+    /// A revision section the app wrote at the start of a merge track
+    /// (architecture §4.26): it re-checks key nodes the merged
+    /// branches taught, so its `node_ids` repeat nodes other sections own.
+    /// Set by code, never by `plan_write`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub revision: bool,
+}
+
+/// One strand of a branching plan (architecture §4.26): an ordered
+/// list of sections that one session teaches. Root tracks (`after` empty) run
+/// in parallel sessions from approval; a merge track (`after` = two or more
+/// tracks) runs in a new session once every session of those tracks ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Track {
+    pub id: String,
+    pub title: String,
+    pub section_ids: Vec<String>,
+    #[serde(default)]
+    pub after: Vec<String>,
+}
+
+/// Which part of a branching plan this session teaches (§4.26). Derived from
+/// the header (`fork` / `merge`) or the origin's `branch` op; `None` for
+/// every session of a plan without tracks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchState {
+    /// `origin` (the session the plan was made in, which keeps the first
+    /// root track), `fork` (a session forked for another root track) or
+    /// `merge` (a session created when a merge track's inputs all ended).
+    pub kind: String,
+    /// The origin session's id.
+    pub origin: String,
+    /// The track this session teaches.
+    pub track: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -201,6 +237,53 @@ pub struct Plan {
     pub style: String,
     pub nodes: Vec<PlanNode>,
     pub sections: Vec<Section>,
+    /// The plan's tracks (§8); empty for a plan that doesn't split.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracks: Vec<Track>,
+}
+
+impl Plan {
+    /// The track `id`, if the plan has it.
+    pub fn track(&self, id: &str) -> Option<&Track> {
+        self.tracks.iter().find(|t| t.id == id)
+    }
+
+    /// The track holding `section_id`, if the plan has tracks.
+    pub fn track_of(&self, section_id: &str) -> Option<&Track> {
+        self.tracks
+            .iter()
+            .find(|t| t.section_ids.iter().any(|s| s == section_id))
+    }
+
+    /// The merge track `track` feeds, if any.
+    pub fn feeds(&self, track: &str) -> Option<&Track> {
+        self.tracks
+            .iter()
+            .find(|t| t.after.iter().any(|a| a == track))
+    }
+
+    /// The tracks with no `after`, in plan order.
+    pub fn root_tracks(&self) -> Vec<&Track> {
+        self.tracks.iter().filter(|t| t.after.is_empty()).collect()
+    }
+
+    /// `track` and every track that feeds into it, directly or through
+    /// earlier merges.
+    pub fn upstream(&self, track: &str) -> Vec<String> {
+        let mut out = vec![track.to_owned()];
+        let mut i = 0;
+        while i < out.len() {
+            if let Some(t) = self.track(&out[i]) {
+                for a in &t.after {
+                    if !out.contains(a) {
+                        out.push(a.clone());
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
+    }
 }
 
 /// A recorded check verdict for section_done gating.
@@ -384,7 +467,9 @@ pub struct SessionState {
     pub last_node_id: Option<String>,
     /// desktop | mobile
     pub platform: String,
-    /// Learner-model summary, or "no graph yet" (graph is out of scope).
+    /// The `## Learner state` block: replay leaves "no graph yet"; the tutor
+    /// turn and the planner run fill it from the graph
+    /// (`graph::read::learner_state`) before composing.
     pub learner_state: String,
     /// Session title, generated once after goal_set.
     pub title: Option<String>,
@@ -426,6 +511,10 @@ pub struct SessionState {
     /// section, which the gates and the prompt read.
     #[serde(default)]
     pub hunts: Vec<HuntState>,
+    /// The track this session teaches when the plan branched (§4.26); `None`
+    /// for every session of a plan without tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<BranchState>,
 }
 
 impl SessionState {
@@ -435,15 +524,44 @@ impl SessionState {
         self.plan.as_ref()?.sections.iter().find(|s| &s.id == id)
     }
 
-    /// The first plan section not yet completed: where teaching resumes after
-    /// an approval or a revision.
+    /// The track this session teaches, when the plan branched (§4.26).
+    pub fn own_track(&self) -> Option<&Track> {
+        let branch = self.branch.as_ref()?;
+        self.plan.as_ref()?.track(&branch.track)
+    }
+
+    /// The sections this session teaches, in teaching order: its track's in a
+    /// branched session, otherwise every plan section in plan order.
+    pub fn own_sections(&self) -> Vec<&Section> {
+        let Some(plan) = self.plan.as_ref() else {
+            return Vec::new();
+        };
+        match self.own_track() {
+            Some(track) => track
+                .section_ids
+                .iter()
+                .filter_map(|id| plan.sections.iter().find(|s| &s.id == id))
+                .collect(),
+            None => plan.sections.iter().collect(),
+        }
+    }
+
+    /// The first section of this session not yet completed: where teaching
+    /// resumes after an approval or a revision. In a branched session only
+    /// its own track counts; the other tracks belong to other sessions.
     pub fn next_open_section(&self) -> Option<String> {
-        self.plan
-            .as_ref()?
-            .sections
-            .iter()
+        self.own_sections()
+            .into_iter()
             .find(|s| !self.completed_sections.contains(&s.id))
             .map(|s| s.id.clone())
+    }
+
+    /// The merge track this session's track feeds, if any (§4.26): when its
+    /// own sections are done, the session hands off instead of closing the
+    /// whole plan.
+    pub fn feeds(&self) -> Option<&Track> {
+        let branch = self.branch.as_ref()?;
+        self.plan.as_ref()?.feeds(&branch.track)
     }
 
     /// Whether a node has at least one `check` question graded `correct`.
@@ -613,6 +731,7 @@ mod tests {
                 style: String::new(),
                 nodes: vec![],
                 sections: vec![section],
+                tracks: vec![],
             }),
             current_section: Some("s1".into()),
             hunt,

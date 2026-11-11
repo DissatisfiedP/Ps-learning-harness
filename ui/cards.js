@@ -8,7 +8,7 @@ import { enhanceLive } from './content.js';
 import { calibrationBlock, fieldGuide } from './fieldguide.js';
 import { escapeHtml, renderMarkdown } from './markdown.js';
 import { getPlugin } from './pluginstore.js';
-import { attachPanZoom, planDiagram, progressOf, sectionOf } from './plan-diagram.js';
+import { attachPanZoom, ownSections, planDiagram, planTracks, progressOf, sectionOf, trackOf } from './plan-diagram.js';
 
 let uid = 0;
 const nextId = (prefix) => `${prefix}-${++uid}`;
@@ -104,9 +104,10 @@ function phaseIndex(st) {
 
 /** Section position while teaching: `{ n, m }` (1-based), or null. With no
  *  section open the position is the next unfinished one — where teaching
- *  resumes — never a fake "last of all". */
+ *  resumes — never a fake "last of all". A branched session counts only its
+ *  own track's sections. */
 export function sectionPosition(st) {
-  const sections = st?.plan?.sections ?? [];
+  const sections = ownSections(st);
   if (!sections.length) return null;
   const done = new Set(st?.completedSections ?? []);
   let i = sections.findIndex((s) => s.id === st?.currentSection);
@@ -361,6 +362,11 @@ export function questionCard(item, { onAnswer, readOnly, ctx = {} }) {
   const pending = !item.answer && !readOnly;
   const block = exerciseShell(ROLE_LABEL[args.role] ?? 'Question', pending);
   block.append(prose(args.prompt, 'prose prompt'));
+  if (item.answer?.setAside) {
+    if (args.view) block.append(h('p', 'view-task', args.view.task));
+    block.append(h('p', 'waiting', 'Set aside for your comment.'));
+    return block;
+  }
   if (args.view) {
     block.append(h('p', 'view-task', args.view.task));
     if (item.answer) {
@@ -425,7 +431,9 @@ export function choiceCard(item, { onAnswer, readOnly }) {
   const pending = !item.answer && !readOnly;
   const block = exerciseShell('Your choice', pending);
   block.append(prose(args.question, 'prose prompt'));
-  if (item.answer) {
+  if (item.answer?.setAside) {
+    block.append(h('p', 'waiting', 'Set aside for your comment.'));
+  } else if (item.answer) {
     const you = youBlock([[item.answer.answer ?? '', 'you-text']]);
     you.tabIndex = -1;
     you.dataset.refocus = '';
@@ -512,15 +520,19 @@ export function sectionTitle(item, fallbackPlan) {
   return plan?.sections?.find((s) => s.id === item.sectionId)?.title ?? 'New section';
 }
 
-/** "Section 2 of 5 / The power rule / Goal: …" — or "Wrapping up". */
+/** "Section 2 of 5 / The power rule / Goal: …" — or "Wrapping up". In a plan
+ *  with tracks the count is the section's own track's. */
 export function sectionOpener(item, fallbackPlan) {
   const el = h('div', 'opener');
   const plan = item.plan ?? fallbackPlan;
-  const sections = plan?.sections ?? [];
+  const all = plan?.sections ?? [];
+  const track = item.close ? null : trackOf(plan, item.sectionId);
+  const sections = track ? (track.sectionIds ?? []).map((id) => all.find((s) => s.id === id)).filter(Boolean) : all;
   const i = item.close ? -1 : sections.findIndex((s) => s.id === item.sectionId);
   if (i >= 0) {
     const known = sections[i].assumedKnown ? ' · Quick check' : '';
-    el.append(h('p', 'small-caps opener-kicker', `Section ${i + 1} of ${sections.length}${known}`));
+    const kind = sections[i].revision ? 'Revision · ' : '';
+    el.append(h('p', 'small-caps opener-kicker', `${kind}Section ${i + 1} of ${sections.length}${known}`));
   }
   el.append(h('h2', 'opener-title', sectionTitle(item, fallbackPlan)));
   const exit = i >= 0 ? sections[i].exit : null;
@@ -964,16 +976,20 @@ export function planCard(plan, {
   // ---- the drawing: the card's primary surface ----
   const fig = h('figure', 'plan-figure plan-figure-topics');
   const frame = h('div', 'plan-diagram-frame');
+  const tracks = planTracks(plan);
   fig.append(
     frame,
     h(
       'figcaption',
       'plan-diagram-caption',
-      'One box per topic; an arrow joins two topics wherever an idea needs an idea from the other. Choose ⋯ in a box for its details and actions.',
+      tracks
+        ? 'One box per topic, one lane per track; inside a lane an arrow joins two topics wherever an idea needs an idea from the other, and a dashed arrow joins the lanes a later track picks up from. Choose ⋯ in a box for its details and actions.'
+        : 'One box per topic; an arrow joins two topics wherever an idea needs an idea from the other. Choose ⋯ in a box for its details and actions.',
     ),
   );
   fig.hidden = !sections.length;
   doc.append(fig);
+  if (tracks && sections.length) doc.append(trackList(plan, { own: state?.branch?.track ?? null }));
 
   // ---- the drawer: one section's long description and its actions ----
   const drawer = h('aside', 'plan-node-drawer');
@@ -1022,6 +1038,7 @@ export function planCard(plan, {
       sectionStatus: boxStatus,
       nodeStatus,
       annotate,
+      track: state?.branch?.track ?? null,
     });
     svg.setAttribute('width', String(Math.round(artW)));
     svg.setAttribute('height', String(Math.round(artH)));
@@ -1120,6 +1137,9 @@ export function planCard(plan, {
       body.append(h('p', 'plan-line known-line', 'You said you know this. One quick check when we get here.'));
     }
     if (section.desktopOnly) body.append(h('p', 'plan-line', 'Desktop only'));
+    if (section.revision) {
+      body.append(h('p', 'plan-line', 'Revision: a short re-check of ideas from the tracks that merge here, before this track goes on.'));
+    }
     body.append(...sectionControls(section, edit));
     drawer.replaceChildren(head, body);
   }
@@ -1314,7 +1334,14 @@ export function planCard(plan, {
     onDiscard?.();
   });
 
-  doc.append(noteField.wrap, actions, status.el, change.form);
+  // Approving a plan with parallel tracks forks sessions: say so where the
+  // click happens, not after it (ui-design §7.1.1).
+  const branchNote = !teaching ? approvalBranchNote(plan) : null;
+  if (branchNote) {
+    branchNote.id = nextId('branch-note');
+    approve.setAttribute('aria-describedby', `${branchNote.id} plan-edit-status`);
+  }
+  doc.append(noteField.wrap, ...(branchNote ? [branchNote] : []), actions, status.el, change.form);
   if (sections.length) draw();
   // A card rebuilt under an open drawer (a state refresh, a plan revision)
   // keeps it open on the same section — the learner did not change sections.
@@ -1334,7 +1361,8 @@ export function planCard(plan, {
 }
 
 
-/** The plan list: sections with their status words and their claims. */
+/** The plan list: sections with their status words and their claims —
+ *  grouped under their track's heading when the plan has tracks. */
 function sectionList(st) {
   const plan = st.plan;
   const nodes = new Map((plan.nodes ?? []).map((n) => [n.id, n]));
@@ -1343,9 +1371,8 @@ function sectionList(st) {
   // Same rule as the diagram (plan-diagram.js::progressOf): the open section,
   // else the next unfinished one — never "the last one" by accident.
   const currentId =
-    st.currentSection ?? (st.ended ? null : sections.find((s) => !done.has(s.id))?.id ?? null);
-  const ol = h('ol', 'sheet-sections');
-  for (const s of sections) {
+    st.currentSection ?? (st.ended ? null : ownSections(st).find((s) => !done.has(s.id))?.id ?? null);
+  const sectionItem = (s) => {
     const isDone = done.has(s.id);
     const current = !isDone && currentId === s.id;
     const li = h('li', current ? 'current' : '');
@@ -1357,6 +1384,7 @@ function sectionList(st) {
       t.append(g);
     }
     t.append(document.createTextNode(s.title ?? s.id));
+    if (s.revision) t.append(h('span', 'sheet-status', ' — Revision'));
     if (isDone) t.append(h('span', 'sheet-status', ' — Done'));
     if (current) t.append(h('span', 'sheet-status', ' — Current'));
     const aimText = s.targetLevel ? `Aim: ${levelLabel(s.targetLevel)}` : '';
@@ -1389,14 +1417,84 @@ function sectionList(st) {
       }
       li.append(ul);
     }
-    ol.append(li);
+    return li;
+  };
+  const tracks = planTracks(plan);
+  if (!tracks) {
+    const ol = h('ol', 'sheet-sections');
+    for (const s of sections) ol.append(sectionItem(s));
+    return ol;
   }
-  return ol;
+  const own = st.branch?.track ?? null;
+  const byId = new Map(sections.map((s) => [s.id, s]));
+  const wrap = h('div', 'sheet-tracks');
+  for (const track of tracks) {
+    const group = h('section', `sheet-track${own && track.id !== own ? ' is-other' : ''}`);
+    const head = h('h4', 'sheet-track-title', track.title || track.id);
+    head.id = nextId('track');
+    group.setAttribute('aria-labelledby', head.id);
+    const words = [afterText(plan, track), own ? (track.id === own ? 'this session' : 'other session') : ''];
+    const note = words.filter(Boolean).join(' · ');
+    if (note) head.append(h('span', 'sheet-status', ` — ${note}`));
+    const ol = h('ol', 'sheet-sections');
+    for (const id of track.sectionIds ?? []) if (byId.has(id)) ol.append(sectionItem(byId.get(id)));
+    group.append(head, ol);
+    wrap.append(group);
+  }
+  return wrap;
+}
+
+/** "after Algebra + Geometry" for a merge track, '' for a root track. */
+function afterText(plan, track) {
+  const titles = (track.after ?? []).map((id) => {
+    const t = planTracks(plan)?.find((x) => x.id === id);
+    return t?.title || id;
+  });
+  return titles.length ? `after ${titles.join(' + ')}` : '';
+}
+
+/** The plan card's track summary: each track's sections in teaching order. */
+function trackList(plan, { own = null } = {}) {
+  const byId = new Map((plan.sections ?? []).map((s) => [s.id, s]));
+  const list = h('ol', 'plan-tracks');
+  list.setAttribute('aria-label', 'Tracks');
+  for (const track of planTracks(plan) ?? []) {
+    const li = h('li', `plan-track${own && track.id !== own ? ' is-other' : ''}`);
+    const head = h('p', 'plan-track-title', track.title || track.id);
+    const words = [afterText(plan, track), own ? (track.id === own ? 'this session' : 'other session') : ''];
+    const note = words.filter(Boolean).join(' · ');
+    if (note) head.append(h('span', 'plan-track-note', ` — ${note}`));
+    const titles = (track.sectionIds ?? [])
+      .map((id) => byId.get(id))
+      .filter(Boolean)
+      .map((s) => (s.revision ? `Revision: ${s.title ?? s.id}` : s.title ?? s.id));
+    li.append(head, h('p', 'plan-track-sections', titles.join(' → ')));
+    list.append(li);
+  }
+  return list;
+}
+
+/**
+ * "Approving creates 2 more sessions…" — under a plan whose tracks run in
+ * parallel, or null when it has fewer than two root tracks.
+ */
+function approvalBranchNote(plan) {
+  const tracks = planTracks(plan);
+  const roots = (tracks ?? []).filter((t) => !(t.after ?? []).length);
+  if (roots.length < 2) return null;
+  const more = roots.length - 1;
+  const merges = tracks.length > roots.length;
+  const p = h('p', 'plan-branch-note');
+  p.textContent =
+    `This plan runs as ${roots.length} parallel tracks. Approving keeps “${roots[0].title || roots[0].id}” here and creates ` +
+    `${more} more session${more === 1 ? '' : 's'}, one per track; ${more === 1 ? 'it runs' : 'they run'} when you open ${more === 1 ? 'it' : 'them'} from Home.` +
+    (merges ? ' When the tracks that merge have ended, a merge session picks up from them.' : '');
+  return p;
 }
 
 /** "Section 5 of 9 · Exponential and logarithmic rules" — where teaching is. */
 function positionLine(st) {
-  const sections = st.plan?.sections ?? [];
+  const sections = ownSections(st);
   // Expanded from the card while the plan is still a proposal: nothing is
   // being taught yet, so the bar says how big it is, not where we are.
   if (st.phase === 'awaitApproval') return sections.length ? `${sections.length} sections · not approved yet` : '';
@@ -1514,7 +1612,7 @@ export function planOverlay(st, {
   /** The section teaching is at (the diagram's own rule, plan-diagram.js). */
   function currentSectionId() {
     const done = new Set(st.completedSections ?? []);
-    const sections = plan.sections ?? [];
+    const sections = ownSections(st);
     return st.currentSection ?? (st.ended ? null : sections.find((s) => !done.has(s.id))?.id ?? null);
   }
 
@@ -1545,7 +1643,13 @@ export function planOverlay(st, {
 
   function makeView(which) {
     const { sectionStatus, nodeStatus } = progressOf(st);
-    const art = planDiagram(plan, { level: which, maxW: which === 'ideas' ? 900 : 1200, sectionStatus, nodeStatus });
+    const art = planDiagram(plan, {
+      level: which,
+      maxW: which === 'ideas' ? 900 : 1200,
+      sectionStatus,
+      nodeStatus,
+      track: st.branch?.track ?? null,
+    });
     art.svg.setAttribute('width', String(Math.round(art.width)));
     art.svg.setAttribute('height', String(Math.round(art.height)));
     // Focus order: the overlay's autofocus target is the heading, so the
@@ -1648,8 +1752,16 @@ export function jobChip(item, { onCancel }) {
   return line;
 }
 
-/** "Plan update  Plan revised: …" — or a planner failure in `--danger`. */
+/** "Plan update  Plan revised: …" — or a planner failure in `--danger`. A
+ *  branch notice ("Branches", tracks forked or merged) may run to several
+ *  paragraphs — the merge session's summary of each branch — so it renders
+ *  its text as Markdown. */
 export function noticeEl(item) {
+  if (item.branch && !item.error) {
+    const el = h('div', 'notice branch-notice');
+    el.append(h('p', 'small-caps notice-label', 'Branches'), prose(item.text, 'prose notice-body'));
+    return el;
+  }
   const el = h('p', `notice${item.error ? ' danger' : ''}`);
   if (item.error) {
     el.setAttribute('role', 'status');

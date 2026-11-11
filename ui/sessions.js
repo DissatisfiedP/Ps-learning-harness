@@ -40,6 +40,22 @@ function metaText(s) {
 /** Read-only on this phone because the session used a desktop-only plugin (docs/sync-build.md, "Sessions on mobile"). */
 const isLocked = (s) => s.readOnly && s.readOnlyReason === 'desktop-plugin';
 
+/** "Branch 2 of 3 · Geometry · from Learning trig" / "Merge of Algebra + Geometry". */
+function lineageText(l) {
+  if (l.kind === 'merge') return `Merge of ${(l.inputs ?? []).map((i) => i.trackTitle).join(' + ')}`;
+  const from = l.kind === 'fork' && l.originTitle ? ` · from ${l.originTitle}` : '';
+  return `Branch ${l.index} of ${l.count} · ${l.trackTitle}${from}`;
+}
+
+/** The branch's state chip: `{ text, tone }`; tone keys the chip's style. */
+function lineageState(l) {
+  if (!l.ended) return l.started ? { text: 'In progress', tone: 'running' } : { text: 'Ready', tone: 'ready' };
+  if (!l.feeds) return { text: 'Done', tone: 'done' };
+  if (l.feeds.sessionId) return { text: 'Done · merged', tone: 'done' };
+  const waits = l.waitingOn ?? [];
+  return { text: waits.length ? `Done · merge waits for ${waits.join(', ')}` : 'Done · merge pending', tone: 'done' };
+}
+
 /** "Extract" item note: why it is greyed, or how much it would read. */
 function extractNote(st) {
   if (st.running) return 'Running now';
@@ -85,6 +101,30 @@ export function createSessionList(root, hooks) {
     // Dimmed but still openable: the session shows its lock note and "Continue here anyway".
     li.classList.toggle('locked', isLocked(s));
     li.querySelector('.session-more').setAttribute('aria-label', `More actions for ${s.title || 'this session'}`);
+    fillLineage(li, s.lineage ?? null);
+  }
+
+  /** The branch line under the title (ui-design §7.1.1): lineage plus state.
+   *  Inside the open button, so the row's accessible name carries it. */
+  function fillLineage(li, lineage) {
+    li.classList.toggle('has-lineage', Boolean(lineage));
+    let line = li.querySelector('.session-lineage');
+    if (!lineage) {
+      line?.remove();
+      return;
+    }
+    if (!line) {
+      line = document.createElement('span');
+      line.className = 'session-lineage';
+      line.innerHTML =
+        '<span class="sr-only">, </span><span class="session-lineage-text"></span><span class="sr-only">, </span><span class="session-state"></span>';
+      li.querySelector('.session-open').append(line);
+    }
+    const state = lineageState(lineage);
+    line.querySelector('.session-lineage-text').textContent = lineageText(lineage);
+    const chip = line.querySelector('.session-state');
+    chip.textContent = state.text;
+    chip.dataset.tone = state.tone;
   }
 
   // ---------- the row's "…" menu ----------

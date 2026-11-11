@@ -17,6 +17,7 @@ export function attachmentName(a) {
 export function kindLabel(kind) {
   if (kind === 'image') return 'Image';
   if (kind === 'folder') return 'Folder';
+  if (kind === 'library') return 'Reference library';
   return 'File';
 }
 

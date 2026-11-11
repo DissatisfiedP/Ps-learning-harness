@@ -4,11 +4,16 @@
 // only sent with the next learner message; Send moves staged images into
 // the data repo, and removing a chip deletes its staged copy. Practice has
 // no file tools, so it takes images only (no '+', no '@'). The `@` list is
-// an ARIA combobox over the backend's mention search.
+// an ARIA combobox over the backend's mention search. On Home (a new Learn
+// session) '+' opens a menu: files, or a folder imported as a reference
+// library (library.js), or a library imported before; a library becomes a
+// `library` chip that links it to the new session. In a session '+' picks
+// files as before. Libraries never go through the workspace folder.
 
 import { call, message } from './api.js';
 import { attachmentChip } from './attachment.js';
 import { confirmDialog } from './dialog.js';
+import { importLibrary, listLibraries, progressText, reportText } from './library.js';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
@@ -34,6 +39,8 @@ function say(text, error = false) {
   if (!els) return;
   els.error.textContent = text;
   els.error.classList.toggle('error', Boolean(text) && error);
+  // A note (import progress, a result) reads as status, not as an error.
+  els.error.classList.toggle('note', Boolean(text) && !error);
   els.error.hidden = !text;
 }
 
@@ -144,6 +151,130 @@ async function pickFiles() {
   } catch (e) {
     // "no files chosen" is a normal cancel.
     if (!/no files chosen/i.test(message(e))) say(`Couldn’t add files: ${message(e)}`, true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+// ---------- Home '+': files or a reference library ----------
+
+/** Home, Learn, no session yet: the only place a library is linked. */
+const onHome = () => !sessionId && mode === 'learn';
+
+function updateAddButton() {
+  if (!els) return;
+  const home = onHome();
+  els.add.setAttribute('aria-label', home ? 'Add files or a reference library' : 'Add files');
+  if (home) {
+    els.add.setAttribute('aria-haspopup', 'menu');
+    els.add.setAttribute('aria-expanded', String(!els.addMenu.hidden));
+  } else {
+    closeAddMenu();
+    els.add.removeAttribute('aria-haspopup');
+    els.add.removeAttribute('aria-expanded');
+  }
+}
+
+function closeAddMenu() {
+  if (!els?.addMenu || els.addMenu.hidden) return;
+  els.addMenu.hidden = true;
+  els.add.setAttribute('aria-expanded', 'false');
+}
+
+function menuItem(label, note, onClick) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'menu-item';
+  b.setAttribute('role', 'menuitem');
+  b.textContent = label;
+  if (note) {
+    const n = document.createElement('span');
+    n.className = 'menu-note';
+    n.textContent = note;
+    b.append(n);
+  }
+  b.addEventListener('click', () => {
+    closeAddMenu();
+    els.add.focus({ preventScroll: true });
+    onClick();
+  });
+  return b;
+}
+
+async function openAddMenu() {
+  const menu = els.addMenu;
+  menu.textContent = '';
+  menu.append(
+    menuItem('Files…', null, pickFiles),
+    menuItem('Folder as a reference library…', 'Copied in; only its text syncs', addLibraryFolder),
+  );
+  menu.hidden = false;
+  els.add.setAttribute('aria-expanded', 'true');
+  menu.querySelector('.menu-item')?.focus();
+  let libs = [];
+  try {
+    libs = await listLibraries();
+  } catch {
+    // The two actions still work without the list.
+  }
+  if (menu.hidden || !libs.length) return;
+  const heading = document.createElement('div');
+  heading.className = 'menu-heading';
+  heading.textContent = 'Link a library';
+  menu.append(heading);
+  for (const lib of libs) {
+    const linked = items.some((it) => it.attachment.kind === 'library' && it.attachment.path === lib.slug);
+    const item = menuItem(lib.name, `${lib.files} files${linked ? ' · linked' : ''}`, () => linkLibrary(lib));
+    item.disabled = linked;
+    menu.append(item);
+  }
+}
+
+function onAdd() {
+  if (!onHome()) {
+    pickFiles();
+    return;
+  }
+  if (els.addMenu.hidden) openAddMenu();
+  else closeAddMenu();
+}
+
+function onAddMenuKey(e) {
+  const list = [...els.addMenu.querySelectorAll('.menu-item:not(:disabled)')];
+  const at = list.indexOf(document.activeElement);
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeAddMenu();
+    els.add.focus({ preventScroll: true });
+  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    list[(at + step + list.length) % list.length]?.focus();
+  }
+}
+
+/** A library chip: sent with the first message, it links the library. */
+function linkLibrary(lib) {
+  addItem({ kind: 'library', path: lib.slug, name: lib.name }, { origin: 'library' });
+}
+
+/** Pick a folder, import it (or refresh it if imported before) and link it. */
+async function addLibraryFolder() {
+  let path;
+  try {
+    path = await call('pick_folder');
+  } catch (e) {
+    if (!/no folder chosen/i.test(message(e))) say(message(e), true);
+    return;
+  }
+  setBusy(true);
+  say('Reading the folder…');
+  try {
+    const report = await importLibrary(path, (p) => say(progressText(p)));
+    linkLibrary(report.library);
+    say(reportText(report));
+  } catch (e) {
+    say(`Couldn’t import the folder: ${message(e)}`, true);
   } finally {
     setBusy(false);
   }
@@ -332,6 +463,7 @@ export function initComposer(h) {
     error: document.getElementById('attach-error'),
     pop: document.getElementById('mention-pop'),
     list: document.getElementById('mention-list'),
+    addMenu: document.getElementById('add-menu'),
   };
   if (!els.composer) return null;
 
@@ -339,7 +471,12 @@ export function initComposer(h) {
   els.prompt.setAttribute('aria-controls', 'mention-list');
   els.prompt.setAttribute('aria-expanded', 'false');
 
-  els.add.addEventListener('click', pickFiles);
+  els.add.addEventListener('click', onAdd);
+  els.addMenu?.addEventListener('keydown', onAddMenuKey);
+  document.addEventListener('pointerdown', (e) => {
+    const menu = els.addMenu;
+    if (menu && !menu.hidden && !menu.contains(e.target) && !els.add.contains(e.target)) closeAddMenu();
+  });
   els.prompt.addEventListener('input', updateMention);
   els.prompt.addEventListener('click', updateMention);
   els.prompt.addEventListener('keyup', (e) => {
@@ -386,6 +523,7 @@ export function initComposer(h) {
 
   wireNativeDrop();
   renderChips();
+  updateAddButton();
   return api;
 }
 
@@ -395,6 +533,7 @@ const api = {
     sessionId = id ?? null;
     closeMention();
     renderChips();
+    updateAddButton();
   },
 
   setMode(next) {
@@ -409,6 +548,7 @@ const api = {
       }
     }
     renderChips();
+    updateAddButton();
   },
 
   setVision(next) {

@@ -18,7 +18,15 @@ This file fixes the interfaces.
 The data repo (`$LEARNING_HARNESS_REPO`, default `<app data dir>/repo`) is already a plain-file store of append-only
 op logs. Sync makes it a git repository with app-controlled merges, so one learner's devices stay consistent through
 any host. **Device-local state never syncs**: `settings.json`, `credentials.json`, `models-cache.json`,
-`workspace*.json`, `session-index.json`, `plugins/<id>/<sha256>/`, `page-images/`, staged images.
+`workspace*.json`, `session-index.json`, `plugins/<id>/<sha256>/`, `page-images/`, staged images, and the reference
+libraries' device-local half (`<config>/library/<slug>/`: the copied originals and `local.json` with the source folder).
+
+**Reference libraries sync as text only** (architecture §4.27): `<repo>/library/<slug>/library.json` and
+`<repo>/library/<slug>/text/**.md` are ordinary repo files, carried by git and WebDAV like the op logs. Each text file
+is capped at 2 MiB at import (cut with a note; the index marks it `truncated`), so a library adds a few MB of
+diffable text rather than its PDFs, and a phone reads, searches and links every library without the originals.
+Import and refresh are desktop-only; removing a library deletes its repo folder, which leaves every device at the next
+sync.
 
 ## Crate and auth
 
@@ -50,7 +58,10 @@ any host. **Device-local state never syncs**: `settings.json`, `credentials.json
 2. `git add -A` + commit local changes when anything is dirty (`sync: <ISO timestamp>`), authored as the learner's
    configured name or `learning-harness` / `learning-harness@localhost`.
 3. `fetch` the remote branch. Nothing new → push if ahead, done.
-4. `merge` the fetched commit into the local branch.
+4. Local has nothing the remote lacks (ahead 0, behind > 0) → **fast-forward**: write the changed paths, point the
+   index and branch at the fetched commit, no merge commit. (Fixed 2026-11-11: merging here made a merge commit the
+   other device then had to merge again, so two idle devices traded "1 pulled, 1 pushed" on every sync forever.)
+   Otherwise `merge` the fetched commit into the local branch.
 5. For **every conflicted path**, resolve by type:
    - **`*.jsonl`**: union merge in code — read both sides' lines, drop unparseable lines, deduplicate by `opId` (an op
      with no `opId`, e.g. a hand-written line, is keyed by its whole line), sort by `(at, opId)` when both exist, write
@@ -109,6 +120,7 @@ pub struct SyncReport {
 | `set_webdav(&self, url: Option<&str>, username: Option<&str>, password: Option<&str>)` | `{ url, username, password }` | saves the WebDAV settings; an empty url disconnects WebDAV and deletes the manifest; `None` keeps a saved value, `""` clears it |
 | `acknowledge_conflicts(&self)` | — | clears `needsAttention` (the `.conflicts/` files stay in history) |
 | `sync_if_changed(&self) -> bool` | — | starts a background run only when a configured target has local changes (stat/status checks, no network); returns whether one started. The UI calls it when the app goes to the background |
+| `sync_in_background(&self) -> bool` | — | starts a full background run (pull and push) unless one is in flight; returns whether one started. The UI calls it when the app comes back to the foreground (at most once a minute) and every 5 minutes while visible |
 | `sync_before_exit(&self, deadline)` | — (app only) | on desktop close: waits for a run in flight or starts one when there are local changes, blocking at most `deadline` (15 s); returns whether it finished |
 | `mobile_unlock(&self, session_id)` | `{ sessionId }` | appends `mobileUnlock` to a session locked on this phone for a desktop-only plugin; returns the reloaded session |
 
@@ -128,7 +140,16 @@ Triggers, all best effort and never blocking a turn (each runs git, then WebDAV,
 - when the app goes to the background (mobile has no close): the UI calls `sync_if_changed` on
   `document.visibilitychange` → hidden. Tauri 2.12 has no suspend/background `RunEvent` on Android, so this is the
   webview's event; it is non-blocking and does nothing without local progress;
-- the Sync now button (`sync_now`).
+- the Sync now button (`sync_now`);
+- coming back to the foreground (`visibilitychange` → visible, window `focus`; at most once a minute) and every 5
+  minutes while the app is visible: the UI calls `sync_in_background` (added 2026-11-11, so another device's work
+  arrives without a restart).
+
+After any run that changed files on this device (git pulled commits; WebDAV downloaded, merged or deleted a file, or a
+pass failed part-way), the engine calls its change hook (`Sync::set_on_change`), which the Harness turns into the
+runtime event `{ kind: "repoChanged", sessionId: "" }`. The UI re-reads the session list and re-opens the open session
+when its `updatedAt` moved and nothing is streaming in it (the composer draft is kept). The session store's LRU keys
+each cached op list by the file's length and mtime, so a file sync rewrote is read again instead of served stale.
 
 Offline or misconfigured → a recorded `last_error` on that target and `unsynced: true`; the session keeps working
 read-write (the "not synced" state is what the Home banner reads).
@@ -250,6 +271,15 @@ request timeout. OpenDAL was not used. Errors are sentences: `401` (and `403` on
 username or app password was rejected", connect/DNS failures → "the WebDAV server is unreachable; check the network
 and the URL", a certificate failure, a timeout and `507` have their own sentences, and any other status names the
 status and the path.
+
+### Branch sessions (architecture §4.26)
+
+A plan split into tracks creates new session files (forks at approval, a merge when the last input ends). They are
+**new files with new ids**, written whole and renamed in; no existing file is ever rewritten. The ids, and the ids and
+times of the ops a new file is created with, are derived from data every device shares, so two devices creating the
+same merge before they sync write the same path with the same op ids and the `*.jsonl` union keeps one line per op.
+Copied ops keep their ids; the union dedupes per file, so the same `opId` in two files is fine. A merge whose inputs
+ended on other devices is created by the next `list_sessions` after the sync brings them in.
 
 ### Sessions on mobile: desktop-only plugins and attached folders
 

@@ -130,6 +130,16 @@ The app refuses it while any node in the section lacks a passing check. On succe
 {{#levels}}
 It also refuses it until at least one passing check in the section is at the target level.
 {{/levels}}
+{{#branch}}
+
+### This session is one branch of a split plan
+
+The planner split this plan into tracks that run as separate sessions (session state, "Tracks"). This session teaches only its own track: `section_done` moves through its sections, and sections marked "other session" are taught elsewhere. Don't teach them here; if the learner needs one now, say which session has it. The other branches' learning reaches you only through a `[branches]` message.
+
+**A revision section** (marked `revision`) starts a merge: the learner learned its nodes in other sessions, possibly days ago. Read the `[branches]` summary, then ask one fresh check per node in a new context, before anything new. Re-teach briefly only what misses.
+
+**When your track feeds a merge**, the close is a hand-off: what this branch established, what stayed fragile, and that the merge session continues once every branch feeding it has ended. Then call `session_end`; the app creates the merge session when the last branch ends.
+{{/branch}}
 
 After the last section, write the close:
 - the few base facts the goal now follows from, and how it follows;

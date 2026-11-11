@@ -29,11 +29,11 @@ Plugin catalog (id, what it gives the tutor, when to use it and when not to, pla
 ### Step 1: the dependency map
 
 1. List what the goal genuinely requires, using the field brief.
-2. Remove what the learner already holds (probe floors, strong learner-model data). Don't re-teach it.{{#starting_point}} A strand the probe never measured (`unprobed` with reason `new`, or `skipped` in a quick check) is not held: start it at the field's roots, keep its first section small, and say in `approach` that it starts from the foundations, because its first check is the measurement.{{/starting_point}}
+2. Remove what the learner already holds (probe floors, strong learner-model data). Don't re-teach it. Check the learner's graph for each prerequisite with `graph_search` and `graph_read`: a node an earlier session established, which the probe didn't contradict, is held; one held long ago or weakly gets a short section its first check confirms.{{#starting_point}} A strand the probe never measured (`unprobed` with reason `new`, or `skipped` in a quick check) is not held: start it at the field's roots, keep its first section small, and say in `approach` that it starts from the foundations, because its first check is the measurement.{{/starting_point}}
 3. Remove what is off the path, however interesting. Coverage is not the goal.
 4. **Stress-test the roots.** For every node with nothing below it, ask: can *this learner* accept it at face value, without caveats? If it is really a consequence of something simpler, push it down and add the simpler node. A lesson founded on a disguised mid-level result is built on sand.
 5. Give each node:
-   - `id`: a lowercase slug, permanent once written;
+   - `id`: a lowercase slug, permanent once written; when the graph already has the same idea, reuse its id and title;
    - a short `title`;
    - a `kind` (`mechanism` | `fact` | `procedure` | `perceptual` | `argument`);
    - `requires`: the ids of the nodes it depends on.
@@ -85,6 +85,22 @@ Example section, for a learner who holds Ohm's law but missed the divider check 
   exit: "Finds an unknown resistor in a divider from the measured output, and predicts how a load changes V_out." }
 ```
 `cas` is included because the section is all arithmetic you should verify. A demo isn't, because nothing here varies continuously enough to need one.
+
+### Optional: parallel tracks
+
+Most plans are one route. Split it into `tracks` only when the goal has **independent strands of real size** (each at least two sections, about a sitting or more) that don't need each other until a later point, *and* the learner gains from running them side by side: they asked to switch topics, alternate subjects, or work on two strands in different places. Never split a small plan.
+
+Each track runs as its own session; the learner opens each from Home. Root tracks (no `after`) start at approval; a merge track lists in `after` the two or more tracks it joins and starts in a new session, with a short revision, once they have all ended. Exactly one final track. Every section is in exactly one track. A node may require only nodes on its own track or on tracks that merge into it.
+```
+tracks: [{ id: "dc", title: "DC circuits", sectionIds: ["ohm", "dividers"], after: [] },
+         { id: "signals", title: "Signals", sectionIds: ["sine", "phasors"], after: [] },
+         { id: "filters", title: "Filters", sectionIds: ["rc-filter"], after: ["dc", "signals"] }]
+```
+Say in `approach` why the plan splits, and where the strands meet.
+{{#branch}}
+
+**This session is one branch** (session state, "Tracks"). Revise only this session's track: keep `tracks` (ids, titles, `after`) and the other tracks' `sectionIds` exactly as they are. Keep a `revision` section unchanged, or remove it.
+{{/branch}}
 
 ### Step 3: the approach
 

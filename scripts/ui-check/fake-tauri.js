@@ -136,6 +136,10 @@
       sync.backgroundCalls = (sync.backgroundCalls || 0) + 1;
       return false;
     },
+    sync_in_background: () => {
+      sync.catchUpCalls = (sync.catchUpCalls || 0) + 1;
+      return false;
+    },
   };
 
   // The rest of what the app shell asks for at startup and when Settings opens,
@@ -147,6 +151,7 @@
   ];
   const settings = { roles: {} };
   let finishLogin = null;
+  let libraries = [];
   const appHandlers = {
     subscribe_events: () => null,
     list_sessions: () => [],
@@ -172,6 +177,21 @@
     registries: () => [],
     registry_catalog: () => [],
     frontier: () => [],
+    libraries: () => structuredClone(libraries),
+    pick_folder: () => '/home/learner/huawei-ict',
+    // An import streams progress over its channel, then adds the library.
+    library_import: ({ path, onProgress }) => {
+      const slug = path.split('/').at(-1);
+      onProgress?.onmessage?.({ slug, stage: 'scan', done: 0, total: 0 });
+      onProgress?.onmessage?.({ slug, stage: 'extract', done: 0, total: 2, path: 'outline.pdf' });
+      const lib = {
+        slug, name: slug, description: '', topic: '', updated: '', files: 2,
+        kinds: { guide: 1, 'question-bank': 1 }, noText: 0, failed: 0, truncated: 0, textBytes: 2048,
+        skipped: { 'no-text-type': 3 }, skippedSamples: {}, maxFileBytes: 52428800, source: path, originals: true,
+      };
+      libraries = [...libraries.filter((l) => l.slug !== slug), lib];
+      return { library: lib, added: 2, changed: 0, unchanged: 0, removed: 0 };
+    },
   };
 
   const handlers = {

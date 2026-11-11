@@ -82,8 +82,10 @@ Questions you've already asked still count.
 **Why bracket rather than survey.** The plan starts where the learner's understanding ends. If you place that edge too low, the lesson re-teaches what they hold. If you place it too high, it builds on sand. A survey of easy questions only tells you the learner knows easy things. A floor and a ceiling on each strand tells you exactly where to begin.
 
 **Choose strands.** Take the strands this goal actually needs: from your own knowledge at first, and from the brief once it arrives.
-- Skip strands the learner model shows as held, with recent and strong evidence.
+- Check the learner's graph first. The learner state lists its topics and the nodes matching the goal; `graph_search` each strand's key ideas, and `graph_read` a node for its prerequisites and record. A node there was established in an earlier session.
+- Don't probe what the graph shows as held with recent, strong evidence (passing checks, a recent session).
 - Strands held long ago or weakly get a single confirming question.
+- No match, or an empty graph, means no record, not ignorance: probe as usual.
 
 **Bracket each strand.** The learner's edge on a strand lies between a *floor* (what they reliably get right) and a *ceiling* (the first thing they miss). Find both in as few questions as you can.
 - Open high, near the hardest thing the goal needs from this strand. A miss walks you down cheaply.

@@ -24,9 +24,10 @@ pub enum AgentName {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AgentEvent {
-    /// A session was created or retitled.
+    /// A session was created or retitled. Boxed: a summary with lineage is
+    /// far larger than every other event.
     Session {
-        session: SessionSummary,
+        session: Box<SessionSummary>,
     },
     TurnStart {
         agent: AgentName,
@@ -48,6 +49,10 @@ pub enum AgentEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Sync changed files in the data repo (another device's work arrived):
+    /// session lists and open sessions should be re-read. Sent with an empty
+    /// session id.
+    RepoChanged,
 }
 
 /// Receives `(session_id, event)`. Must not block.

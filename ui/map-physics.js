@@ -2,11 +2,14 @@
 // no randomness that isn't seeded from ids, so the same knowledge graph always
 // settles into the same picture (mental-map stability [Misue 1995]).
 //
-// One cluster per topic. The layered layout (map-layout.js) gives every idea a
-// home inside its topic: prerequisites above, dependents below. Topics sit on
-// shelves, side by side and in the caller's topic order. The simulation adds
-// life around that home — springs along the global prerequisite edges (cross-
-// topic ones included), charge between ideas, collision, and a pull toward the
+// One cluster per topic that owns ideas. The layered layout (map-layout.js)
+// gives every idea a home inside its topic: prerequisites above, dependents
+// below. Clusters nest the way the topic tree does: a topic's block holds its
+// own ideas and its sub-topics' blocks, and every root topic (Mathematics,
+// History, …) is a separate island with wide water around it, placed next to
+// the roots it shares prerequisites with. The simulation adds life around
+// that home — springs along the global prerequisite edges (cross-topic ones
+// included, but weak), charge between ideas, collision, and a pull toward the
 // home slot — so the map explodes into place on open, can be dragged and
 // flung, and always relaxes back into a readable layered shape.
 
@@ -15,12 +18,23 @@ import { layoutPlan } from './map-layout.js';
 /** World units per layered-layout slot. */
 const STEP_X = 168;
 const STEP_Y = 150;
-/** Horizontal gap between two topics on one shelf. */
+/** Gaps between the blocks inside a sub-topic (deeper than a root's children). */
 const CLUSTER_GAP = 260;
-/** Vertical gap between two shelves. */
 const SHELF_GAP = 220;
-/** A shelf takes topics until it would grow wider than this. */
-const SHELF_MAX = 2200;
+/** Gaps between a root topic's own blocks: a little more air between fields of one subject. */
+const SUB_GAP = 360;
+const SUB_SHELF_GAP = 300;
+/** Gaps between root topics: unrelated subjects are separate islands. */
+const ROOT_GAP = 1100;
+/** …and roots that share a prerequisite sit closer. */
+const RELATED_GAP = 640;
+/** Room above a topic block that has no ideas of its own, for its heading. */
+const HEADER = 160;
+/** A block's shelves wrap to keep it near this width : height. */
+const ASPECT = 1.6;
+/** Spring strength across clusters: a prerequisite in another topic leans, it doesn't drag. */
+const SPRING_SAME_ROOT = 0.1;
+const SPRING_OTHER_ROOT = 0.02;
 
 const VELOCITY_DECAY = 0.55; // damping: a nudge dies out instead of swinging
 const ALPHA_DECAY = 0.035; // cooling: rest in ~3 s, quality unchanged at 0.035 (measured)
@@ -45,15 +59,153 @@ function hash01(text) {
 }
 
 /**
- * Builds the world for a knowledge graph: one cluster per topic group, shelves
- * side by side, and every prerequisite edge in the graph.
+ * Packs boxes `{ w, h }` into shelves, left to right, each shelf centred and
+ * its boxes top-aligned. A shelf wraps once it would grow wider than a block
+ * of ASPECT holding every box (never narrower than the widest box).
+ * `gapOf(prev, next)` is the horizontal gap between two neighbours.
+ *
+ * @returns {{ w: number, h: number, at: { x: number, y: number }[] }}
+ */
+function pack(items, gapX, gapY, gapOf = () => gapX) {
+  const widest = Math.max(0, ...items.map((it) => it.w));
+  const area = items.reduce((sum, it) => sum + (it.w + gapX) * (it.h + gapY), 0);
+  const limit = Math.max(widest, Math.sqrt(area * ASPECT));
+  const rows = [];
+  let row = null;
+  items.forEach((it, i) => {
+    const gap = row ? gapOf(items[i - 1], it) : 0;
+    if (!row || row.w + gap + it.w > limit) {
+      row = { start: i, xs: [0], w: it.w, h: it.h };
+      rows.push(row);
+      return;
+    }
+    row.xs.push(row.w + gap);
+    row.w += gap + it.w;
+    row.h = Math.max(row.h, it.h);
+  });
+  const w = Math.max(0, ...rows.map((r) => r.w));
+  const at = [];
+  let y = 0;
+  rows.forEach((r, ri) => {
+    if (ri) y += gapY;
+    const x0 = (w - r.w) / 2;
+    r.xs.forEach((x, j) => (at[r.start + j] = { x: x0 + x, y }));
+    y += r.h;
+  });
+  return { w, h: y, at };
+}
+
+/**
+ * The topic tree the clusters hang from: every group's topic plus its
+ * ancestors, in first-seen order (the caller's tree order). A topic not in
+ * `topics` is a root of its own; a parent loop is cut where it repeats.
+ */
+function topicTree(groups, topics) {
+  const source = new Map((topics ?? []).map((t) => [t.id, t]));
+  const made = new Map();
+  const roots = [];
+  const chainOf = (id) => {
+    const chain = [];
+    const seen = new Set();
+    for (let cur = id; cur != null && !seen.has(cur); cur = source.get(cur)?.parent ?? null) {
+      seen.add(cur);
+      chain.unshift(cur);
+    }
+    return chain;
+  };
+  for (const group of groups) {
+    let parent = null;
+    for (const id of chainOf(group.id)) {
+      let t = made.get(id);
+      if (!t) {
+        const title = source.get(id)?.title || (id ? String(id) : 'Unfiled');
+        t = { id, title, parent, children: [], own: null, cluster: null, nodes: [], subtopics: 0 };
+        made.set(id, t);
+        if (parent) parent.children.push(t);
+        else roots.push(t);
+      }
+      parent = t;
+    }
+  }
+  const list = [];
+  const walk = (t, depth) => {
+    t.depth = depth;
+    t.chain = t.parent ? [...t.parent.chain, t] : [t];
+    t.root = t.chain[0];
+    t.path = t.chain.map((x) => x.title).join(' › ');
+    list.push(t);
+    for (const c of t.children) walk(c, depth + 1);
+  };
+  for (const r of roots) walk(r, 0);
+  return { roots, list, made };
+}
+
+/** Sizes a topic's block from its own cluster and its sub-topics' blocks. */
+function measure(t) {
+  for (const c of t.children) measure(c);
+  const items = [];
+  if (t.own) items.push({ own: t.own, w: t.own.w, h: t.own.h });
+  for (const c of t.children) items.push({ topic: c, w: c.w, h: c.h });
+  const shallow = t.depth === 0;
+  t.items = items;
+  t.packed = pack(items, shallow ? SUB_GAP : CLUSTER_GAP, shallow ? SUB_SHELF_GAP : SHELF_GAP);
+  // A topic with ideas of its own is headed by its own cluster's title; one
+  // that only holds sub-topics gets a band for its heading.
+  t.header = t.own || !t.children.length ? 0 : HEADER;
+  t.w = t.packed.w;
+  t.h = t.packed.h + t.header;
+}
+
+/** Gives a topic's block its world box and every own cluster its origin. */
+function place(t, x, y) {
+  Object.assign(t, { x0: x, y0: y, x1: x + t.w, y1: y + t.h, cx: x + t.w / 2, cy: y + t.h / 2 });
+  t.items.forEach((it, i) => {
+    const at = t.packed.at[i];
+    if (it.topic) place(it.topic, x + at.x, y + t.header + at.y);
+    else Object.assign(it.own, { x: x + at.x, y: y + t.header + at.y });
+  });
+}
+
+/**
+ * Root order: the caller's first root, then repeatedly the root sharing the
+ * most prerequisites with those already placed (ties keep the caller's
+ * order), so related subjects land next to each other.
+ */
+function rootOrder(roots, weight) {
+  const left = [...roots];
+  const order = [left.shift()];
+  while (left.length) {
+    let best = 0;
+    let bestW = -1;
+    left.forEach((r, i) => {
+      const w = order.reduce((sum, p) => sum + weight(p, r), 0);
+      if (w > bestW) {
+        best = i;
+        bestW = w;
+      }
+    });
+    order.push(left.splice(best, 1)[0]);
+  }
+  return order;
+}
+
+/**
+ * Builds the world for a knowledge graph: one cluster per topic group, nested
+ * in topic blocks, root topics as separate islands, and every prerequisite
+ * edge in the graph.
  *
  * @param {{ id: string, path: string, nodes: { id: string, title: string, statement?: string, kind?: string }[] }[]} groups
- *   topics in display order; `path` is the full topic path (cluster label)
+ *   topics that own ideas, in display order; `path` is the full topic path (cluster label)
  * @param {{ from: string, to: string }[]} links  prerequisite (`requires`) edges only, by node id
- * @param {{ burst?: boolean }} [opts]  burst: start every idea at its cluster's centre
+ * @param {{ burst?: boolean, topics?: { id: string, title?: string, parent?: string | null }[] }} [opts]
+ *   burst: start every idea at its cluster's centre; topics: the topic tree
+ *   (without it every group is a root of its own)
+ * @returns world: `nodes`, `edges`, `clusters` (groups order), `topics` (the
+ *   tree in pre-order: `{ id, title, path, parent, children, chain, root,
+ *   cluster, nodes, subtopics, depth, x0, y0, x1, y1, cx, cy, w, h }`),
+ *   `roots`, `alpha`
  */
-export function createWorld(groups, links, { burst = true } = {}) {
+export function createWorld(groups, links, { burst = true, topics = null } = {}) {
   const nodes = [];
   const edges = [];
   const clusters = [];
@@ -66,94 +218,104 @@ export function createWorld(groups, links, { burst = true } = {}) {
 
   // Size every cluster from the layering of its own ideas. Only in-cluster
   // links shape the layering; cross-topic ones are drawn by the simulation.
+  const tree = topicTree(groups, topics);
   const sized = groups.map((group) => {
     const layout = layoutPlan(group.nodes.map((n) => ({ id: n.id, requires: prerequisites.get(n.id) ?? [] })));
     const widest = Math.max(1, (layout.width + 12) / 156);
     const layers = Math.max(1, Math.round((layout.height + 40) / 96));
-    return { group, layout, w: widest * STEP_X, h: layers * STEP_Y };
+    const s = { group, layout, w: widest * STEP_X, h: layers * STEP_Y, x: 0, y: 0, topic: tree.made.get(group.id) };
+    s.topic.own = s;
+    return s;
   });
 
-  // Shelves: topics in the caller's order, wrapped when a shelf is full.
-  const shelves = [];
-  let shelf = { items: [], w: 0, h: 0 };
+  // Which root each idea lives under, and how many prerequisites two roots share.
+  const rootOfNode = new Map();
+  for (const s of sized) for (const n of s.group.nodes) rootOfNode.set(n.id, s.topic.root);
+  const shared = new Map();
+  const pairKey = (a, b) => (a.id < b.id ? `${a.id}\u0000${b.id}` : `${b.id}\u0000${a.id}`);
+  for (const { from, to } of links) {
+    const a = rootOfNode.get(from);
+    const b = rootOfNode.get(to);
+    if (a && b && a !== b) shared.set(pairKey(a, b), (shared.get(pairKey(a, b)) ?? 0) + 1);
+  }
+  const weight = (a, b) => (a === b ? 0 : (shared.get(pairKey(a, b)) ?? 0));
+
+  // Blocks inside out, then the roots as islands: related neighbours get the
+  // narrower strait, the whole map is centred on (0, 0).
+  for (const r of tree.roots) measure(r);
+  const roots = tree.roots.length ? rootOrder(tree.roots, weight) : [];
+  const sea = pack(roots, ROOT_GAP, ROOT_GAP, (a, b) => (weight(a, b) ? RELATED_GAP : ROOT_GAP));
+  roots.forEach((r, i) => place(r, sea.at[i].x - sea.w / 2, sea.at[i].y - sea.h / 2));
+
   for (const s of sized) {
-    if (shelf.items.length && shelf.w + CLUSTER_GAP + s.w > SHELF_MAX) {
-      shelves.push(shelf);
-      shelf = { items: [], w: 0, h: 0 };
-    }
-    shelf.w = shelf.items.length ? shelf.w + CLUSTER_GAP + s.w : s.w;
-    shelf.h = Math.max(shelf.h, s.h);
-    shelf.items.push(s);
-  }
-  if (shelf.items.length) shelves.push(shelf);
-
-  // Centre every shelf on x = 0 and the stack of shelves on y = 0.
-  const totalH = shelves.reduce((sum, row, i) => sum + row.h + (i ? SHELF_GAP : 0), 0);
-  let shelfY = -totalH / 2;
-  for (const row of shelves) {
-    let x = -row.w / 2;
-    for (const s of row.items) {
-      const cluster = {
-        id: s.group.id,
-        path: s.group.path,
-        checks: s.group.checks ?? null,
-        cx: x + s.w / 2,
-        cy: shelfY + s.h / 2,
-        w: s.w,
-        h: s.h,
-        x0: x,
-        y0: shelfY,
-        x1: x + s.w,
-        y1: shelfY + s.h,
-        nodes: [],
+    const { x, y } = s;
+    const t = s.topic;
+    const cluster = {
+      id: s.group.id,
+      path: s.group.path,
+      checks: s.group.checks ?? null,
+      topic: t,
+      root: t.root,
+      cx: x + s.w / 2,
+      cy: y + s.h / 2,
+      w: s.w,
+      h: s.h,
+      x0: x,
+      y0: y,
+      x1: x + s.w,
+      y1: y + s.h,
+      nodes: [],
+    };
+    t.cluster = cluster;
+    clusters.push(cluster);
+    for (const id of s.layout.order) {
+      const src = s.group.nodes.find((n) => n.id === id);
+      if (!src) continue;
+      const at = s.layout.pos.get(id);
+      // map-layout's boxes are 144×56 on a 156/96 grid; re-space onto ours.
+      const homeX = x + (at.x / 156) * STEP_X + STEP_X / 2;
+      const homeY = y + at.layer * STEP_Y + STEP_Y / 2;
+      const seed = hash01(id);
+      const angle = seed * Math.PI * 2;
+      const node = {
+        key: id,
+        id,
+        title: src.title ?? id,
+        statement: src.statement ?? '',
+        kind: src.kind ?? '',
+        cluster,
+        homeX,
+        homeY,
+        x: burst ? cluster.cx + Math.cos(angle) * 40 : homeX,
+        y: burst ? cluster.cy + Math.sin(angle) * 40 : homeY,
+        vx: burst ? Math.cos(angle) * (10 + seed * 8) : 0,
+        vy: burst ? Math.sin(angle) * (10 + seed * 8) : 0,
+        scale: 1,
+        fx: null,
+        fy: null,
+        r: 12,
+        degree: 0,
+        needs: [],
+        leads: [],
+        seed,
       };
-      clusters.push(cluster);
-      for (const id of s.layout.order) {
-        const src = s.group.nodes.find((n) => n.id === id);
-        if (!src) continue;
-        const at = s.layout.pos.get(id);
-        // map-layout's boxes are 144×56 on a 156/96 grid; re-space onto ours.
-        const homeX = x + (at.x / 156) * STEP_X + STEP_X / 2;
-        const homeY = shelfY + at.layer * STEP_Y + STEP_Y / 2;
-        const seed = hash01(id);
-        const angle = seed * Math.PI * 2;
-        const node = {
-          key: id,
-          id,
-          title: src.title ?? id,
-          statement: src.statement ?? '',
-          kind: src.kind ?? '',
-          cluster,
-          homeX,
-          homeY,
-          x: burst ? cluster.cx + Math.cos(angle) * 40 : homeX,
-          y: burst ? cluster.cy + Math.sin(angle) * 40 : homeY,
-          vx: burst ? Math.cos(angle) * (10 + seed * 8) : 0,
-          vy: burst ? Math.sin(angle) * (10 + seed * 8) : 0,
-          scale: 1,
-          fx: null,
-          fy: null,
-          r: 12,
-          degree: 0,
-          needs: [],
-          leads: [],
-          seed,
-        };
-        byId.set(id, node);
-        nodes.push(node);
-        cluster.nodes.push(node);
-      }
-      x += s.w + CLUSTER_GAP;
+      byId.set(id, node);
+      nodes.push(node);
+      cluster.nodes.push(node);
+      for (const up of t.chain) up.nodes.push(node);
     }
-    shelfY += row.h + SHELF_GAP;
   }
+  for (const t of tree.list) t.subtopics = tree.list.filter((d) => d !== t && d.cluster && d.chain.includes(t)).length;
 
-  // The graph's own edges, cross-topic and multi-parent ones included.
+  // The graph's own edges, cross-topic and multi-parent ones included. A
+  // spring across clusters is weak, so a prerequisite in another topic (or
+  // another subject) leans on its dependant instead of dragging it home.
   for (const { from, to } of links) {
     const a = byId.get(from);
     const b = byId.get(to);
     if (!a || !b || a === b) continue;
-    edges.push({ a, b });
+    const spring = a.cluster === b.cluster ? 1 : a.cluster.root === b.cluster.root ? SPRING_SAME_ROOT : SPRING_OTHER_ROOT;
+    edges.push({ a, b, spring });
     a.leads.push(b);
     b.needs.push(a);
     a.degree++;
@@ -162,7 +324,7 @@ export function createWorld(groups, links, { burst = true } = {}) {
   // Ideas that much else depends on are drawn bigger: they carry the graph.
   for (const n of nodes) n.r = 12 + 3 * Math.min(4, n.leads.length);
 
-  return { nodes, edges, clusters, alpha: burst ? 1 : 0 };
+  return { nodes, edges, clusters, topics: tree.list, roots, alpha: burst ? 1 : 0 };
 }
 
 /** Wakes the simulation (after a drag, a resize, a new world). */
@@ -222,17 +384,21 @@ export function tick(world) {
   }
 
   // Springs along prerequisite edges, and a prerequisite stays above. The
-  // springs are weak across topics so the shelves keep their shape.
-  for (const { a, b } of edges) {
+  // springs are weak across topics (`spring`, set in createWorld) so the
+  // blocks keep their shape; the "stays above" rule holds inside a cluster
+  // only, where the layered homes agree with it — across clusters it would
+  // fight the home pull and drag ideas out of their topic.
+  for (const { a, b, spring = 1 } of edges) {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const d = Math.sqrt(dx * dx + dy * dy) || 1;
-    const k = (1.0 / Math.min(a.degree, b.degree)) * alpha;
+    const k = (spring / Math.min(a.degree, b.degree)) * alpha;
     const pull = ((d - LINK_DISTANCE) / d) * k;
     b.vx -= dx * pull * 0.5;
     b.vy -= dy * pull * 0.5;
     a.vx += dx * pull * 0.5;
     a.vy += dy * pull * 0.5;
+    if (a.cluster !== b.cluster) continue;
     // Hard rule, not a force: whatever needs an idea sits below it.
     const gap = b.y - a.y - (a.r + b.r + 96);
     if (gap < 0) {
@@ -274,11 +440,12 @@ export function settle(world, maxTicks = 600) {
   world.alpha = 0;
 }
 
-/** Topmost node under a world point, or null. */
-export function hit(world, x, y, slop = 6) {
+/** Topmost node under a world point that `accept` lets through, or null. */
+export function hit(world, x, y, slop = 6, accept = null) {
   let best = null;
   let bestD = Infinity;
   for (const n of world.nodes) {
+    if (accept && !accept(n)) continue;
     const d = Math.hypot(n.x - x, n.y - y);
     if (d <= n.r + slop && d < bestD) {
       best = n;

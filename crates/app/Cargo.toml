@@ -20,5 +20,10 @@ serde_json.workspace = true
 tokio.workspace = true
 tauri-plugin-dialog = "2"
 
+# The webview on Linux is WebKitGTK; pinch.rs hooks its GTK events. Same
+# version Tauri's runtime already links, so nothing new is built.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [lints]
 workspace = true

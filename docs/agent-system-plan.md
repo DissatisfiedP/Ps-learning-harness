@@ -22,7 +22,7 @@ These settle what the architecture left open. Recorded before code so the choice
 | HTML→text for `page_fetch` | Small in-tree stripper (drop script/style, tags → text, collapse whitespace). | `html2text` is not in the offline crate cache. |
 | Streaming text display | `Message` content is `Vec<ContentBlock>`; the harness builds replay blocks, and the UI streams only `Text` deltas. | Content blocks are required by M1; the runtime owns the single copy of text. |
 | Cross-wire `Native` blocks | Dropped in `body()` when `block.wire != endpoint.wire`. | Spec: replay unchanged only to the same wire. |
-| `session_state` `learner_state` | Renders `no graph yet` (no graph built, out of scope). | Out-of-scope seam, §4. |
+| `session_state` `learner_state` | Built by `graph::read::learner_state` per tutor call and planner run: graph counts, topic tree with nodes per topic, up to eight nodes matching the goal record with the learner's record, ≤ 1,600 characters; `no graph yet` when the graph is empty. An unreadable graph is logged and rendered as empty. | Arch §4.15 (2026-11-11): small pinned summary, `graph_search`/`graph_read` for depth. |
 | Per-session locking | One `tokio::sync::Mutex` per session (map behind a `std::sync::Mutex` that is only held to look it up). A tutor turn, a learner `answer`/`approve`, and a job delivery each hold it; planner and researcher jobs never do (they only append ops). No std lock is held across an `.await`. | M7.8; also the mechanism of the delivery rule (a result can't interleave into a running turn). |
 | Job delivery | A job's result is persisted on its `job` op (`done`/`failed`). Delivery takes the session lock, skips if an answer is pending (the next tutor turn delivers first), else appends a tagged user message (`research-brief` / `plan-notice`, with `jobId`) and wakes the tutor in Measure/Teach/Close. A message's `jobId` marks the result delivered, so pending deliveries are derivable after a restart. | M4 delivery rule; resumable. |
 | Scope `brief` op | Written when the scope brief is *delivered*, not when the researcher submits it. | The `probe_done` gate then means "the tutor has the brief in its conversation", never just "it exists in the log". |
@@ -141,6 +141,19 @@ One row per non-obvious choice the code makes; the reasons are the ones the code
 | WebDAV client | `reqwest` (rustls) with a current-thread tokio runtime per pass; tests use an in-process server on `127.0.0.1`. | No OpenSSL on any platform; no new crate features; CI stays offline (no `rclone` dependency). |
 | Mobile lock | A Learn session opens read-only on a phone only after a desktop-only plugin was **used** (tool call or artifact, platforms stamped on the op, else the cached index; unknown never locks); a `mobileUnlock` op (synced) releases the named plugins and drops their tools on phones. | Planning or granting is not use; guessing "desktop-only" would lock sessions wrongly; the op lets the learner decide once for every phone. |
 | Sync UI placement | Settings → Sync (after Providers), a Home header status button + "Sync now", and a banner on Home only. | Owner decision: configuration where the other device-local settings live, status where the learner starts, nothing inside a session. |
+
+## Decisions in the branch-sessions build (2026-11-11)
+
+Design and alternatives: architecture §4.26. Code: `crates/harness/src/branches.rs`, `tools::track_problems`, `SessionState.branch`.
+
+| Decision | Chosen | Why |
+|---|---|---|
+| Who keeps which track | The origin session keeps the first root track; each other root track is forked into a new session at the first approval. | No duplicate of the conversation the learner is in. |
+| Copied context | A fork/merge file starts with the origin's ops through the approval cut, ids and times unchanged, plus a finished `graph` job over them. | Replay works unchanged; the graph builder never re-extracts the measure transcript. |
+| Merge creation | When the last input calls `session_end` (and on `list_sessions`, for inputs that ended on another device), under derived ids. | Idempotent across devices: the same merge is the same file with the same op ids. |
+| Revision | A code-written `revision: true` section first in the merge track: up to two key nodes per input (missed checks first), max six. | Retrieval in a new context after a gap; no planner run needed to start the merge. |
+| Plan changes in a branch | Only the branch's own track; tracks' shape and the other tracks' sections are refused. | Sessions never contradict each other; the merge takes each branch's track. |
+| Running new sessions | Created, never auto-run; Home shows lineage and a Start offer (`resume_turn`). | The learner decides when each strand runs. |
 
 ## Layout
 
@@ -277,8 +290,8 @@ Prompts and tool contracts are in `crates/harness/prompts/README.md`; the reason
 
 | Agent | Kind | Prompt | Tools (beyond shared core) | Model role (arch §4.22) |
 |---|---|---|---|---|
-| Tutor | live: measure + teach | `tutor/base.md` + `tutor/phases/{measure,teach}.md` + `tutor/modes/*` + the active plugins' `prompts/tutor.md` | measure: `goal_set`, `question_ask`, `verdict_record`, `probe_done`; teach: `question_ask`, `verdict_record`, `plan_change_request`, `plugin_request`, `section_done`, `session_end`, `workspace_write` (when a workspace is attached); always: `choice_ask`, `research_request`, `file_find`, `file_read` | Tutor |
-| Planner | reads the whole session, speaks via the plan card | `planner/base.md` (+ `planner/exam.md`) | `plan_write`, `plan_keep`, `research` (blocking), `plugin_search` | Planner |
+| Tutor | live: measure + teach | `tutor/base.md` + `tutor/phases/{measure,teach}.md` + `tutor/modes/*` + the active plugins' `prompts/tutor.md` | measure: `goal_set`, `question_ask`, `verdict_record`, `probe_done`; teach: `question_ask`, `verdict_record`, `plan_change_request`, `plugin_request`, `section_done`, `session_end`, `workspace_write` (when a workspace is attached); measure and teach: `graph_search`, `graph_read` (read-only); always: `choice_ask`, `research_request`, `file_find`, `file_read` | Tutor |
+| Planner | reads the whole session, speaks via the plan card | `planner/base.md` (+ `planner/exam.md`) | `plan_write`, `plan_keep`, `research` (blocking), `plugin_search`, `graph_search`, `graph_read` (read-only) | Planner |
 | Coach | live, practice | `coach/base.md` + the active plugins' `prompts/practice.md` | `problem_commit`, `problem_conclude`, `research_request`, `file_find`, `file_read` | Tutor |
 | Researcher | job | `jobs/researcher.md` | `web_search`, `page_fetch` (`research-search`), `source_outline`, `source_search`, `source_read`, `source_page_image`, `brief_submit` | Reader |
 | Problem checker | job, two turns (blind, then told the target) | `jobs/problem-checker.md` | `audit_submit`, `necessity_submit` | Planner |

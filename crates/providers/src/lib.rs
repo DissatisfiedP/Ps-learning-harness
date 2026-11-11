@@ -5,6 +5,7 @@
 //! provider-specific: every provider speaks one of the three [`Wire`]s.
 
 mod anthropic;
+mod args;
 mod catalog;
 pub mod claude_oauth;
 pub mod codex_oauth;

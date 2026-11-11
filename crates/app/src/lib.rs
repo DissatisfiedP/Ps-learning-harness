@@ -7,6 +7,8 @@
 //! coalesced (~16 ms / 2 KB) before they cross the IPC boundary.
 
 mod focus;
+#[cfg(target_os = "linux")]
+mod pinch;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -217,6 +219,13 @@ async fn send_learner_message(
     )
     .await
     .map_err(err)
+}
+
+/// The learner's comment from the desk: interrupts the tutor (stops a reply,
+/// sets an open question aside) and is answered now.
+#[tauri::command]
+async fn comment(h: H<'_>, session_id: String, text: String) -> Result<()> {
+    h.comment(&session_id, &text).await.map_err(err)
 }
 
 #[tauri::command]
@@ -552,6 +561,76 @@ async fn install_candidate(h: H<'_>, id: String) -> Result<Option<serde_json::Va
     .await
 }
 
+// ---- reference libraries (architecture §4.27) ----------------------------------
+
+/// Import progress, one JSON event per file, to the UI's channel.
+fn progress_to(channel: Channel) -> impl FnMut(&harness::ImportProgress) {
+    move |p| {
+        if let Ok(json) = serde_json::to_string(p) {
+            let _ = channel.send(InvokeResponseBody::Json(json));
+        }
+    }
+}
+
+#[tauri::command]
+async fn libraries(h: H<'_>) -> Result<Vec<harness::LibrarySummary>> {
+    blocking(&h, |h| h.libraries()).await
+}
+
+/// Import a folder (picked with `pick_folder`) as a library; a folder this
+/// device imported before is refreshed instead. Desktop only.
+#[tauri::command]
+async fn library_import(
+    h: H<'_>,
+    path: String,
+    options: Option<harness::ImportOptions>,
+    on_progress: Channel,
+) -> Result<harness::ImportReport> {
+    blocking(&h, move |h| {
+        let mut send = progress_to(on_progress);
+        h.library_import(&path, options.unwrap_or_default(), &mut send)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn library_refresh(
+    h: H<'_>,
+    slug: String,
+    max_file_mb: Option<u64>,
+    on_progress: Channel,
+) -> Result<harness::ImportReport> {
+    blocking(&h, move |h| {
+        let mut send = progress_to(on_progress);
+        h.library_refresh(&slug, max_file_mb, &mut send)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn library_remove(h: H<'_>, slug: String) -> Result<()> {
+    blocking(&h, move |h| h.library_remove(&slug)).await
+}
+
+#[tauri::command]
+async fn library_update(
+    h: H<'_>,
+    slug: String,
+    name: Option<String>,
+    description: Option<String>,
+    topic: Option<String>,
+) -> Result<harness::LibrarySummary> {
+    blocking(&h, move |h| {
+        h.library_update(
+            &slug,
+            name.as_deref(),
+            description.as_deref(),
+            topic.as_deref(),
+        )
+    })
+    .await
+}
+
 // ---- settings ----------------------------------------------------------------
 
 #[tauri::command]
@@ -666,6 +745,14 @@ async fn acknowledge_conflicts(h: H<'_>) -> Result<harness::SyncStatus> {
 #[tauri::command]
 async fn sync_if_changed(h: H<'_>) -> Result<bool> {
     blocking(&h, |h| Ok(h.sync_if_changed())).await
+}
+
+/// The app came back to the foreground (or the UI's catch-up timer fired):
+/// a full background run, so another device's work arrives without a
+/// restart. Best effort; returns whether a run started.
+#[tauri::command]
+async fn sync_in_background(h: H<'_>) -> Result<bool> {
+    blocking(&h, |h| Ok(h.sync_in_background())).await
 }
 
 /// Set once the exit has been held for a last sync, so the exit that follows
@@ -891,6 +978,10 @@ pub fn run() {
             app.manage(harness);
             app.manage(events);
             app.manage(focus);
+            // WebKitGTK would magnify the whole app on a touchpad pinch; the
+            // page (the Map) gets the pinch instead.
+            #[cfg(target_os = "linux")]
+            pinch::route_to_page(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -909,6 +1000,7 @@ pub fn run() {
             subscribe_events,
             start_teaching,
             send_learner_message,
+            comment,
             answer,
             approve,
             request_plan_change,
@@ -941,6 +1033,7 @@ pub fn run() {
             sync_now,
             acknowledge_conflicts,
             sync_if_changed,
+            sync_in_background,
             workbuddy_login_start,
             workbuddy_login_wait,
             workbuddy_login_cancel,
@@ -978,6 +1071,11 @@ pub fn run() {
             refresh_registries,
             registry_catalog,
             install_candidate,
+            libraries,
+            library_import,
+            library_refresh,
+            library_remove,
+            library_update,
             focus_dnd_support,
             focus_dnd,
         ])

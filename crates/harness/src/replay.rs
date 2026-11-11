@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use crate::sessions::{HuntSendOp, Op, ToolOp};
 use crate::state::{
-    Calibration, CalibrationBucket, CheckVerdict, Grant, HuntState, Level, OpenJob, PendingCall,
-    Plan, PlanQuestion, QueuedResult, SessionState,
+    BranchState, Calibration, CalibrationBucket, CheckVerdict, Grant, HuntState, Level, OpenJob,
+    PendingCall, Plan, PlanQuestion, QueuedResult, SessionState,
 };
 
 /// Text shown to a model for a call whose result is missing: the learner
@@ -193,7 +193,38 @@ pub fn replay_state(ops: &[Op]) -> SessionState {
                     delivered.insert(job.clone());
                 }
             }
-            Op::PlanRequest(_) | Op::PlanKeep(_) | Op::Compaction(_) | Op::Session(_) => {}
+            // A forked or merge session's header names its track (§4.26); a
+            // merge also starts with the sections its inputs completed.
+            Op::Session(h) => {
+                if let Some(f) = &h.fork {
+                    s.branch = Some(BranchState {
+                        kind: "fork".into(),
+                        origin: f.parent.clone(),
+                        track: f.track_id.clone(),
+                    });
+                }
+                if let Some(m) = &h.merge {
+                    s.branch = Some(BranchState {
+                        kind: "merge".into(),
+                        origin: m.origin.clone(),
+                        track: m.track_id.clone(),
+                    });
+                    for id in &m.completed {
+                        if !s.completed_sections.contains(id) {
+                            s.completed_sections.push(id.clone());
+                        }
+                    }
+                }
+            }
+            // The origin keeps the first root track once it forked the rest.
+            Op::Branch(b) => {
+                s.branch = Some(BranchState {
+                    kind: "origin".into(),
+                    origin: String::new(),
+                    track: b.track.clone(),
+                });
+            }
+            Op::PlanRequest(_) | Op::PlanKeep(_) | Op::Compaction(_) => {}
             Op::PlanEdit(_) | Op::PlanAsk(_) | Op::PlanAnswer(_) => {}
             // Hunts are derived whole at the end (§5): toggles land on the
             // plan's sections and the lifecycle needs every hunt op at once.
@@ -1324,6 +1355,7 @@ mod tests {
                 known_note: String::new(),
                 learner_note: String::new(),
                 hunt: None,
+                revision: false,
             },
             Level::Explain,
         ));
@@ -1502,6 +1534,7 @@ mod tests {
                 reason: "practitioner lore".into(),
                 enabled: false,
             }),
+            revision: false,
         }
     }
 

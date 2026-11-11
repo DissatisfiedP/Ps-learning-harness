@@ -349,7 +349,8 @@ impl Harness {
     /// Run the researcher (role Reader, `jobs/researcher.md`) until it calls
     /// `brief_submit`; returns the brief.
     async fn research_body(self: &Arc<Self>, sid: &str, args: &Value) -> Result<Value, Error> {
-        let state = replay_state(&self.store.ops(sid)?);
+        let ops = self.store.ops(sid)?;
+        let state = replay_state(&ops);
         let kind = opt_str(args, "kind").unwrap_or("verify").to_owned();
         let question = opt_str(args, "question").unwrap_or("").to_owned();
         let mut task = format!("Task `{kind}`.\n\nQuestion: {question}\n");
@@ -374,7 +375,8 @@ impl Harness {
         // always told to record the field guide (§6).
         let mut flags = HashSet::new();
         flags.insert("field_guide".to_owned());
-        let system = composer.compose_job("jobs/researcher.md", &values, &flags)?;
+        let mut system = composer.compose_job("jobs/researcher.md", &values, &flags)?;
+        system.push_str(&self.library_prompt(&ops, "researcher")?);
         let tools = tools::researcher_tools();
         let cache_key = op_id();
         // Page images the model has been shown this run (a scan it asked to
@@ -556,6 +558,12 @@ impl Harness {
                 }
             }
             "source_page_image" => self.source_page_image(args, page_images).await,
+            "library_list" | "library_search" | "library_read" => {
+                match self.library_tool(&call.name, args).await {
+                    Exec::Done { content, is_error } => ResearchStep::Result(content, is_error),
+                    Exec::Pause => fail("this tool can't pause a research job".into()),
+                }
+            }
             "brief_submit" => match check_brief(task_kind, args) {
                 Ok(()) => ResearchStep::Brief(args.clone()),
                 Err(e) => ResearchStep::Result(format!("brief_submit refused: {e}"), true),
@@ -677,8 +685,10 @@ impl Harness {
         request: &str,
     ) -> Result<Option<String>, Error> {
         let ops = self.store.ops(sid)?;
-        let state = replay_state(&ops);
-        let system = self.compose_planner(&state)?;
+        let mut state = replay_state(&ops);
+        state.learner_state = self.learner_state(&state);
+        let mut system = self.compose_planner(&state)?;
+        system.push_str(&self.library_prompt(&ops, "planner")?);
         let tools = tools::planner_tools();
         let mut messages = replay::conversation_with(
             &ops,
@@ -833,11 +843,21 @@ impl Harness {
                 Ok(query) => Ok((done(self.plugin_search(query)), None)),
                 Err(e) => Ok((refuse(name, e), None)),
             },
+            "library_list" | "library_search" | "library_read" => {
+                Ok((self.library_tool(name, args).await, None))
+            }
             "file_find" | "file_read" => {
                 let state = replay_state(&self.store.ops(sid)?);
                 let _ = state;
                 Ok((planner_file_tool(name, args).await, None))
             }
+            "graph_search" | "graph_read" => Ok((
+                match crate::graph::read::run(&self.repo, name, args) {
+                    Ok(text) => done(text),
+                    Err(why) => refuse(name, why),
+                },
+                None,
+            )),
             other => Ok((refuse(other, "unknown tool"), None)),
         }
     }
@@ -1226,7 +1246,12 @@ impl Harness {
             });
             if me.append(&session, op).is_ok() {
                 if let Ok(summary) = me.store.summary(&session) {
-                    me.emit(&session, AgentEvent::Session { session: summary });
+                    me.emit(
+                        &session,
+                        AgentEvent::Session {
+                            session: Box::new(summary),
+                        },
+                    );
                 }
             }
         });

@@ -82,6 +82,11 @@ const els = {
   deskNote: $('#desk-note'),
   deskNoteText: $('#desk-note-text'),
   deskNoteButton: $('#desk-note-button'),
+  deskComment: $('#desk-comment'),
+  commentToggle: $('#desk-comment-toggle'),
+  commentForm: $('#desk-comment-form'),
+  commentInput: $('#desk-comment-input'),
+  commentStatus: $('#desk-comment-status'),
   planPanel: $('#plan-panel'),
   composer: $('#composer'),
   prompt: $('#prompt'),
@@ -740,6 +745,10 @@ function onRuntimeEvent(ev) {
     onSessionSummary(ev.session);
     return;
   }
+  if (ev.kind === 'repoChanged') {
+    onRepoChanged();
+    return;
+  }
   if (ev.kind === 'turnStart') {
     if (!state.turns.has(id)) state.turns.set(id, new Set());
     state.turns.get(id).add(ev.agent);
@@ -770,6 +779,28 @@ function onSessionSummary(summary) {
   }
   sessions.upsert(summary);
   if (s?.id === summary.id && summary.title) setTitle(s, summary.title);
+}
+
+/**
+ * Sync brought another device's work in: re-read the session list, and the
+ * open session when its file changed and nothing is in flight in it (a
+ * streaming reply or a plan edit keeps its view; the next sync or reopen
+ * catches up).
+ */
+async function onRepoChanged() {
+  const s = state.current;
+  const before = s?.id ? sessions.get(s.id)?.updatedAt : null;
+  await loadSessions();
+  if (!s?.id || state.current !== s || state.loading) return;
+  const after = sessions.get(s.id)?.updatedAt;
+  if (!after || after === before) return;
+  if (isStreaming() || s.planEditing || state.turns.has(s.id)) return;
+  const draft = els.prompt.value;
+  await openSession(s.id, { reload: true });
+  if (state.current?.id === s.id && draft && !els.prompt.value) {
+    els.prompt.value = draft;
+    updateSendState();
+  }
 }
 
 function sessionEvent(s, ev) {
@@ -1012,11 +1043,31 @@ async function startFromFrontier(itemId, button) {
   }
 }
 
+/**
+ * A forked or merge session the tutor has not run yet waits for the learner:
+ * the status bar offers "Start" (ui-design §7.1.1). True when it showed.
+ */
+function offerBranchStart(s) {
+  const lineage = sessions.get(s.id)?.lineage;
+  if (!lineage || lineage.started || lineage.ended || s.st.phase !== 'teach' || s.errorEl) return false;
+  showError({
+    title:
+      lineage.kind === 'merge'
+        ? 'The merge session is ready: it starts with a short revision.'
+        : `This branch is ready: ${lineage.trackTitle}.`,
+    action: 'Start',
+    onRetry: () => resumeTurn(s),
+    role: 'status',
+  });
+  return true;
+}
+
 /** After a crash or a failed turn, the last learner message may have no reply. */
 function offerReplyIfUnanswered(s) {
   const st = s.st;
   if (running(s.id, 'tutor') || running(s.id, 'planner') || st.ended || st.pendingCall) return;
   if (st.phase !== 'measure' && st.phase !== 'teach') return;
+  if (offerBranchStart(s)) return;
   if (s.tl.items.at(-1)?.kind === 'user' && !s.errorEl) {
     showError({ title: 'The tutor hasn’t answered this yet.', action: 'Get a reply', onRetry: () => resumeTurn(s), role: 'status' });
   }
@@ -1510,6 +1561,70 @@ function renderDesk({ quiet = false, free = notEngaged() } = {}) {
   }
   // The composer came back (plan approved, question answered): resume there.
   if (!quiet && d.composer && !wasShown && free) focusQuiet(els.prompt);
+  renderComment(s);
+}
+
+// ---------- comment: interrupt the tutor at any moment ----------
+
+/**
+ * The comment box is offered when the learner can't simply reply: a question
+ * or choice is open, a reply is streaming, or the plan waits for approval
+ * (then the comment goes to the planner). Not while the planner drafts.
+ */
+function commentOffered(s) {
+  if (!s?.learn || !s.id || s.readOnly || s.st?.ended) return false;
+  const phase = s.st?.phase;
+  if (phase === 'plan') return false;
+  return Boolean(pendingItem(s)) || phase === 'awaitApproval' || running(s.id, 'tutor');
+}
+
+function renderComment(s) {
+  const offered = commentOffered(s);
+  if (els.deskComment.hidden === !offered) return;
+  els.deskComment.hidden = !offered;
+  if (!offered) closeComment();
+}
+
+function openComment() {
+  els.commentForm.hidden = false;
+  els.commentToggle.setAttribute('aria-expanded', 'true');
+  els.commentToggle.textContent = 'Cancel comment';
+  els.commentStatus.textContent = '';
+  els.commentInput.focus({ preventScroll: true });
+}
+
+function closeComment({ focus = false } = {}) {
+  els.commentForm.hidden = true;
+  els.commentToggle.setAttribute('aria-expanded', 'false');
+  els.commentToggle.textContent = 'Comment';
+  if (focus) els.commentToggle.focus({ preventScroll: true });
+}
+
+/** Sends the comment; the tutor stops what it was doing and answers it. */
+async function sendComment(event) {
+  event.preventDefault();
+  const s = state.current;
+  const text = els.commentInput.value.trim();
+  if (!text || !s?.id) return;
+  if (!modelReady()) {
+    els.commentStatus.textContent = 'Choose a model first.';
+    return;
+  }
+  els.commentInput.value = '';
+  closeComment();
+  try {
+    await call('comment', { sessionId: s.id, text });
+  } catch (e) {
+    if (state.current !== s) return;
+    // Nothing was sent: give the text back with the reason.
+    if (!els.deskComment.hidden) {
+      openComment();
+      els.commentInput.value = text;
+      els.commentStatus.textContent = message(e);
+    } else {
+      setPromptError(message(e));
+    }
+  }
 }
 
 function onDeskNoteButton() {
@@ -1538,8 +1653,8 @@ function onDeskNoteButton() {
 
 // ---------- opening sessions ----------
 
-async function openSession(id) {
-  if (state.current?.id === id) return;
+async function openSession(id, { reload = false } = {}) {
+  if (state.current?.id === id && !reload) return;
   const loading = { id, events: [], wasRunning: running(id, 'tutor') };
   state.loading = loading;
   const summary = sessions.get(id);
@@ -1913,6 +2028,17 @@ function wire() {
   });
   els.back.addEventListener('click', goHome);
   els.deskNoteButton.addEventListener('click', onDeskNoteButton);
+  els.commentToggle.addEventListener('click', () => (els.commentForm.hidden ? openComment() : closeComment({ focus: true })));
+  els.commentForm.addEventListener('submit', sendComment);
+  els.commentInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      els.commentForm.requestSubmit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeComment({ focus: true });
+    }
+  });
   els.continueBtn.addEventListener('click', continueReading);
   els.messages.addEventListener('scroll', scheduleFrame, { passive: true });
   els.messages.addEventListener('click', (e) => {

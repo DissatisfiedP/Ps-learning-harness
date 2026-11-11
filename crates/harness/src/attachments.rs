@@ -258,8 +258,22 @@ pub fn image_block(repo: &Path, a: &Attachment) -> Option<(String, String)> {
 }
 
 /// One line for the model per referenced file/folder (W3: path, type, size).
-/// The "read it" hint is added only when the agent has the file tools.
+/// The "read it" hint is added only when the agent has the file tools. A
+/// linked reference library (Home '+', `library.rs`) is named by id: its
+/// text is in the repo, read with the library tools.
 pub fn reference_line(a: &Attachment, file_tools: bool) -> String {
+    if a.kind == "library" {
+        let hint = if file_tools {
+            " — search it with library_search, read it with library_read"
+        } else {
+            ""
+        };
+        return format!(
+            "[linked library] {} (`{}`){hint}",
+            a.name.as_deref().unwrap_or(&a.path),
+            a.path
+        );
+    }
     let size = a.bytes.map_or_else(String::new, |b| {
         if a.kind == "folder" {
             String::new()

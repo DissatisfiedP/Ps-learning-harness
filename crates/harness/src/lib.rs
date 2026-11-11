@@ -5,6 +5,7 @@
 mod agent;
 mod artifacts;
 mod attachments;
+mod branches;
 mod config;
 pub mod events;
 mod extraction;
@@ -13,6 +14,7 @@ mod frontier;
 pub mod graph;
 mod jobs;
 pub mod knowledge;
+pub mod library;
 mod mobile;
 mod models;
 mod pdf;
@@ -44,6 +46,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{oneshot, Semaphore};
 
+pub use branches::{Lineage, LineageFeed, LineageInput};
 pub use config::{ModelChoice, ModelRole, Roles, Settings};
 pub use events::{AgentEvent, AgentName, Coalescer, Envelope, EventSink};
 pub use extraction::ExtractionStatus;
@@ -53,12 +56,14 @@ pub use knowledge::{
     Checks, KnowledgeChain, KnowledgeEdge, KnowledgeMap, KnowledgeNode, KnowledgeTopic,
     ProposedSplit, SplitGroup,
 };
+pub use library::{ImportOptions, ImportProgress, ImportReport, LibrarySummary};
 pub use plugins::{PluginManifest, PluginSource};
 pub use prompts::{Composer, TemplateValues};
 pub use providers;
 pub use sessions::{
-    ApproveOp, Attachment, CompactionOp, Ending, Header, Mode, Op, PhaseOp, RecordOp,
-    RemovedPlugin, Session, SessionSummary, StoredMessage, ToolOp, ToolResultValue,
+    ApproveOp, Attachment, BranchChild, BranchOp, CompactionOp, Ending, ForkLink, Header,
+    MergeLink, Mode, Op, PhaseOp, RecordOp, RemovedPlugin, Session, SessionSummary, StoredMessage,
+    ToolOp, ToolResultValue,
 };
 pub use state::SessionState;
 pub use sync::{
@@ -204,8 +209,9 @@ pub struct Harness {
     /// Held while deciding and queueing a graph build, so a manual Extract
     /// and an end-of-turn build can't both queue one for a session.
     pub(crate) graph_spawn: Mutex<()>,
-    /// Where runtime events go (the UI); `None` drops them.
-    pub(crate) sink: Mutex<Option<EventSink>>,
+    /// Where runtime events go (the UI); `None` drops them. Shared with the
+    /// sync engine's change hook.
+    pub(crate) sink: Arc<Mutex<Option<EventSink>>>,
     /// session → artifact → latest view-state summary since the learner's
     /// last message; flushed as `viewState` ops when they next send (W7).
     pub(crate) view_states: Mutex<HashMap<String, BTreeMap<String, String>>>,
@@ -250,7 +256,7 @@ impl Harness {
             planner_slots: Arc::new(Semaphore::new(1)),
             librarian_slots: Arc::new(Semaphore::new(1)),
             graph_spawn: Mutex::new(()),
-            sink: Mutex::new(None),
+            sink: Arc::new(Mutex::new(None)),
             view_states: Mutex::new(HashMap::new()),
             session_locks: Mutex::new(None),
             sync: Arc::new(sync::Sync::new(repo, config_dir)),
@@ -258,6 +264,15 @@ impl Harness {
         .inspect(|harness: &Self| {
             // Chips don't survive a restart, so neither do their staged images.
             crate::attachments::clear_staging(&harness.staging_dir());
+            // Another device's work arrived: tell the UI to re-read. The
+            // session store notices changed files by itself.
+            let sink = Arc::clone(&harness.sink);
+            harness.sync.set_on_change(Box::new(move || {
+                let sink = lock(&sink).clone();
+                if let Some(sink) = sink {
+                    sink("", AgentEvent::RepoChanged);
+                }
+            }));
             if let Err(e) = harness.reload_plugins() {
                 tracing::warn!(error = %e, "could not load plugins");
             }
@@ -316,8 +331,9 @@ impl Harness {
     }
 
     /// Best-effort background sync; never blocks the caller or a turn.
-    pub fn sync_in_background(&self) {
-        self.sync.trigger();
+    /// Returns whether a run started.
+    pub fn sync_in_background(&self) -> bool {
+        self.sync.trigger()
     }
 
     /// Best-effort background run only when a configured target has local
@@ -349,8 +365,12 @@ impl Harness {
     /// Every session, from each file's first two lines (M7). On mobile, a
     /// Learn session that used a desktop-only plugin is listed read-only,
     /// from a device-local cache that re-reads a file only when it changed.
+    /// Sessions of a branching plan carry their lineage, and a merge whose
+    /// inputs all ended (on any device) is created here if it is missing
+    /// (architecture §4.26).
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, Error> {
         let mut list = self.store.list()?;
+        self.apply_lineage(&mut list);
         self.apply_mobile_locks(&mut list);
         Ok(list)
     }

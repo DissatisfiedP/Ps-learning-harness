@@ -356,6 +356,17 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .session-meta { flex: none; font-size: var(--fs-small); color: var(--ink-3); }
 /* Locked on this phone (desktop-only plugin): the title greys to --ink-3, like a known plan node; still openable. */
 .session.locked .session-title { color: var(--ink-3); }
+/* Branch sessions (ui-design §7.1.1): the lineage line under the title, with
+   its state chip. Grid, so a long title still ellipsizes beside the meta. */
+.session.has-lineage .session-open { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--s4); row-gap: 2px; }
+.session-lineage {
+  grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s2);
+  min-inline-size: 0; font-size: var(--fs-meta); color: var(--ink-3);
+}
+.session-lineage-text { min-inline-size: 0; max-inline-size: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-state { flex: none; padding: 0 var(--s1); border: var(--hair); border-radius: var(--r); color: var(--ink-2); }
+.session-state[data-tone="ready"] { border-color: var(--accent); color: var(--accent); }
+.session-state[data-tone="running"] { border-color: transparent; background: var(--select); color: var(--ink); }
 /* The row's "…" menu: Extract (greyed until enough new teaching) and Delete. */
 .session-more-wrap { position: relative; }
 .session-more { font-size: var(--fs-small); min-inline-size: 44px; }
@@ -591,6 +602,11 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .notice.danger { color: var(--danger); }
 .timeline > .notice { margin-block: var(--s6); }
 .notice-label { margin-inline-end: var(--s2); }
+/* A branch notice can be several paragraphs (the merge session's summary of
+   each branch): label on its own line, the text as Markdown. */
+.branch-notice .notice-label { display: block; margin-block-end: var(--s1); }
+.branch-notice .notice-body { font-size: var(--fs-small); color: var(--ink-2); }
+.branch-notice .notice-body > * + * { margin-block-start: var(--s2); }
 .divider { display: flex; align-items: center; gap: var(--s3); }
 .divider::before, .divider::after { content: ""; flex: 1; border-block-start: var(--hair); }
 
@@ -683,6 +699,25 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .plan-edge { fill: none; stroke: var(--rule-strong); stroke-width: 1.1; opacity: 0.85; }
 .plan-edge.is-done { stroke: var(--ink-3); }
 .plan-arrow-head { fill: var(--rule-strong); }
+/* Tracks (ui-design §7.1.1): one lane per branch session, merge lanes below the lanes
+   they join. A branched session's own lane is outlined; the others dim. */
+.plan-lane rect { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 5 3; }
+.plan-lane.is-merge rect { stroke: var(--rule-strong); }
+.plan-lane.is-own rect { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: none; }
+.plan-lane-label { fill: var(--ink-3); font-weight: 600; }
+.plan-lane.is-own .plan-lane-label { fill: var(--accent); }
+.plan-lane.is-other .plan-lane-label { font-weight: 400; }
+.plan-join { fill: none; stroke: var(--rule-strong); stroke-width: 1.2; stroke-dasharray: 4 3; }
+.plan-join.is-other, .plan-node.is-other-lane, .plan-edge.is-other-lane { opacity: 0.5; }
+.plan-node.is-revision rect { stroke-dasharray: 3 2; }
+/* The card's track summary and the approval note (§7.1.1). */
+.plan-tracks { list-style: none; margin: var(--s4) 0 0; padding: 0; font-size: var(--fs-small); }
+.plan-track + .plan-track { margin-block-start: var(--s2); }
+.plan-track-title { color: var(--ink); font-weight: 600; }
+.plan-track-note { color: var(--ink-3); font-weight: 400; }
+.plan-track-sections { color: var(--ink-2); }
+.plan-track.is-other .plan-track-title, .plan-track.is-other .plan-track-sections { color: var(--ink-3); }
+.plan-branch-note { margin-block-start: var(--s4); max-inline-size: 64ch; font-size: var(--fs-small); color: var(--ink-2); }
 .plan-diagram-caption {
   margin-block-start: var(--s2);
   font: 400 var(--fs-meta)/1.4 var(--font-ui);
@@ -756,6 +791,13 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s2) var(--s4);
   color: var(--ink-2);
 }
+/* The comment box (ui-design §6.3, "Comment"): a quiet link that opens one line to the
+   tutor while the composer is away or busy (question open, reply streaming,
+   plan waiting). */
+.desk-comment { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2); }
+.desk-comment-toggle { font-size: var(--fs-small); padding-inline: 0; color: var(--ink-2); }
+.desk-comment-form { align-self: stretch; }
+.desk-comment-form .status:empty { display: none; }
 .composer-row { display: flex; align-items: flex-end; gap: var(--s2); }
 .composer-row .input { flex: 1; min-inline-size: 0; min-block-size: 44px; max-block-size: max(30dvh, 160px); overflow-y: auto; }
 .composer-row .btn { flex: none; min-block-size: 44px; }
@@ -891,6 +933,10 @@ dialog {
 .sheet-status { color: var(--ink-3); font-weight: 400; }
 .sheet-nodes { margin: var(--s1) 0 0; padding-inline-start: 1.2em; font-size: var(--fs-small); color: var(--ink-2); }
 .sheet-nodes li.last { font-weight: 600; color: var(--ink); }
+.sheet-track { margin-block-start: var(--s5); }
+.sheet-track-title { font: 600 var(--fs-small)/1.4 var(--font-ui); color: var(--ink); }
+.sheet-track .sheet-sections { margin-block-start: var(--s2); }
+.sheet-track.is-other .sheet-section-title, .sheet-track.is-other .sheet-nodes { color: var(--ink-3); }
 .sheet-tools { margin-block-start: var(--s5); font-size: var(--fs-small); color: var(--ink-2); }
 .plan-drawer .change { margin-block-start: var(--s5); }
 .plan-drawer .input { background: var(--paper); }
@@ -1020,6 +1066,17 @@ dialog {
 .map-stage .btn.text { color: #F0ECE4; font-size: var(--fs-small); }
 .map-stage .btn:focus-visible { outline-color: #A6D4C1; }
 .map-fit { position: absolute; inset-block-start: var(--s3); inset-inline-end: var(--s5); }
+/* Zoom steps and "Last session", bottom right of the stage, out of the HUD's way. */
+.map-zoom {
+  position: absolute; inset-block-end: var(--s4); inset-inline-end: var(--s5);
+  display: inline-flex; align-items: center; gap: var(--s1);
+  background: rgba(16 24 21 / 0.7); border: 1px solid rgba(140 196 174 / 0.35); border-radius: var(--r);
+  padding: var(--s1);
+}
+.map-zoom[hidden], .map-current[hidden] { display: none; }
+.map-zoom-btn { min-inline-size: 36px; min-block-size: 36px; justify-content: center; font-size: 1.1rem !important; }
+.map-current { min-block-size: 36px; padding-inline: var(--s3); }
+@media (pointer: coarse) { .map-zoom-btn, .map-current { min-block-size: 44px; } .map-zoom-btn { min-inline-size: 44px; } }
 /* Proposed links: the extractor's review list sits next to Fit, quiet until
    there is something to decide. */
 .map-proposals {
@@ -1093,6 +1150,7 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
   .home-col > .start { margin-block-start: var(--s7); }
   .session-open { flex-direction: column; align-items: flex-start; gap: 0; }
   .session-title { white-space: normal; }
+  .session.has-lineage .session-open { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
   .head-inner { column-gap: var(--s2); }
   .head-inner > .back { min-inline-size: 44px; min-block-size: 44px; }
   .back-label { display: none; }
@@ -1188,6 +1246,13 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
 .menu-item:hover, .menu-item:focus-visible { background: var(--raised); }
 .head-workspace-status:not(:empty) { padding-block-end: var(--s2); }
 .head-workspace-status.danger { color: var(--danger); }
+/* Home composer '+': files, or a folder as a reference library (§7.7.8). */
+.menu.add-menu {
+  inset-inline: 0 auto; inset-block: auto calc(100% + 4px);
+  min-inline-size: 260px; max-block-size: min(50dvh, 360px); overflow-y: auto;
+}
+.menu-heading { padding: var(--s2) var(--s3) var(--s1); font-size: var(--fs-meta); color: var(--ink-3); }
+#attach-error.note { color: var(--ink-2); }
 
 /* ---------- syntax highlighting (Prism tokens) ---------- */
 .prose pre code[class*="language-"] { color: var(--ink); }
@@ -1258,6 +1323,11 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
 .registry:first-child { margin-block-start: var(--s3); border-block-start: var(--hair); }
 .registry-name { font-weight: 600; color: var(--ink); }
 .registry-form { margin-block-start: var(--s5); }
+/* Settings → Libraries (§7.7.8). */
+.library { padding-block: var(--s4); border-block-end: var(--hair); }
+.library:first-child { border-block-start: var(--hair); }
+.library-edit { margin-block-start: var(--s3); }
+.library-cap { max-inline-size: 22ch; margin-block-start: var(--s4); }
 .confirm, .consent {
   margin: auto;
   inline-size: min(520px, calc(100vw - 2 * var(--gutter)));

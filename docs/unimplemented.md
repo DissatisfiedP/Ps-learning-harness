@@ -7,9 +7,10 @@ build order these items follow.
 ## 1. Verification debt (the largest risk)
 
 - **No real-model run is on record.** Every agent path is proven against the scripted provider
-  (`crates/harness/tests/{runtime,learning,graph,plugins,files}_e2e.rs`). Untested against a real model:
+  (`crates/harness/tests/{runtime,learning,graph,graph_read,plugins,files}_e2e.rs`). Untested against a real model:
   level tagging, hunt eligibility, the "parts I already know" split, plan edits, debrief sorting, artifact
-  placement, the graph builder, and researcher brief quality.
+  placement, the graph builder, whether the measurer and planner actually skip what the graph shows as held,
+  and researcher brief quality.
 - **The UI is verified in headless Chromium only**, against a mocked Tauri bridge — never in WebKitGTK and
   never on a device. Plugin-view isolation likewise: Chromium, not WebKitGTK.
 - **Sync is proven against local servers only.** Git against a temp bare repository, WebDAV against an
@@ -54,6 +55,11 @@ build order these items follow.
   run against a real model.
 - **Plan sheet during teaching**: status + free-text change, not the plan card's structured controls.
 - **Debrief**: claims are recorded and sorted by the model, but the UI has no sorted-claim list.
+- **Reference libraries** (arch §4.27): Office/EPUB/RTF files are skipped as `unsupported` (no extractor), scans
+  have no text (no OCR, and a library's page images aren't offered to the researcher), the coach and problem
+  checker get the library tools only when they get a tool loop, and a file's kind is decided at extraction, so
+  a refresh doesn't relabel unchanged files when the heuristics change. Search is a plain scan of the text
+  (fine for a few MB; untested at hundreds of MB).
 - **`targetLevel`** is schema-optional, so a plan section can arrive without one.
 - **`page_fetch`** has no URL allowlist — a fetched page can steer the researcher at localhost/LAN/metadata
   addresses.

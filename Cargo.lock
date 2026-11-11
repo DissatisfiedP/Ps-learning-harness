@@ -3156,6 +3156,7 @@ dependencies = [
 name = "ps-learning-harness"
 version = "0.1.0"
 dependencies = [
+ "gtk",
  "harness",
  "serde_json",
  "tauri",

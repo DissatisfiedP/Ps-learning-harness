@@ -454,6 +454,16 @@ The notes are status, not instructions: the button next to each one already says
 - Hiding the composer follows today's backend rules exactly: anything the backend would reject (pending card, plan phase, read-only) gets a note instead of an input.
 - The composer's attachment chips and `@` list sit above the textarea inside the same desk block (§7.2.13). A hidden composer hides them too; drafts and pending chips are kept. The workspace chip is in the running head (§7.2.14).
 
+**Comment (added 2026-11-11).** Under the desk note or the streaming composer, a text button "Comment" opens one
+line to the tutor (`#desk-comment`) whenever the learner can't simply reply: a question or choice is pending, a tutor
+reply is streaming, or the plan waits for approval. Not while the planner drafts, not when ended or read-only. Enter
+sends, Shift+Enter breaks the line, Escape closes. It calls `comment({ sessionId, text })`: the backend stops a reply
+in flight, closes a pending question or choice with a `setAside` result (the card then reads "Set aside for your
+comment."), appends the comment as an ordinary learner message and runs the tutor on it, which answers it first. With
+the plan awaiting approval the comment becomes a plan change request. A refused comment reopens the box with the text
+and the reason under it. The tutor records how-to-teach instructions with `preference_add`, so they hold for the rest
+of the session.
+
 ### 6.4 Flow entries (inside the page column)
 
 | Item kind (`timeline.js`) | Rendering |
@@ -561,6 +571,52 @@ Desktop:
   - Not inside the app (`!available`): the input area is replaced by "Open this in the P's Learning Harness app."
 
 Phone: the same stacked order. The display line is 28 px. Session-row meta wraps under the title. Delete is always visible.
+
+#### 7.1.1 Branch sessions (tracks that fork and merge)
+
+The planner may split a plan into parallel **tracks** (`plan.tracks`) that later merge. Approval
+keeps the first root track in the session, forks one new session per other root track, and the end
+of the last input branch creates a **merge session** that opens with a revision section. New
+sessions never run on their own: they wait in the list until the learner opens them. A plan without
+tracks and a session without `lineage`/`branch` render exactly as before.
+
+- **Session row.** A row whose summary carries `lineage` gets a second line under the title, inside
+  the open button (so the row's accessible name includes it), `--fs-meta` `--ink-3`: "Branch 2 of 3 ·
+  Geometry · from ⟨origin title⟩" (the origin row omits "from"), or "Merge of Algebra + Geometry".
+  After it, a state chip (`--hair` border, `--r`): **Ready** (never run; `--accent` text and border),
+  **In progress** (`--select` fill), **Done · merge waits for ⟨tracks⟩** / **Done · merge pending**
+  (ended, merge not created yet), **Done · merged**, or **Done** (the final track). Every `session`
+  event refreshes the line in place. The row switches to a grid so a long title still ellipsizes
+  beside the meta; on a phone the line stacks like the meta.
+- **Start.** Opening a Learn session whose `lineage.started` is false (phase teach, not ended, no
+  pending call, no tutor turn) shows the inline status bar of §7.2.11 (`role="status"`): "This
+  branch is ready: ⟨track⟩." or "The merge session is ready: it starts with a short revision.", with
+  one secondary button **Start** (`resume_turn`). Sending a message works too and clears the bar.
+- **Branch notice.** A `branch-notice` message (`[branches] …`) is a flow notice like §7.2.7, with
+  the small-caps label "Branches" on its own line and the text rendered as Markdown in `--fs-small`
+  `--ink-2` (the merge session's notice summarises each input branch in several paragraphs).
+- **Plan diagram lanes.** With tracks, the diagram draws one lane per track: a dashed `--rule`
+  frame with the track title in small `--ink-3` 600 text at its top-left. Root lanes sit side by
+  side and share the width; a merge lane sits centred under the lanes it joins, with a dashed join
+  arrow from each input lane's bottom into its top. Each lane is laid out with the usual layered
+  pass on its own sections, a revision section on top; prerequisite arrows are drawn only inside a
+  lane (between lanes the join arrow stands for them). In a branched session (`st.branch`), its own lane is outlined in
+  `--accent`; the other lanes, their boxes and links drop to 50 % opacity and their titles read
+  "⟨track⟩ · other session" (box tooltips add "taught in another session"). A revision section's
+  box has a dashed outline and the meta "Revision · ⟨n⟩ ideas" (the ideas it re-checks — nodes owned
+  by other sections, so a node's home is always its non-revision section).
+- **Plan card.** Under the drawing, a "Tracks" list: per track, its title (merge tracks add "— after
+  A + B") and its sections in teaching order joined by "→", revision sections as "Revision: ⟨title⟩".
+  Above the actions, while the plan is a proposal with two or more root tracks: "This plan runs as N
+  parallel tracks. Approving keeps "⟨first track⟩" here and creates N−1 more sessions, one per
+  track; they run when you open them from Home." (+ the merge sentence when the plan merges); Approve
+  is `aria-describedby` it. The drawer of a revision section says what the revision is for.
+- **Plan sheet and progress.** The overlay's Sections drawer groups sections under one `h4` per
+  track ("— after A + B", "— this session" / "— other session"; other tracks in `--ink-3`), and
+  marks revision sections "— Revision". In a branched session every count — the head's "Teach 2/4",
+  "Plan (Teach, section n of m)", the overlay's "Section n of m" and the current-section fallback —
+  counts only the session's own track. A section opener counts within its section's track and
+  prefixes "Revision · " for a revision section.
 
 ### 7.2 Learn session
 
@@ -1201,9 +1257,19 @@ home position):
 
 - Within a cluster every claim has a **home**: prerequisites above, dependents below — the layered
   arrangement that keeps crossings low [Purchase 1997; Sugiyama 1981; Gansner 1993].
+- **Topics nest; subjects are islands** (2026-11-11). Each cluster sits inside its topic's block,
+  and a block holds its own ideas' cluster plus its sub-topics' blocks, packed in shelves to about
+  1.6 : 1 (gaps 260/220 inside a sub-topic, 360/300 between a root's own blocks). Root topics
+  (Mathematics, History, …) are separate blocks with **1100 units of water** between them, so two
+  unrelated subjects never read as one; roots that share a prerequisite are placed next to each
+  other (greedy order by shared edges, ties keep the topic-tree order) with a 640-unit strait. A
+  block that only holds sub-topics gets a 160-unit band for its heading. Reason: the old single
+  shelf row put `History › Rome` straight after `Mathematics › Geometry` and the eye merged them.
 - A d3-style simulation (forces scale with a cooling `alpha`) adds charge between claims, springs
   along prerequisite edges, disc collision, a pull toward home (firm in y, loose in x) and a hard
-  rule that whatever needs a claim sits below it.
+  rule that whatever needs a claim sits below it. A spring across clusters is weak (0.1 within one
+  root, 0.02 across roots) and the "sits below" rule applies inside a cluster only: across islands
+  both would drag claims out of their topic into the water.
 - **Stiff, not elastic** (owner direction, 2026-11-07). Velocity damping 0.38 → 0.55, cooling
   0.018 → 0.035, home pull roughly doubled (x 0.07 → 0.16, y 0.11 → 0.22), springs 0.6 → 1.0, and
   a flung claim is capped at 20 units/tick instead of 40. Measured on the real graph: rest in
@@ -1215,25 +1281,88 @@ home position):
   48 units a tick. The settled picture is the same every visit (mental-map stability [Misue 1995]).
 - A claim's disc grows with how many claims need it (radius 12 + 3 per dependent, up to 4), so the
   load-bearing foundations are visible before any label is read.
-- **Fit frames the whole graph.** Framing a single cluster hid the rest of the map; at whole-graph
-  zoom the cluster titles stay legible because they are drawn in screen space (below), and the
-  learner zooms into a topic to read its claims.
+- **Fit frames the whole graph** (every root block). Framing a single cluster hid the rest of the
+  map; at whole-graph zoom the open topics' titles and the folded topics' discs say what is where
+  (semantic zoom, below), and the learner zooms into a topic to read its claims.
+
+**Semantic zoom (level of detail, 2026-11-11).** Zooming out folds topics into their parents, so
+the far view is a handful of subject discs instead of a dust of dots (verified in headless
+Chromium 156 on a synthetic graph — Mathematics › Algebra › Linear equations / Quadratics,
+Mathematics › Geometry, History › Rome / WWII, Physics › Mechanics, 41 claims — at the root-disc,
+sub-topic-disc, fit and claim zooms; ctrl+wheel over canvas, HUD and buttons was
+`defaultPrevented` with `devicePixelRatio` and `visualViewport.scale` unchanged, and a CDP
+two-finger touch pinch zoomed the map only):
+
+- A topic is **open** (its claims and sub-topics drawn) while its block is at least **220 px**
+  across on screen and folds into **one disc** under **180 px** (the gap stops a zoom resting on
+  the threshold from flickering); at zoom ≥ 0.5, where claim labels start, everything is open.
+  The rule is by on-screen size, not depth, so a big topic stays open further out than a small
+  one and a deep tree needs no extra settings. Zooming out from claims: Linear equations folds,
+  then Algebra, then only `Mathematics`, `History`, `Physics` remain.
+- A folded topic's disc sits at the mean of its claims, is 15 + 4.5·√n px (max 54, never bigger
+  than its block), carries the **number of claims inside**, and is named under it with
+  "n ideas · m topics". The name is dropped rather than overprinted (it may not cover a title, a
+  claim, another name or disc); the disc's tooltip still gives the full path. A disc holding a
+  selected claim gets the dashed selection ring.
+- The switch **fades** over ~150 ms (contents and disc cross-fade; instant with reduced motion);
+  only things more than half there take the pointer.
+- **Edges aggregate.** A prerequisite with an end inside a folded topic is counted toward one link
+  between the two things actually drawn (a claim or the outermost folded topic), deduplicated per
+  pair and direction, drawn in screen px as a gentle arc (so A → B and B → A stay two lines),
+  thicker with the count (1.2 + 1.1·log₂ n px, max 5). Edges inside one folded topic disappear
+  with it.
+- **Click a folded disc** to zoom into that topic (it opens on the way in). **Click an open
+  topic's heading** (a topic that only holds sub-topics) to frame it; a cluster title still
+  selects its claims.
+- The zoom floor follows the map: 0.3 for a small map, further out (never below 0.02) when needed,
+  always far enough that every root folds — fully zoomed out *is* the subjects view.
+
+**Zoom belongs to the map, never the app (2026-11-11).** Before, a trackpad pinch over the Map
+magnified the whole window on Linux, and ctrl+wheel over the HUD or the card zoomed the page in a
+browser. Now:
+
+- **Wheel** over the canvas zooms the map about the pointer (plain wheel is the map's convention,
+  as before). **Ctrl/⌘+wheel** — which is also how Chromium and WebKit deliver a trackpad pinch —
+  is caught on the whole stage (HUD, card and buttons included) by a non-passive listener,
+  `preventDefault`ed and turned into a map zoom about the pointer, with pinch-sized deltas scaled
+  up. A plain wheel over the card still scrolls its long statement.
+- **Touch pinch** (two pointers; the stage is `touch-action: none`) zooms about the fingers'
+  midpoint and pans with it. Safari/WKWebView `gesturestart/change/end` are cancelled and zoom
+  the map about the pointer.
+- **WebKitGTK (Linux).** A touchpad pinch never reaches the page there: WebKit's own
+  `GtkGestureZoom` magnifies the page first, and no setting turns it off. The app shell
+  (`crates/app/src/pinch.rs`) connects to the webview widget's GTK `event` signal, which GTK 3 runs
+  before bubble-phase gestures, stops every `GDK_TOUCHPAD_PINCH`, and forwards it as an
+  `app-pinch` window event `{ phase, scale, x, y }`. The Map zooms when such a pinch begins over
+  the stage; elsewhere a pinch does nothing. **Decision:** this disables WebKit's whole-app pinch
+  magnification on every page, not only the Map — it was the cause of the bug, the app's text
+  scales with the system font size (rem units, WCAG 1.4.4), and a magnified webview has no way
+  back but pinching out again. Tauri's `zoomHotkeysEnabled` is left off (its default), so the
+  zoom keys never zoomed the app either. Touch-screen pinches are touches, not touchpad events,
+  and are unaffected.
+- **Buttons and keys.** A bottom-right group holds `−` / `+` (a smooth 1.4× step about the
+  centre) and, when the newest Learn session's plan has claims on the map, **"Last session"**,
+  which frames the clusters holding them. With focus in the stage (the idea list, the buttons),
+  `+`/`=` and `-` step the zoom and `0` fits, with or without ctrl/⌘.
+- **Double-click** a topic (open block or folded disc) to frame it; again to step out to its
+  parent; on open water, or from a root, to frame the whole map.
 
 **Cluster titles are screen-space labels.** Drawn at a fixed 16px/13px in the canvas rather than in
 world units, so a zoomed-out view still says which topic sits where; each is pinned inside the
 stage and placed above its cluster, else one title-height further up, and never below it: a title
 reads as the heading of the ideas under it, and one under its cluster looked like a topic with no
 ideas (owner report, 2026-11-10). It is **dropped rather than overprinted** when it would collide
-with another title or with another topic's claim. Zooming in separates the clusters and the
-dropped titles return.
+with another title, another topic's claim or a folded disc. Zooming in separates the clusters and
+the dropped titles return. Only open topics have titles; a block wholly beside the stage has none
+(pinning a far island's title to the edge named a topic that wasn't there).
 
 **Interaction.**
 
 - **Click a claim** to select or unselect it for practice: shockwave plus spark burst. **Click a
   cluster title** to select every claim in that topic.
 - **Drag a claim**: its neighbours follow on their springs; let go mid-motion and it's flung, then
-  pulled home. **Drag the background** to pan; **wheel or pinch** to zoom (0.3–2.4×);
-  **double-click the background** or press "Fit" to frame the whole graph.
+  pulled home. **Drag the background** (or a folded disc) to pan; **wheel or pinch** to zoom
+  (see "Zoom belongs to the map"); press "Fit" to frame the whole graph.
 - **Hover or keyboard focus** lifts the claim, dims everything that is not it or a direct
   neighbour, and shows a **description card**: the claim's title; kind and topic path; the
   proposition's own `statement` as the description; then two hoverable labels, `Depends on (n)` and
@@ -1250,8 +1379,8 @@ dropped titles return.
     moving focus between them keeps it open.
 - **Claim labels** on the canvas appear at zoom ≥ 0.55 and are laid out greedily: the focused claim
   first, then selected ones, then the rest in graph order, skipping any label whose box would
-  overlap one already placed (the card still gives every title in full). Without this, a 22-claim
-  topic printed its titles on top of each other.
+  overlap one already placed or a topic title or disc name (compared in screen px; the card still
+  gives every title in full). Without this, a 22-claim topic printed its titles on top of each other.
 
 **Accessibility.** The canvas is `aria-hidden`. Under it is a visually hidden list: one `fieldset`
 per topic (legend: the topic path), then one native checkbox per claim labelled "⟨title⟩,
@@ -1598,6 +1727,30 @@ in each section does the measuring."), plus the section description above. The g
 `get_settings().startingPoint` (default Measure me) and writes `set_starting_point({ value })` on
 change, with "Saving…" → "Saved." or the error beside it; a failed save puts the stored choice back.
 
+#### 7.7.8 Reference libraries (architecture §4.27)
+
+**Home "+".** On Home in Learn mode (no session yet) the composer's "+" opens a small menu
+(`#add-menu`, `role="menu"`, arrow keys move, Escape closes and returns focus to "+"):
+"Files…" (the old picker), "Folder as a reference library…" with the note "Copied in; only its text
+syncs", and, under "Link a library", every library already imported (name, file count; an already
+linked one is disabled with "· linked"). Choosing a folder runs `library_import` with its progress
+in the composer's status line ("Extracting 12 of 166: notes/digest.md"), then the result line
+("huawei-ict: 166 files (166 added).") and a chip of kind "Reference library". Picking a folder
+imported before refreshes it instead of duplicating it. The chip goes with the first message and
+links the library to the new session; removing it before Start unlinks it (the library stays). On a
+phone the folder item says folders can't be picked there, and linking an existing library works.
+In a session "+" opens the file picker directly, as before; Practice has no "+". A library is never
+a workspace and never goes through "Attach folder…".
+
+**Settings → Libraries** (between Sync and Plugins). One row per library: name and id, topic and
+description, "N files: 20 question banks · 94 guides · …" with scans without text, "From <folder> on
+this device." or "Imported on another device: its text is here; refresh it where it was imported.",
+and what the last import skipped by reason. Actions: Edit (name, topic, description — agents read
+the description), Refresh (only on the importing device; progress and result in the section status),
+Remove (confirmation: its text leaves every device at the next sync and this device's copies are
+deleted; the folder is not touched). Below the list: "Skip files over (MB)" (default 50) and
+"Import folder…".
+
 ### 7.8 Focus mode (full screen, silenced notifications, break nudge)
 
 Sessions run for hours. Focus mode keeps the rest of the computer out of view while a session is open, and asks for one short break per 50 active minutes. Each part has its own Settings checkbox (§7.5), all on by default. They apply from the next session open.
@@ -1747,7 +1900,7 @@ Nothing in this table scrolls, moves focus or animates.
 - Auto-grow up to `max(30dvh, 160px)`, then the textarea scrolls internally.
 - While busy, the textarea is editable; Send becomes Stop (unchanged logic in `syncBusy`). The visible label is "Stop", not just an icon.
 - Placeholders: "Reply to the tutor" in sessions; the `COPY` placeholders on Home. Remove `updateComposerHint`'s "Answer the question above first…" and "Approve the plan above…", because the desk note replaces them.
-- **Attachments** (§7.2.13): a "+" button, paste, drag-and-drop and the `@` list add chips above the field (in Practice only images: no "+" and no `@` list, §7.3); chips are part of the draft, removed by a button whose accessible name names the item, and are not sent until Send. Image bytes stay device-local until Send; removing a chip deletes them. Enter inside the `@` list accepts the highlighted item (not while an IME is composing); Escape closes the list and keeps the typed text. Enter elsewhere still sends (Ctrl/Cmd+Enter on phone keyboards).
+- **Attachments** (§7.2.13): a "+" button, paste, drag-and-drop and the `@` list add chips above the field (in Practice only images: no "+" and no `@` list, §7.3); chips are part of the draft, removed by a button whose accessible name names the item, and are not sent until Send. Image bytes stay device-local until Send; removing a chip deletes them. Enter inside the `@` list accepts the highlighted item (not while an IME is composing); Escape closes the list and keeps the typed text. Enter elsewhere still sends (Ctrl/Cmd+Enter on phone keyboards). On Home "+" is a menu that also imports or links a reference library (§7.7.8).
 - **Vision warning:** when the Tutor or Practice role's catalog entry says it cannot see images, an image chip's kind line reads "This model can't see images", and Send opens one confirmation dialog before sending without them. It never silently drops a chip.
 - **Workspace chip** (§7.2.14) lives in the running head, not the composer; it belongs to the session and is not affected by Send.
 

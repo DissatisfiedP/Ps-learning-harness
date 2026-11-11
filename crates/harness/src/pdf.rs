@@ -78,14 +78,18 @@ fn mib(bytes: usize) -> String {
 /// Load a document, refusing what this module can't read. Every error is a
 /// sentence for the model.
 fn document(bytes: &[u8]) -> Result<Document, String> {
+    document_capped(bytes, MAX_PDF_BYTES)
+}
+
+fn document_capped(bytes: &[u8], max_bytes: usize) -> Result<Document, String> {
     if bytes.is_empty() {
         return Err("the PDF is empty".into());
     }
-    if bytes.len() > MAX_PDF_BYTES {
+    if bytes.len() > max_bytes {
         return Err(format!(
             "this PDF is {}, over the {} cap; ask the learner for the pages you need",
             mib(bytes.len()),
-            mib(MAX_PDF_BYTES)
+            mib(max_bytes)
         ));
     }
     if !is_pdf(bytes) {
@@ -105,14 +109,35 @@ fn document(bytes: &[u8]) -> Result<Document, String> {
 /// applied. The whole-text cap is [`pages`]' business: callers that keep only
 /// matches or first lines use this and emit little.
 pub(crate) fn extract(bytes: &[u8]) -> Result<Vec<PageText>, String> {
-    let doc = document(bytes)?;
+    extract_with(bytes, MAX_PDF_BYTES, MAX_PAGES, false)
+}
+
+/// Reference-library import (`library.rs`): the same extraction with the
+/// caller's input and page caps, and a page over [`MAX_PAGE_TEXT`] cut to
+/// the cap instead of refusing the whole document — a library keeps what it
+/// can read.
+pub(crate) fn extract_lenient(
+    bytes: &[u8],
+    max_bytes: usize,
+    max_pages: usize,
+) -> Result<Vec<PageText>, String> {
+    extract_with(bytes, max_bytes, max_pages, true)
+}
+
+fn extract_with(
+    bytes: &[u8],
+    max_bytes: usize,
+    max_pages: usize,
+    cut_long_pages: bool,
+) -> Result<Vec<PageText>, String> {
+    let doc = document_capped(bytes, max_bytes)?;
     let count = doc.get_pages().len();
     if count == 0 {
         return Err("this PDF has no pages".into());
     }
-    if count > MAX_PAGES {
+    if count > max_pages {
         return Err(format!(
-            "this PDF has {count} pages, over the {MAX_PAGES}-page cap; ask the learner for the pages you need"
+            "this PDF has {count} pages, over the {max_pages}-page cap; ask the learner for the pages you need"
         ));
     }
     drop(doc);
@@ -125,13 +150,20 @@ pub(crate) fn extract(bytes: &[u8]) -> Result<Vec<PageText>, String> {
     for (i, raw) in texts.into_iter().enumerate() {
         let number = i as u32 + 1;
         // Extractors pad pages with blank lines; a page's text is its words.
-        let text = raw.trim().to_owned();
+        let mut text = raw.trim().to_owned();
         if text.len() > MAX_PAGE_TEXT {
-            return Err(format!(
-                "page {number} has {} of text, over the {} per-page cap; this PDF's text layer is unusable",
-                mib(text.len()),
-                mib(MAX_PAGE_TEXT)
-            ));
+            if !cut_long_pages {
+                return Err(format!(
+                    "page {number} has {} of text, over the {} per-page cap; this PDF's text layer is unusable",
+                    mib(text.len()),
+                    mib(MAX_PAGE_TEXT)
+                ));
+            }
+            let mut cut = MAX_PAGE_TEXT;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
         }
         let scanned = text.chars().count() < SCAN_TEXT_CHARS;
         out.push(PageText {

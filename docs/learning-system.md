@@ -433,7 +433,9 @@ From the confidence the learner already gives on every answer, show them how wel
 | `probe_done` strand | `levelReached: "none" \| "explain" \| "use" \| "analyze" \| "design"`; `confidence: "unprobed"` allows `reason: "new" \| "skipped"` |
 | `question_ask` | `level: "explain" \| "use" \| "analyze" \| "design"` (required for `probe` and `check`) |
 | Plan section | `targetLevel`; `assumedKnown?: boolean`; `knownNote?: string`; `hunt?: { available: boolean, reason, enabled: boolean }`; `learnerNote?: string` |
-| Plan (whole) | `depth`, `explore`, `minutesPerSitting`, `style` (mirrors of the learner's controls) |
+| Plan (whole) | `depth`, `explore`, `minutesPerSitting`, `style` (mirrors of the learner's controls); optional `tracks: [{ id, title, sectionIds, after }]` for a plan taught as parallel branch sessions that merge (architecture §4.26) |
+| Plan section | `revision?: true` on the code-written revision section that starts a merge track (§4.26) |
+| Session header | `fork?: { parent, upToAt, upToOpId, trackId }` / `merge?: { origin, parents, upToAt, upToOpId, trackId, completed }` (§4.26) |
 | Scope brief | strands gain `discourse`; top-level `venues[]` |
 | Graph node `kind` | the graph exists; `heuristic` with `attribution` and `scope` is not built yet; provenance `kind` adds `hunt` (with `unverified: true` until the debrief marks the claim correct) when it is |
 | `Outcome` (when practice exists) | `level` |
@@ -447,6 +449,7 @@ From the confidence the learner already gives on every answer, show them how wel
 | `knownRefuted { sectionId, questionId }` | A known section's check is missed |
 | `huntSend` / `huntReturn { notes, links, files }` / `huntSkip` | Hunt lifecycle |
 | `debrief { huntId, claims[] }` | `debrief_record` |
+| `branch { track, planVersion, upToAt, upToOpId, children[] }` | A plan with tracks is approved: the origin forked its other root tracks (§4.26) |
 
 The frontier lives in `frontier.jsonl`, not in a session.
 

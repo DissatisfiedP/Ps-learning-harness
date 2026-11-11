@@ -268,6 +268,6 @@ mod ser {
     /// Parse streamed arguments; malformed JSON is kept as a string so the
     /// runtime can answer with an error tool result and let the model correct.
     pub fn parse_args(raw: &str) -> Value {
-        serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+        crate::args::parse_tool_args(raw)
     }
 }

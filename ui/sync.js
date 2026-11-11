@@ -424,6 +424,32 @@ export function initSync(hooks) {
   // Best effort; the backend does nothing when nothing changed.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') call('sync_if_changed').catch(() => {});
+    else catchUp();
   });
+  // Coming back, and every few minutes while open, fetch other devices' work;
+  // what arrives re-renders through the `repoChanged` runtime event.
+  window.addEventListener('focus', () => catchUp());
+  setInterval(() => {
+    if (document.visibilityState === 'visible') catchUp({ force: true });
+  }, CATCH_UP_EVERY_MS);
   onVisibility();
+  // The backend already runs a sync at launch.
+  lastCatchUp = Date.now();
+}
+
+const CATCH_UP_MIN_GAP_MS = 60_000;
+const CATCH_UP_EVERY_MS = 5 * 60_000;
+let lastCatchUp = 0;
+
+/** A background run (pull and push) unless one started in the last minute. */
+function catchUp({ force = false } = {}) {
+  if (running || (status && targets(status).length === 0)) return;
+  const now = Date.now();
+  if (!force && now - lastCatchUp < CATCH_UP_MIN_GAP_MS) return;
+  lastCatchUp = now;
+  call('sync_in_background')
+    .then((started) => {
+      if (started) setTimeout(refresh, 5_000);
+    })
+    .catch(() => {});
 }

@@ -9,6 +9,7 @@ import { dndSupport, focusPref, setFocusPref } from './focus.js';
 import { modelSearch } from './modelsearch.js';
 import { expandSection, initSections, restoreSections, setSectionSummary } from './disclosure.js';
 import { syncSettingsOpened } from './sync.js';
+import { initLibrarySettings, renderLibrarySettings } from './library.js';
 
 const dialog = document.getElementById('settings');
 const modelForm = document.getElementById('model-form');
@@ -61,6 +62,7 @@ export function initSettings(h) {
   });
   renderDndRow();
   initSections('providers', 'sync');
+  initLibrarySettings();
 }
 
 // ---------- learning (ui-design §7.7.7) ----------
@@ -140,6 +142,7 @@ export async function openSettings({ to = null } = {}) {
   await sync;
   if (!dialog.open) dialog.showModal();
   renderDndRow();
+  renderLibrarySettings();
   try {
     await pluginSettings?.render();
   } catch (e) {

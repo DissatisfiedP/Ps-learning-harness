@@ -12,7 +12,7 @@ use providers::ToolSpec;
 use serde_json::{json, Value};
 
 use crate::plugins::PluginManifest;
-use crate::state::{Level, Phase, Plan, Section, SessionState};
+use crate::state::{Level, Phase, Plan, Section, SessionState, Track};
 
 /// Most plugins one section may have (architecture §4.20).
 pub const MAX_PLUGINS_PER_SECTION: usize = 3;
@@ -134,6 +134,62 @@ fn file_tools() -> [ToolSpec; 2] {
     ]
 }
 
+/// The reference-library tools (`library.rs`): read-only, every phase and
+/// every agent that reads material, on every device (only text syncs).
+fn library_tools() -> [ToolSpec; 3] {
+    let kind = json!({ "type": "string", "enum": ["question-guide", "question-bank", "guide", "notes", "reference"] });
+    [
+        tool(
+            "library_list",
+            "List the learner's reference libraries and their files by kind (question-guide, question-bank, guide, notes, reference), with page counts and which files have no text. Read-only.",
+            json!({
+                "library": { "type": "string", "description": "A library id, e.g. `huawei-ict`; all libraries when left out." },
+                "kind": kind.clone()
+            }),
+            &[],
+        ),
+        tool(
+            "library_search",
+            "Search the text of the learner's reference libraries. Every word is a case-insensitive term; returns up to 20 best lines as `<library>/<file>:<line> [p.N] (kind) — snippet`. Read-only.",
+            json!({
+                "query": { "type": "string", "description": "A few distinctive words in the text's own language." },
+                "library": { "type": "string", "description": "Limit to one library id." },
+                "kind": kind
+            }),
+            &["query"],
+        ),
+        tool(
+            "library_read",
+            "Read a library file's extracted text by line range (PDF pages are tagged `[p.N]`), at most 256 KiB per read. Read-only.",
+            json!({
+                "path": { "type": "string", "description": "`<library>/<file>` as library_list or library_search print it." },
+                "from": { "type": "integer", "minimum": 1, "description": "First line; default 1." },
+                "to": { "type": "integer", "minimum": 1, "description": "Last line; default as far as 256 KiB goes." }
+            }),
+            &["path"],
+        ),
+    ]
+}
+
+/// Read-only access to the learner's knowledge graph for the tutor (measure,
+/// teach) and the planner (`graph::read`). Writing stays the graph builder's.
+fn graph_read_tools() -> [ToolSpec; 2] {
+    [
+        tool(
+            "graph_search",
+            "Search the learner's knowledge graph (what earlier sessions recorded) for nodes and topics. Returns up to 20 matches with ids, homes, titles, statements and the learner's record (checks, which session recorded it and when). Read-only; says so when the graph is empty.",
+            json!({ "query": { "type": "string", "description": "A word or phrase from a title, id or statement, e.g. `divider`." } }),
+            &["query"],
+        ),
+        tool(
+            "graph_read",
+            "Read one node or topic of the learner's knowledge graph by id. A node: its statement, home, prerequisites (`requires`), what needs it, and the learner's record. A topic: its path, subtopics and nodes. Read-only.",
+            json!({ "id": { "type": "string", "description": "A node or topic id from graph_search or the learner state." } }),
+            &["id"],
+        ),
+    ]
+}
+
 fn workspace_write() -> ToolSpec {
     tool(
         "workspace_write",
@@ -229,10 +285,31 @@ fn frontier_park() -> ToolSpec {
     )
 }
 
+/// A standing instruction from the learner about how to be taught, kept in
+/// the goal's `preferences` so it reaches every later turn and the planner.
+fn preference_add() -> ToolSpec {
+    tool(
+        "preference_add",
+        "Record a standing instruction the learner gave about how they want to be taught (\"write your own questions instead of copying them from the PDF\", \"less theory first\"). It joins the goal's preferences, which you see every turn, and holds for the rest of the session until they change it. Record it the moment they say it, then follow it.",
+        json!({
+            "instruction": { "type": "string", "description": "The instruction as a short imperative, in the learner's sense." },
+            "replaces": { "type": "string", "description": "The exact text of an earlier preference this one replaces, if any." }
+        }),
+        &["instruction"],
+    )
+}
+
 /// The tutor's tools for a phase. Plugin tools are added by the caller.
 pub fn tutor_tools(phase: Phase, workspace: bool) -> Vec<ToolSpec> {
     let mut t = vec![choice_ask(), research_request(), frontier_park()];
     t.extend(file_tools());
+    t.extend(library_tools());
+    if matches!(phase, Phase::Measure | Phase::Teach) {
+        t.extend(graph_read_tools());
+    }
+    if matches!(phase, Phase::Measure | Phase::Teach | Phase::Close) {
+        t.push(preference_add());
+    }
     match phase {
         Phase::Measure => {
             t.push(tool(
@@ -384,8 +461,15 @@ pub fn planner_tools() -> Vec<ToolSpec> {
                         "available": { "type": "boolean", "description": "True when this section is worth a hunt: explore is suggest or on, the material isn't fully settled, the brief lists a venue the learner can read now, and the deadline allows it." },
                         "reason": { "type": "string", "description": "One line the learner reads on the plan card." },
                         "enabled": { "type": "boolean", "description": "Never yours to set. Leave it out; the app refuses true and derives it from the learner's toggle." }
-                    }, "required": ["available", "reason"] }
-                }, "required": ["id", "title", "nodeIds", "mode", "style", "plugins", "notes", "exit"] } }
+                    }, "required": ["available", "reason"] },
+                    "revision": { "type": "boolean", "description": "Only on a revision section the app wrote at the start of a merge track; keep such a section unchanged (or remove it). Never set it yourself." }
+                }, "required": ["id", "title", "nodeIds", "mode", "style", "plugins", "notes", "exit"] } },
+                "tracks": { "type": "array", "description": "Only to split the plan into strands taught in parallel sessions that merge later (architecture §4.26); leave it out otherwise. Every section in exactly one track. Root tracks have no `after`; a merge track lists the two or more tracks it joins; exactly one final track.", "items": { "type": "object", "properties": {
+                    "id": { "type": "string", "description": "Lowercase slug." },
+                    "title": { "type": "string", "description": "Short name the learner sees on the session list." },
+                    "sectionIds": { "type": "array", "items": { "type": "string" }, "description": "This track's sections, in teaching order." },
+                    "after": { "type": "array", "items": { "type": "string" }, "description": "Empty for a root track; for a merge track, the two or more tracks it joins." }
+                }, "required": ["id", "title", "sectionIds", "after"] } }
             }),
             &["goal", "approach", "nodes", "sections"],
         ),
@@ -399,11 +483,13 @@ pub fn planner_tools() -> Vec<ToolSpec> {
         research(),
     ];
     t.extend(file_tools());
+    t.extend(graph_read_tools());
+    t.extend(library_tools());
     t
 }
 
 pub fn researcher_tools() -> Vec<ToolSpec> {
-    vec![
+    let mut t = vec![
         tool(
             "web_search",
             "Search the web. Returns numbered results with URLs and snippets.",
@@ -604,7 +690,9 @@ pub fn researcher_tools() -> Vec<ToolSpec> {
             }),
             &["kind"],
         ),
-    ]
+    ];
+    t.extend(library_tools());
+    t
 }
 
 /// The graph builder's tools (`jobs/graph-builder.md`): read the session's
@@ -855,7 +943,26 @@ pub fn validate_plan(
             if !ids.contains(id.as_str()) {
                 problems.push(format!("section `{}` lists unknown node `{id}`", s.id));
             }
-            *owner.entry(id.as_str()).or_insert(0) += 1;
+            // A revision section re-checks nodes other sections own.
+            if !s.revision {
+                *owner.entry(id.as_str()).or_insert(0) += 1;
+            }
+        }
+        // Revision sections are written by the app when branches merge
+        // (architecture §4.26); the planner may keep or remove one, never
+        // make or change one.
+        if s.revision {
+            let kept = state.plan.as_ref().is_some_and(|p| {
+                p.sections
+                    .iter()
+                    .any(|b| b.id == s.id && b.revision && same_section(s, b))
+            });
+            if !kept {
+                problems.push(format!(
+                    "section `{}` sets `revision`: revision sections are written by the app; leave `revision` out of your sections, and keep an existing revision section unchanged",
+                    s.id
+                ));
+            }
         }
         if s.plugins.len() > MAX_PLUGINS_PER_SECTION {
             problems.push(format!(
@@ -939,9 +1046,209 @@ pub fn validate_plan(
             }
         }
     }
+    problems.extend(track_problems(plan, state));
     problems.sort();
     problems.dedup();
     problems
+}
+
+/// The `tracks` rules (architecture §4.26). Tracks form an in-tree: two or
+/// more root tracks; a merge track joins two or more tracks; every track but
+/// one final track feeds exactly one merge; every section is in exactly one
+/// track; a node requires only nodes on its own track or on tracks that
+/// merge into it. A plan splits only before its first approval. Once it has
+/// forked, the tracks (ids, titles, `after`) and the other tracks' sections
+/// are fixed: each session changes only its own track.
+fn track_problems(plan: &Plan, state: &SessionState) -> Vec<String> {
+    let mut problems = Vec::new();
+    let previous = state.plan.as_ref();
+    if let Some(branch) = &state.branch {
+        let before: &[Track] = previous.map(|p| p.tracks.as_slice()).unwrap_or_default();
+        let shape = |ts: &[Track]| -> Vec<(String, String, Vec<String>)> {
+            ts.iter()
+                .map(|t| (t.id.clone(), t.title.clone(), t.after.clone()))
+                .collect()
+        };
+        if shape(&plan.tracks) != shape(before) {
+            problems.push(format!(
+                "this session teaches track `{}` of a plan that already split into sessions: keep `tracks` (ids, titles, after) exactly as they are",
+                branch.track
+            ));
+        } else {
+            for t in before.iter().filter(|t| t.id != branch.track) {
+                if plan
+                    .track(&t.id)
+                    .is_some_and(|n| n.section_ids != t.section_ids)
+                {
+                    problems.push(format!(
+                        "track `{}` runs in another session: keep its sectionIds as they are and change only this session's track `{}`",
+                        t.id, branch.track
+                    ));
+                }
+            }
+        }
+    } else if !plan.tracks.is_empty()
+        && state.approved_version.is_some()
+        && previous.is_some_and(|p| p.tracks.is_empty())
+    {
+        problems.push(
+            "a plan can only split into tracks before it is first approved; leave `tracks` out"
+                .to_owned(),
+        );
+    }
+    if plan.tracks.is_empty() {
+        return problems;
+    }
+    // A merge input may have handed all its sections on to the merge.
+    let forked = state.branch.is_some();
+    if plan.tracks.len() < 2 {
+        problems.push(
+            "`tracks` needs at least two tracks; leave it out for a plan that doesn't split"
+                .to_owned(),
+        );
+    }
+    let mut ids: HashSet<&str> = HashSet::new();
+    for t in &plan.tracks {
+        if !is_slug(&t.id) {
+            problems.push(format!("track id `{}` is not a lowercase slug", t.id));
+        }
+        if !ids.insert(t.id.as_str()) {
+            problems.push(format!("duplicate track id `{}`", t.id));
+        }
+        if t.title.trim().is_empty() {
+            problems.push(format!("track `{}` has no title", t.id));
+        }
+        if t.section_ids.is_empty() && !forked {
+            problems.push(format!("track `{}` has no sections", t.id));
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        for a in &t.after {
+            if !seen.insert(a.as_str()) {
+                problems.push(format!("track `{}` lists `{a}` twice in `after`", t.id));
+            } else if a == &t.id {
+                problems.push(format!("track `{}` lists itself in `after`", t.id));
+            } else if plan.track(a).is_none() {
+                problems.push(format!("track `{}` is after unknown track `{a}`", t.id));
+            }
+        }
+        if let [only] = t.after.as_slice() {
+            problems.push(format!(
+                "track `{}` comes after `{only}` alone: that is a continuation, so append its sections to `{only}` instead (a merge track joins two or more tracks)",
+                t.id
+            ));
+        }
+    }
+    if plan.root_tracks().len() < 2 {
+        problems.push(
+            "a plan with tracks needs at least two root tracks (no `after`) that run in parallel"
+                .to_owned(),
+        );
+    }
+    let finals: Vec<&str> = plan
+        .tracks
+        .iter()
+        .filter(|t| !plan.tracks.iter().any(|o| o.after.contains(&t.id)))
+        .map(|t| t.id.as_str())
+        .collect();
+    if finals.len() != 1 {
+        problems.push(format!(
+            "exactly one track must be final (in no other track's `after`) so the branches merge back into one; now: {}",
+            if finals.is_empty() {
+                "none".to_owned()
+            } else {
+                finals.join(", ")
+            }
+        ));
+    }
+    for t in &plan.tracks {
+        let feeds = plan
+            .tracks
+            .iter()
+            .filter(|o| o.after.contains(&t.id))
+            .count();
+        if feeds > 1 {
+            problems.push(format!(
+                "track `{}` feeds {feeds} merges; each track feeds at most one",
+                t.id
+            ));
+        }
+    }
+    let cyclic: Vec<&str> = plan
+        .tracks
+        .iter()
+        .filter(|t| track_reaches(plan, &t.id, &t.id))
+        .map(|t| t.id.as_str())
+        .collect();
+    if !cyclic.is_empty() {
+        problems.push(format!(
+            "`after` has a cycle through: {}",
+            cyclic.join(", ")
+        ));
+    }
+    let mut holder: HashMap<&str, usize> = HashMap::new();
+    for t in &plan.tracks {
+        for s in &t.section_ids {
+            if !plan.sections.iter().any(|x| &x.id == s) {
+                problems.push(format!("track `{}` lists unknown section `{s}`", t.id));
+            }
+            *holder.entry(s.as_str()).or_insert(0) += 1;
+        }
+    }
+    for s in &plan.sections {
+        match holder.get(s.id.as_str()) {
+            None => problems.push(format!("section `{}` is in no track", s.id)),
+            Some(n) if *n > 1 => problems.push(format!(
+                "section `{}` is in {n} tracks (must be exactly one)",
+                s.id
+            )),
+            Some(_) => {}
+        }
+    }
+    // A node may build on its own track and on the tracks that merge into
+    // it, never on a strand running in parallel.
+    if cyclic.is_empty() {
+        let home = |node: &str| {
+            plan.sections
+                .iter()
+                .find(|s| !s.revision && s.node_ids.iter().any(|n| n == node))
+                .and_then(|s| plan.track_of(&s.id))
+        };
+        for n in &plan.nodes {
+            let Some(t) = home(&n.id) else { continue };
+            let upstream = plan.upstream(&t.id);
+            for r in &n.requires {
+                let Some(u) = home(r) else { continue };
+                if !upstream.contains(&u.id) {
+                    problems.push(format!(
+                        "node `{}` (track `{}`) requires `{r}` on track `{}`, which doesn't merge into `{}`: move one of them, or make `{}` come after `{}`",
+                        n.id, t.id, u.id, t.id, t.id, u.id
+                    ));
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// Whether `target` is reachable from `from` along `after` edges (one step
+/// or more).
+fn track_reaches(plan: &Plan, from: &str, target: &str) -> bool {
+    let mut stack: Vec<&str> = plan
+        .track(from)
+        .map(|t| t.after.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    let mut seen: HashSet<&str> = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if id == target {
+            return true;
+        }
+        if seen.insert(id) {
+            if let Some(t) = plan.track(id) {
+                stack.extend(t.after.iter().map(String::as_str));
+            }
+        }
+    }
+    false
 }
 
 /// The goal's `purpose` as `goal_set` recorded it (§5), or `""` before the
@@ -1492,5 +1799,31 @@ mod tests {
             q.input_schema["properties"]["role"]["enum"],
             json!(["probe"])
         );
+    }
+
+    #[test]
+    fn graph_reads_reach_the_measuring_and_teaching_tutor_and_the_planner_but_never_graph_submit() {
+        let names =
+            |tools: Vec<ToolSpec>| -> Vec<String> { tools.into_iter().map(|t| t.name).collect() };
+        for phase in [
+            Phase::Measure,
+            Phase::Plan,
+            Phase::AwaitApproval,
+            Phase::Teach,
+            Phase::Close,
+        ] {
+            let tutor = names(tutor_tools(phase, true));
+            let reads = matches!(phase, Phase::Measure | Phase::Teach);
+            for t in ["graph_search", "graph_read"] {
+                assert_eq!(tutor.iter().any(|n| n == t), reads, "{t} in {phase:?}");
+            }
+            assert!(!tutor.iter().any(|n| n == "graph_submit"), "{phase:?}");
+        }
+        let planner = names(planner_tools());
+        assert!(planner.iter().any(|n| n == "graph_search"));
+        assert!(planner.iter().any(|n| n == "graph_read"));
+        assert!(!planner.iter().any(|n| n == "graph_submit"));
+        // The builder keeps the only write.
+        assert!(names(graph_tools()).iter().any(|n| n == "graph_submit"));
     }
 }

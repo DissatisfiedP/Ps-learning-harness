@@ -30,6 +30,7 @@ use crate::knowledge::{
 use crate::state::Kind;
 use crate::Error;
 
+pub mod read;
 pub mod validate;
 
 pub use validate::{check, Batch, Submit};
@@ -1291,6 +1292,16 @@ pub fn summary(map: &KnowledgeMap) -> String {
 /// `graph_search`: up to [`MAX_SEARCH_HITS`] nodes and topics whose id, title
 /// or statement contains `query`, best match first.
 pub fn search(map: &KnowledgeMap, query: &str) -> String {
+    search_with(map, query, |_| String::new())
+}
+
+/// As [`search`], with `annotate(node)` appended to each node's line (the
+/// tutor's and planner's search adds the learner's evidence, [`read`]).
+pub fn search_with(
+    map: &KnowledgeMap,
+    query: &str,
+    annotate: impl Fn(&KnowledgeNode) -> String,
+) -> String {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return "graph_search needs a non-empty `query`.".to_owned();
@@ -1336,8 +1347,12 @@ pub fn search(map: &KnowledgeMap, query: &str) -> String {
             score,
             format!("node {}", node.id),
             format!(
-                "{} [{}] {} — {}",
-                node.id, node.home, node.title, node.statement
+                "{} [{}] {} — {}{}",
+                node.id,
+                node.home,
+                node.title,
+                node.statement,
+                annotate(node)
             ),
         ));
     }

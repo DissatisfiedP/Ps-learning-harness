@@ -318,11 +318,9 @@ impl Decoder {
 mod ser {
     use serde_json::Value;
 
-    /// Parse streamed arguments; malformed JSON is kept as a string.
+    /// Parse streamed arguments (leniently, `crate::args`); malformed JSON
+    /// is kept as a string.
     pub fn parse_args(raw: &str) -> Value {
-        if raw.is_empty() {
-            return Value::Object(Default::default());
-        }
-        serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+        crate::args::parse_tool_args(raw)
     }
 }

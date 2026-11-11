@@ -175,9 +175,14 @@ impl Harness {
         Ok(parsed.ops)
     }
 
-    /// Derived state of a session (never stored).
+    /// Derived state of a session (never stored). The origin of a branching
+    /// plan is named by its own id (replay can't know it).
     pub fn session_state(&self, session_id: &str) -> Result<SessionState, Error> {
-        Ok(replay_state(&self.store.ops(session_id)?))
+        let mut state = replay_state(&self.store.ops(session_id)?);
+        if let Some(b) = state.branch.as_mut().filter(|b| b.origin.is_empty()) {
+            b.origin = session_id.to_owned();
+        }
+        Ok(state)
     }
 
     /// Register a native in-tree plugin (the trait stays for system-level
@@ -381,6 +386,10 @@ impl Harness {
         if state.calibration.is_some() {
             flags.insert("calibration".to_owned());
         }
+        // A branched session teaches one track of a split plan (§4.26).
+        if state.branch.is_some() {
+            flags.insert("branch".to_owned());
+        }
         let workspace = lock(&self.workspaces).get(session_id).is_some();
         if workspace {
             flags.insert("workspace".to_owned());
@@ -497,12 +506,27 @@ impl Harness {
                 ))
             }
         };
-        let system = composer.compose_tutor(file, label, &base, &values, &flags)?;
+        let mut system = composer.compose_tutor(file, label, &base, &values, &flags)?;
+        system.push_str(&self.library_prompt(ops, "tutor")?);
         let mut tools = tools::tutor_tools(phase, workspace);
         if phase == Phase::Teach {
             tools.extend(plugin_tools);
         }
         Ok((system, tools))
+    }
+
+    /// The `## Learner state` block for the tutor and planner: the graph's
+    /// topic tree and the nodes matching the goal (`graph::read`). Empty
+    /// (rendered "no graph yet") when the graph is empty; an unreadable graph
+    /// is logged and read as empty, never a failed turn.
+    pub(crate) fn learner_state(&self, state: &SessionState) -> String {
+        match crate::knowledge::load(&self.repo) {
+            Ok(map) => crate::graph::read::learner_state(&map, state.goal.as_ref()),
+            Err(e) => {
+                tracing::warn!("learner state: the graph couldn't be read: {e}");
+                String::new()
+            }
+        }
     }
 
     pub(crate) fn compose_planner(&self, state: &SessionState) -> Result<String, Error> {
@@ -523,6 +547,11 @@ impl Harness {
         }
         if state.calibration.is_some() {
             flags.insert("calibration".to_owned());
+        }
+        // In a session of a split plan the planner changes only its track
+        // (architecture §4.26).
+        if state.branch.is_some() {
+            flags.insert("branch".to_owned());
         }
         let mut values = TemplateValues::new();
         values.set(
@@ -620,7 +649,7 @@ impl Harness {
         let mut compacted = false;
         for _ in 0..MAX_LOOP {
             let ops = self.store.ops(session_id)?;
-            let state = replay_state(&ops);
+            let mut state = replay_state(&ops);
             if state.pending_call.is_some() || state.ended {
                 break;
             }
@@ -631,6 +660,7 @@ impl Harness {
                 break;
             }
             let prompt_phase = if handoff { start_phase } else { state.phase };
+            state.learner_state = self.learner_state(&state);
             let (system, tools) = self.compose_tutor(session_id, &ops, &state, prompt_phase)?;
             let mut messages = replay::conversation_with(
                 &ops,
@@ -847,7 +877,7 @@ impl Harness {
             return Ok(refuse(
                 name,
                 format!(
-                    "the arguments were not valid JSON ({}); send one JSON object",
+                    "the arguments were not valid JSON ({}); send one JSON object, with backslashes in paths doubled (`C:\\\\Users\\\\…`) or written as forward slashes",
                     clip(raw, 200)
                 ),
             ));
@@ -873,6 +903,7 @@ impl Harness {
             "hunt_send" => self.hunt_send(session_id, &state, call, args),
             "debrief_record" => self.debrief_record(session_id, &ops, args),
             "frontier_park" => self.frontier_park(session_id, &state, args),
+            "preference_add" => self.preference_add(session_id, &state, args),
             "session_end" => {
                 if state.phase != Phase::Close {
                     self.append(session_id, phase_op(Phase::Close, None))?;
@@ -881,15 +912,81 @@ impl Harness {
                 // delivers anything into the conversation and never wakes
                 // the tutor.
                 self.spawn_graph_after(session_id, Trigger::Close);
+                // A branch hands off: the merge it feeds is created once its
+                // last input ends (architecture §4.26).
+                let handoff = self.end_branch(session_id, &state);
                 // The transcript is complete: push it in the background (the
                 // graph job's own ops go out with the next trigger).
                 self.sync_in_background();
-                Ok(done("Session ended."))
+                Ok(done(format!("Session ended.{handoff}")))
             }
             "file_find" | "file_read" => Ok(self.file_tool(session_id, &state, name, args).await),
+            "library_list" | "library_search" | "library_read" => {
+                Ok(self.library_tool(name, args).await)
+            }
+            "graph_search" | "graph_read" => {
+                Ok(match crate::graph::read::run(&self.repo, name, args) {
+                    Ok(text) => done(text),
+                    Err(why) => refuse(name, why),
+                })
+            }
             "workspace_write" => self.workspace_write(session_id, &state, args),
             _ => Ok(self.plugin_call(session_id, &state, name, args).await),
         }
+    }
+
+    /// A standing instruction from the learner: appended to the goal's
+    /// `preferences` as a new goal record (replay keeps the latest), so the
+    /// pinned session state carries it into every later turn and plan.
+    fn preference_add(
+        &self,
+        session_id: &str,
+        state: &SessionState,
+        args: &Value,
+    ) -> Result<Exec, Error> {
+        let name = "preference_add";
+        let instruction = match req_str(args, "instruction") {
+            Ok(i) if !i.trim().is_empty() => i.trim().to_owned(),
+            _ => return Ok(refuse(name, "`instruction` is required")),
+        };
+        let Some(mut goal) = state.goal.clone() else {
+            return Ok(refuse(
+                name,
+                "there is no goal yet: put it in goal_set's `preferences`",
+            ));
+        };
+        let Some(obj) = goal.as_object_mut() else {
+            return Ok(refuse(name, "the goal record is not an object"));
+        };
+        let mut list: Vec<String> = obj
+            .get("preferences")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let replaced = opt_str(args, "replaces")
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .is_some_and(|r| {
+                let before = list.len();
+                list.retain(|p| p != r);
+                list.len() != before
+            });
+        if list.iter().any(|p| p == &instruction) {
+            return Ok(done("Already recorded."));
+        }
+        list.push(instruction);
+        obj.insert("preferences".into(), json!(list));
+        self.append(session_id, Op::Goal(sessions::record(goal)))?;
+        Ok(done(if replaced {
+            "Recorded; the old preference was replaced. Follow it from now on."
+        } else {
+            "Recorded. Follow it from now on."
+        }))
     }
 
     fn goal_set(
@@ -1289,11 +1386,11 @@ impl Harness {
         if let Err(why) = close_problems(state, &section) {
             return Ok(refuse(name, why));
         }
-        let next = state.plan.as_ref().and_then(|p| {
-            p.sections
-                .iter()
-                .find(|s| s.id != section.id && !state.completed_sections.contains(&s.id))
-        });
+        // In a branched session only its own track is taught here (§4.26).
+        let next = state
+            .own_sections()
+            .into_iter()
+            .find(|s| s.id != section.id && !state.completed_sections.contains(&s.id));
         match next {
             Some(n) => {
                 self.append(session_id, phase_op(Phase::Teach, Some(n.id.clone())))?;
@@ -1304,9 +1401,15 @@ impl Harness {
             }
             None => {
                 self.append(session_id, phase_op(Phase::Close, None))?;
-                Ok(done(
-                    "That was the last section. Write the close, then call session_end.",
-                ))
+                match state.feeds() {
+                    Some(merge) => Ok(done(format!(
+                        "That was the last section of this branch's track. Write the hand-off close (what this branch established, what the merge will re-check), then call session_end; \"{}\" continues in its own session once every branch feeding it has ended.",
+                        merge.title
+                    ))),
+                    None => Ok(done(
+                        "That was the last section. Write the close, then call session_end.",
+                    )),
+                }
             }
         }
     }
@@ -1887,7 +1990,7 @@ impl Harness {
         self.emit(
             &summary.id,
             AgentEvent::Session {
-                session: summary.clone(),
+                session: Box::new(summary.clone()),
             },
         );
         self.send_learner_message_with(&summary.id, text, attachments)
@@ -1917,6 +2020,68 @@ impl Harness {
         self.check_vision(attachments)?;
         let guard = self.turn_lock(session_id);
         let _turn = guard.lock().await;
+        self.deliver_learner_message(session_id, text, attachments)
+            .await
+    }
+
+    /// The learner's comment, sent from the desk at any moment: it overrides
+    /// what the tutor was doing. A reply in flight is stopped (its partial
+    /// text is kept as interrupted), an open question or choice is set aside
+    /// (closed with a `setAside` result the tutor reads), and the comment
+    /// goes in as an ordinary learner message that the tutor answers now.
+    /// While a plan waits for approval it goes to the planner as a change
+    /// request instead; while the planner drafts, it is refused.
+    pub async fn comment(self: &Arc<Self>, session_id: &str, text: &str) -> Result<(), Error> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(Error::Invalid("the comment is empty".into()));
+        }
+        self.cancel(session_id);
+        let guard = self.turn_lock(session_id);
+        let _turn = guard.lock().await;
+        let state = replay_state(&self.learn_ops(session_id)?);
+        if state.ended {
+            return Err(Error::Invalid("this session has ended".into()));
+        }
+        match state.phase {
+            Phase::AwaitApproval => return self.request_plan_change(session_id, text).await,
+            Phase::Plan => {
+                return Err(Error::Invalid(
+                    "the planner is drafting the plan; comment on the plan card when it arrives"
+                        .into(),
+                ))
+            }
+            _ => {}
+        }
+        if let Some(pending) = &state.pending_call {
+            let mut result = json!({
+                "setAside": true,
+                "note": "The learner set this aside to comment; their comment is the next message. Answer the comment first and do what it asks. Ask this again later only if it still matters.",
+            });
+            if pending.name == "question_ask" {
+                result["questionId"] = json!(pending.call_id);
+            }
+            let call = ToolCall {
+                id: pending.call_id.clone(),
+                name: pending.name.clone(),
+                arguments: Value::Null,
+            };
+            self.append(
+                session_id,
+                result_op(&call, &result.to_string(), false, None),
+            )?;
+        }
+        self.deliver_learner_message(session_id, text, &[]).await
+    }
+
+    /// Under the session's turn lock: persist the learner's message and run
+    /// the tutor on it.
+    async fn deliver_learner_message(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        attachments: &[crate::sessions::Attachment],
+    ) -> Result<(), Error> {
         let ops = self.learn_ops(session_id)?;
         let state = replay_state(&ops);
         if state.pending_call.is_some() {
@@ -1959,8 +2124,11 @@ impl Harness {
     }
 
     /// Image attachments are refused up front when the Tutor model is known
-    /// to lack vision; the composer asks first (W2/W3).
+    /// to lack vision; the composer asks first (W2/W3). A linked library
+    /// that no longer exists is refused the same way, before anything is
+    /// written.
     fn check_vision(&self, attachments: &[crate::sessions::Attachment]) -> Result<(), Error> {
+        crate::library::check_attachments(&self.repo, attachments)?;
         if attachments.iter().any(|a| a.kind == "image")
             && self.role_vision(ModelRole::Tutor) == Some(false)
         {
@@ -2006,7 +2174,9 @@ impl Harness {
     }
 
     /// Approve the plan (minus the plugins the learner removed), move to
-    /// Teach at the first open section and start the tutor.
+    /// Teach at the first open section and start the tutor. A plan that
+    /// splits into tracks first forks its other root tracks into new sessions
+    /// (architecture §4.26); this session keeps the first one.
     pub async fn approve(
         self: &Arc<Self>,
         session_id: &str,
@@ -2014,7 +2184,8 @@ impl Harness {
     ) -> Result<(), Error> {
         let guard = self.turn_lock(session_id);
         let _turn = guard.lock().await;
-        let state = replay_state(&self.learn_ops(session_id)?);
+        let ops = self.learn_ops(session_id)?;
+        let state = replay_state(&ops);
         if state.phase != Phase::AwaitApproval {
             return Err(Error::Invalid(
                 "there is no plan waiting for approval".into(),
@@ -2038,6 +2209,12 @@ impl Harness {
             }
         }
         let first_approval = state.approved_version.is_none();
+        // The forks copy this session as it stands, before its approval.
+        let branched = if state.branch.is_none() && !plan.tracks.is_empty() {
+            Some(self.fork_tracks(session_id, &ops, &state, &removed)?)
+        } else {
+            None
+        };
         self.append(
             session_id,
             Op::Approve(ApproveOp {
@@ -2047,6 +2224,17 @@ impl Harness {
                 removed_plugins: removed.clone(),
             }),
         )?;
+        let state = match branched {
+            Some((branch, notice)) => {
+                self.append(session_id, Op::Branch(branch))?;
+                let mut m = sessions::new_message(Role::User, notice);
+                m.tag = Some(crate::branches::NOTICE_TAG.into());
+                self.append(session_id, Op::Message(m))?;
+                self.announce(session_id);
+                replay_state(&self.store.ops(session_id)?)
+            }
+            None => state,
+        };
         self.grant_plan_plugins(session_id, &state, &plan, &removed)?;
         let next = state.next_open_section();
         let title = next
@@ -2084,8 +2272,16 @@ impl Harness {
         removed: &[RemovedPlugin],
     ) -> Result<(), Error> {
         let mut dropped: Vec<String> = Vec::new();
+        // In a branched session only its own track's sections are taught here.
+        let own: Vec<&str> = state
+            .own_sections()
+            .into_iter()
+            .map(|s| s.id.as_str())
+            .collect();
         for s in &plan.sections {
-            if state.completed_sections.contains(&s.id) {
+            if state.completed_sections.contains(&s.id)
+                || (state.branch.is_some() && !own.contains(&s.id.as_str()))
+            {
                 continue;
             }
             for p in &s.plugins {
@@ -3099,6 +3295,7 @@ mod tests {
             known_note: String::new(),
             learner_note: String::new(),
             hunt: None,
+            revision: false,
         }
     }
 
@@ -3117,6 +3314,7 @@ mod tests {
                 style: String::new(),
                 nodes: vec![],
                 sections: vec![section],
+                tracks: vec![],
             }),
             current_section: Some("s1".into()),
             ..Default::default()

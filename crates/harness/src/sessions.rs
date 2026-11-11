@@ -56,11 +56,12 @@ pub enum Ending {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
-    /// image | file | folder
+    /// image | file | folder | library
     pub kind: String,
     /// Image: repo-relative path under `attachments/`. File/folder: the
     /// absolute path the learner chose (device-specific), or a path relative
-    /// to the session workspace for files inside it.
+    /// to the session workspace for files inside it. Library: the library id
+    /// under `<repo>/library/` (a session link, not a copy).
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
@@ -109,6 +110,41 @@ pub struct Header {
     pub id: String,
     pub mode: Mode,
     pub title: String,
+    /// Set on a session forked for another root track of a branching plan
+    /// (architecture §4.26).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkLink>,
+    /// Set on the session created when every input of a merge track ended
+    /// (architecture §4.26).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<MergeLink>,
+}
+
+/// Where a forked session came from: its ops through `upTo` are a copy of
+/// the parent's (the pre-plan transcript, goal, probe and plan), and it
+/// teaches `trackId`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkLink {
+    pub parent: String,
+    pub up_to_at: String,
+    pub up_to_op_id: String,
+    pub track_id: String,
+}
+
+/// What a merge session merges: the sessions of the merge track's inputs
+/// (in the track's `after` order), the copied pre-plan cut of the origin, the
+/// track it teaches, and the sections its inputs completed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeLink {
+    pub origin: String,
+    pub parents: Vec<String>,
+    pub up_to_at: String,
+    pub up_to_op_id: String,
+    pub track_id: String,
+    #[serde(default)]
+    pub completed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +315,29 @@ pub struct ApproveOp {
     pub at: String,
     pub plan_version: u32,
     pub removed_plugins: Vec<RemovedPlugin>,
+}
+
+/// The origin of a branching plan forked its other root tracks at approval
+/// (architecture §4.26): `track` is the one it keeps, `children` the new
+/// sessions, and `upTo` the last op they copied (the same cut a merge copies
+/// later). Written once, right after the `approve` op.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchOp {
+    pub op_id: String,
+    pub at: String,
+    pub track: String,
+    pub plan_version: u32,
+    pub up_to_at: String,
+    pub up_to_op_id: String,
+    pub children: Vec<BranchChild>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchChild {
+    pub session_id: String,
+    pub track: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,6 +563,7 @@ pub enum Op {
     FileGrant(FileGrantOp),
     ViewState(ViewStateOp),
     MobileUnlock(MobileUnlockOp),
+    Branch(BranchOp),
 }
 
 impl Op {
@@ -536,6 +596,7 @@ impl Op {
             Op::FileGrant(o) => &o.at,
             Op::ViewState(o) => &o.at,
             Op::MobileUnlock(o) => &o.at,
+            Op::Branch(o) => &o.at,
         }
     }
 
@@ -568,6 +629,7 @@ impl Op {
             Op::FileGrant(o) => &o.op_id,
             Op::ViewState(o) => &o.op_id,
             Op::MobileUnlock(o) => &o.op_id,
+            Op::Branch(o) => &o.op_id,
         }
     }
 
@@ -594,6 +656,10 @@ pub struct SessionSummary {
     /// For `"desktop-plugin"`: the display names of the plugins that caused
     /// the lock (title if known, else id). Empty otherwise.
     pub desktop_only_plugins: Vec<String>,
+    /// Where this session sits in a branching plan (architecture §4.26):
+    /// `None` for every session of a plan without tracks. The store fills
+    /// what the header says; `Harness::list_sessions` completes it.
+    pub lineage: Option<crate::branches::Lineage>,
 }
 
 /// [`SessionSummary::read_only_reason`] of a session from before the agent
@@ -626,8 +692,9 @@ pub struct Store {
     index_path: PathBuf,
     index: Mutex<Option<HashMap<String, String>>>,
     /// Parsed ops (plus what the parse had to skip) of recently used
-    /// sessions, most recent last.
-    cache: Mutex<VecDeque<(String, ParsedOps)>>,
+    /// sessions, most recent last, each with the file's length and mtime
+    /// when it was read: a file that sync rewrote is read again.
+    cache: Mutex<VecDeque<(String, FileStamp, ParsedOps)>>,
 }
 
 /// What one read of a session file produced.
@@ -662,6 +729,8 @@ impl Store {
             id: id.to_string(),
             mode,
             title: title_from(first_message),
+            fork: None,
+            merge: None,
         };
         let path = self.path(&id);
         if let Some(dir) = path.parent() {
@@ -690,7 +759,58 @@ impl Store {
             read_only: false,
             read_only_reason: None,
             desktop_only_plugins: Vec::new(),
+            lineage: None,
         })
+    }
+
+    /// Writes a whole new session file at once (a forked or merge session,
+    /// architecture §4.26). `ops[0]` must be its header. The file appears
+    /// complete or not at all (written aside, then renamed in), so a crash
+    /// can't leave a half-copied session that blocks the real one. `Ok(None)`
+    /// when a file with this id already exists: created earlier here, or by
+    /// another device and synced.
+    pub(crate) fn create_from(&self, ops: &[Op]) -> Result<Option<SessionSummary>, Error> {
+        static CREATE: Mutex<()> = Mutex::new(());
+        let Some(Op::Session(header)) = ops.first() else {
+            return Err(Error::Invalid(
+                "a new session starts with its header".into(),
+            ));
+        };
+        let ulid = Ulid::from_string(&header.id)
+            .map_err(|_| Error::Invalid(format!("`{}` is not a session id", header.id)))?;
+        let path = self.path(&ulid);
+        let Some(dir) = path.parent() else {
+            return Err(Error::Invalid("no sessions folder".into()));
+        };
+        fs::create_dir_all(dir)?;
+        let mut bytes = Vec::new();
+        for op in ops {
+            bytes.extend(serde_json::to_vec(op)?);
+            bytes.push(b'\n');
+        }
+        let _one = lock(&CREATE);
+        if path.exists() {
+            return Ok(None);
+        }
+        let part = dir.join(format!(".{}.jsonl.part", header.id));
+        {
+            let mut file = fs::File::create(&part)?;
+            file.write_all(&bytes)?;
+            file.sync_data()?;
+        }
+        fs::rename(&part, &path)?;
+        if let Some(title) = ops.iter().rev().find_map(|o| match o {
+            Op::Title(t) => Some(t.title.as_str()),
+            _ => None,
+        }) {
+            self.set_indexed_title(&header.id, title);
+        }
+        self.summary(&header.id).map(Some)
+    }
+
+    /// Whether a session file with this id exists on this device.
+    pub(crate) fn exists(&self, id: &str) -> bool {
+        self.existing_path(id).is_ok()
     }
 
     pub fn append(&self, id: &str, message: &StoredMessage) -> Result<(), Error> {
@@ -701,11 +821,24 @@ impl Store {
     /// keep the cached op list in step.
     pub fn append_op(&self, id: &str, op: &Op) -> Result<(), Error> {
         let path = self.existing_path(id)?;
+        let before = stamp(&path);
         append(&path, op)?;
+        let after = stamp(&path);
         let mut cache = lock(&self.cache);
-        if let Some((_, parsed)) = cache.iter_mut().find(|(k, _)| k == id) {
-            let pos = parsed.ops.partition_point(|o| o.key() <= op.key());
-            parsed.ops.insert(pos, op.clone());
+        if let Some(pos) = cache.iter().position(|(k, _, _)| k == id) {
+            // Only an entry that matched the file before this write can take
+            // the op incrementally; anything else (sync wrote the file) is
+            // dropped and read again on next use.
+            match (&mut cache[pos], before, after) {
+                ((_, cached, parsed), Some(before), Some(after)) if *cached == before => {
+                    let at = parsed.ops.partition_point(|o| o.key() <= op.key());
+                    parsed.ops.insert(at, op.clone());
+                    *cached = after;
+                }
+                _ => {
+                    cache.remove(pos);
+                }
+            }
         }
         drop(cache);
         if let Op::Title(t) = op {
@@ -732,20 +865,27 @@ impl Store {
     /// As [`Store::ops`], with the parse report (skipped lines and the
     /// read-only rule). Cached together with the ops.
     pub(crate) fn parsed_ops(&self, id: &str) -> Result<ParsedOps, Error> {
+        let path = self.existing_path(id)?;
+        let current = stamp(&path);
         {
             let mut cache = lock(&self.cache);
-            if let Some(pos) = cache.iter().position(|(k, _)| k == id) {
+            if let Some(pos) = cache.iter().position(|(k, _, _)| k == id) {
                 if let Some(entry) = cache.remove(pos) {
-                    let parsed = entry.1.clone();
-                    cache.push_back(entry);
-                    return Ok(parsed);
+                    if current.is_some_and(|now| now == entry.1) {
+                        let parsed = entry.2.clone();
+                        cache.push_back(entry);
+                        return Ok(parsed);
+                    }
                 }
             }
         }
-        let parsed = read_file(&self.existing_path(id)?)?;
+        let parsed = read_file(&path)?;
+        let Some(read_at) = current else {
+            return Ok(parsed);
+        };
         let mut cache = lock(&self.cache);
-        if !cache.iter().any(|(k, _)| k == id) {
-            cache.push_back((id.to_owned(), parsed.clone()));
+        if !cache.iter().any(|(k, _, _)| k == id) {
+            cache.push_back((id.to_owned(), read_at, parsed.clone()));
             while cache.len() > LRU_SESSIONS {
                 cache.pop_front();
             }
@@ -765,22 +905,32 @@ impl Store {
 
     pub fn delete(&self, id: &str) -> Result<(), Error> {
         fs::remove_file(self.existing_path(id)?)?;
-        lock(&self.cache).retain(|(k, _)| k != id);
+        lock(&self.cache).retain(|(k, _, _)| k != id);
         Ok(())
     }
 
     /// Length and mtime (ns since the epoch) of a session file: the key of a
     /// device-local cache derived from it (`mobile.rs`).
     pub(crate) fn file_stamp(&self, id: &str) -> Result<(u64, u64), Error> {
-        let meta = fs::metadata(self.existing_path(id)?)?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
-        Ok((meta.len(), mtime))
+        let path = self.existing_path(id)?;
+        stamp(&path).ok_or_else(|| Error::Corrupt(format!("{} can't be read", path.display())))
     }
+}
 
+/// A session file's length and mtime (ns since the epoch).
+type FileStamp = (u64, u64);
+
+fn stamp(path: &Path) -> Option<FileStamp> {
+    let meta = fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    Some((meta.len(), mtime))
+}
+
+impl Store {
     /// A session's ops read from its file, leaving the LRU alone: a scan
     /// over every session must not evict the ones in use.
     pub(crate) fn read_uncached(&self, id: &str) -> Result<Vec<Op>, Error> {
@@ -1176,8 +1326,9 @@ fn session_from_ops(path: &Path, parsed: ParsedOps) -> Result<Session, Error> {
             Op::Title(t) => Some(t.title.clone()),
             _ => None,
         })
-        .unwrap_or(header.title);
+        .unwrap_or_else(|| header.title.clone());
     let read_only = header.mode == Mode::Learn && !runtime;
+    let lineage = crate::branches::Lineage::from_header(&header);
     Ok(Session {
         summary: SessionSummary {
             id: header.id,
@@ -1188,6 +1339,7 @@ fn session_from_ops(path: &Path, parsed: ParsedOps) -> Result<Session, Error> {
             read_only,
             read_only_reason: legacy_reason(read_only),
             desktop_only_plugins: Vec::new(),
+            lineage,
         },
         messages,
         ops,
@@ -1210,6 +1362,7 @@ fn read_header(path: &Path) -> Result<Option<SessionSummary>, Error> {
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_else(|| h.at.clone());
     let read_only = h.mode == Mode::Learn && !runtime;
+    let lineage = crate::branches::Lineage::from_header(&h);
     Ok(Some(SessionSummary {
         id: h.id,
         mode: h.mode,
@@ -1219,6 +1372,7 @@ fn read_header(path: &Path) -> Result<Option<SessionSummary>, Error> {
         read_only,
         read_only_reason: legacy_reason(read_only),
         desktop_only_plugins: Vec::new(),
+        lineage,
     }))
 }
 
@@ -1292,6 +1446,43 @@ mod tests {
         assert_eq!(ids.len(), 2);
         store.delete(&older.id).unwrap();
         assert!(matches!(store.load(&older.id), Err(Error::NotFound(_))));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn a_file_rewritten_behind_the_cache_is_read_again() {
+        let repo = temp_repo("stale");
+        let store = store(&repo);
+        let s = store.create(Mode::Learn, "first").unwrap();
+        store
+            .append(&s.id, &new_message(Role::User, "mine".into()))
+            .unwrap();
+        assert_eq!(store.load(&s.id).unwrap().messages.len(), 1, "now cached");
+
+        // Sync writes the file (another device's op), not through this store.
+        let sync = Store::new(&repo, &repo.join("other"));
+        sync.append(
+            &s.id,
+            &new_message(Role::Assistant, "from the phone".into()),
+        )
+        .unwrap();
+        let seen = |store: &Store| -> Vec<String> {
+            store
+                .load(&s.id)
+                .unwrap()
+                .messages
+                .into_iter()
+                .map(|m| m.content)
+                .collect()
+        };
+        assert_eq!(seen(&store), ["mine", "from the phone"]);
+
+        // A later local append keeps both, cached and on disk.
+        store
+            .append(&s.id, &new_message(Role::User, "again".into()))
+            .unwrap();
+        assert_eq!(seen(&store), ["mine", "from the phone", "again"]);
+        assert_eq!(seen(&Store::new(&repo, &repo.join("local"))), seen(&store));
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1398,6 +1589,8 @@ mod tests {
             id: id.into(),
             mode: Mode::Learn,
             title: "t".into(),
+            fork: None,
+            merge: None,
         });
         format!("{}\n", serde_json::to_string(&op).unwrap())
     }

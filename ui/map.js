@@ -39,6 +39,12 @@ const C = {
   idleFill: 'rgba(233, 229, 221, 0.06)',
   select: '#F6EBD6',
   focus: '#A6D4C1',
+  // A folded topic: a quiet mint disc, its count and name in the label ink.
+  topicFill: 'rgba(166, 212, 193, 0.10)',
+  topicRing: 'rgba(166, 212, 193, 0.55)',
+  // A link between folded topics carries several prerequisites: a touch brighter.
+  link: 'rgba(233, 229, 221, 0.26)',
+  linkHot: 'rgba(233, 229, 221, 0.5)',
 };
 
 // One ink per kind of proposition. Colour *and* ring weight (and, for the two
@@ -57,9 +63,23 @@ const kindName = (node) => (KIND[node.kind] ? node.kind : 'idea');
 
 const FONT_UI = 'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif';
 const FONT_READ = '"Iowan Old Style", Charter, "Noto Serif", Georgia, serif';
+/** Zoom floor for a small map; a big one may go further out (see limits()). */
 const K_MIN = 0.3;
+/** Never further out than this, whatever the map's size. */
+const K_FLOOR = 0.02;
 const K_MAX = 2.4;
 const HIDE_MS = 150;
+/**
+ * Semantic zoom (ui-design §7.6): a topic opens when its block is at least
+ * OPEN_PX across on screen and folds back into one disc under CLOSE_PX (the
+ * gap keeps a zoom resting on the threshold from flickering). At K_OPEN_ALL
+ * and closer — where idea labels start to show — every topic is open.
+ */
+const OPEN_PX = 220;
+const CLOSE_PX = 180;
+const K_OPEN_ALL = 0.5;
+/** Share of the remaining fade covered per frame: ~150 ms at 60 Hz. */
+const FADE = 0.22;
 
 let uid = 0;
 
@@ -199,7 +219,22 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   const proposalsDialog = h('dialog', 'proposals');
   proposalsDialog.setAttribute('aria-labelledby', 'proposals-heading');
   document.body.append(proposalsDialog);
-  root.replaceChildren(canvas, hud, proposalsButton, fitButton, a11y, card, flyout, status);
+  // Zoom by hand without a wheel or a pinch, and the way back to the newest
+  // session's ideas (shown only when some of them are on the map).
+  const zoomBox = h('div', 'map-zoom');
+  const currentButton = h('button', 'btn text map-current', 'Last session');
+  currentButton.type = 'button';
+  currentButton.setAttribute('aria-label', "Zoom to your newest session's ideas");
+  currentButton.hidden = true;
+  const zoomOutButton = h('button', 'btn text map-zoom-btn', '−');
+  zoomOutButton.type = 'button';
+  zoomOutButton.setAttribute('aria-label', 'Zoom out');
+  const zoomInButton = h('button', 'btn text map-zoom-btn', '+');
+  zoomInButton.type = 'button';
+  zoomInButton.setAttribute('aria-label', 'Zoom in');
+  zoomBox.append(currentButton, zoomOutButton, zoomInButton);
+  zoomBox.hidden = true;
+  root.replaceChildren(canvas, hud, proposalsButton, fitButton, zoomBox, a11y, card, flyout, status);
   const ctx = canvas.getContext('2d');
 
   const glow = { white: sprite('#F6EBD6') };
@@ -227,6 +262,14 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   let reduced = false;
   let forced = false;
   let counts = { ideas: 0, topics: 0, links: 0 };
+  /** Zoom floor for the current map and stage (limits()). */
+  let kMin = K_MIN;
+  /** True while a topic is folding or unfolding. */
+  let fading = false;
+  /** Folded topics drawn this frame, in stage px: `{ t, x, y, r, a }`. */
+  let bubbles = [];
+  /** The folded topic under the pointer. */
+  let hoverTopic = null;
   let statEls = {};
   let hat = 0; // hide timer
   let cardFor = null;
@@ -427,15 +470,16 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     return { x: (sx - W / 2) / cam.k + cam.x, y: (sy - H / 2) / cam.k + cam.y };
   }
 
-  /** Centres and scales a set of cluster boxes, titles included. */
+  /** Centres and scales a set of cluster or topic boxes, titles included. */
   function frameOf(boxes) {
     const x0 = Math.min(...boxes.map((c) => c.x0)) - 90; // titles can overhang
     const x1 = Math.max(...boxes.map((c) => c.x1)) + 90;
     const y0 = Math.min(...boxes.map((c) => c.y0)) - 120; // the cluster titles
     const y1 = Math.max(...boxes.map((c) => c.y1)) + 56;
     const top = 96; // the HUD
-    const k = clamp(Math.min((W - 48) / (x1 - x0), (H - top - 32) / (y1 - y0)), K_MIN, 1.15);
-    return { x: (x0 + x1) / 2, y: (y0 + y1) / 2 - top / (2 * k), k };
+    const bottom = 80; // a folded topic's name under its disc; the zoom buttons
+    const k = clamp(Math.min((W - 96) / (x1 - x0), (H - top - bottom) / (y1 - y0)), K_FLOOR, 1.15);
+    return { x: (x0 + x1) / 2, y: (y0 + y1) / 2 - (top - bottom) / (2 * k), k };
   }
 
   /**
@@ -444,9 +488,21 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
    * says which topic is where instead of cropping half the map away.
    */
   function fitTarget() {
-    const clusters = world?.clusters ?? [];
-    if (!clusters.length) return { x: 0, y: 0, k: 1 };
-    return frameOf(clusters);
+    const roots = world?.roots ?? [];
+    if (!roots.length) return { x: 0, y: 0, k: 1 };
+    return frameOf(roots);
+  }
+
+  /**
+   * The zoom floor: K_MIN for a map that fits at that zoom, else a little
+   * past the fit — and always far enough out that every root topic has
+   * folded into its disc, so zooming all the way out shows the subjects.
+   */
+  function limits() {
+    if (!world || !W) return;
+    const widest = Math.max(1, ...world.roots.map((r) => Math.max(r.w, r.h)));
+    kMin = Math.max(K_FLOOR, Math.min(K_MIN, fitTarget().k * 0.6, (CLOSE_PX * 0.9) / widest));
+    cam.k = clamp(cam.k, kMin, K_MAX);
   }
 
   function fit(instant) {
@@ -455,6 +511,113 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     if (instant || reduced) Object.assign(cam, target), (camTarget = null);
     else camTarget = target;
     request();
+  }
+
+  /** Zooms by `factor` about a stage point, which stays where it is. */
+  function zoomAt(factor, sx, sy) {
+    if (!world) return;
+    const before = toWorld(sx, sy);
+    cam.k = clamp(cam.k * factor, kMin, K_MAX);
+    const after = toWorld(sx, sy);
+    cam.x += before.x - after.x;
+    cam.y += before.y - after.y;
+    camTarget = null;
+    request();
+  }
+
+  /** The buttons and keys: a smooth step about the stage centre. */
+  function zoomStep(factor) {
+    if (!world) return;
+    const from = camTarget ?? cam;
+    const target = { x: from.x, y: from.y, k: clamp(from.k * factor, kMin, K_MAX) };
+    if (reduced) Object.assign(cam, target), (camTarget = null);
+    else camTarget = target;
+    request();
+  }
+
+  // ---------- semantic zoom ----------
+  // A topic is open (its ideas and sub-topics drawn) or folded (one disc with
+  // its count) by its block's size on screen, so a big topic stays open
+  // further out than a small one and the rule needs no depth. `fade` eases
+  // the switch; `shown` is how visible a topic's contents are (its own fade
+  // times its parent's), `bubble` how visible its folded disc is.
+
+  function opensAt(t, k) {
+    if (k >= K_OPEN_ALL) return true;
+    const px = Math.max(t.w, t.h) * k;
+    return t.open ? px >= CLOSE_PX : px >= OPEN_PX;
+  }
+
+  /** Folds and unfolds topics for the current zoom; `snap` skips the fade. */
+  function updateLod(snap = false) {
+    fading = false;
+    if (!world) return;
+    for (const t of world.topics) {
+      // Pre-order: a parent's `shown` is ready before its children read it.
+      t.open = opensAt(t, cam.k);
+      const goal = t.open ? 1 : 0;
+      t.fade = snap || reduced || t.fade === undefined ? goal : t.fade + (goal - t.fade) * FADE;
+      if (Math.abs(goal - t.fade) < 0.01) t.fade = goal;
+      else fading = true;
+      const outer = t.parent ? t.parent.shown : 1;
+      t.shown = outer * t.fade;
+      t.bubble = outer * (1 - t.fade);
+    }
+  }
+
+  /** How visible an idea is: its home topic's contents. */
+  const seen = (n) => n.cluster.topic.shown;
+  /** Only an idea that is really there takes the pointer. */
+  const live = (n) => seen(n) > 0.5;
+
+  /** What an idea is drawn as: itself, or the outermost folded topic around it. */
+  function repOf(n) {
+    for (const t of n.cluster.topic.chain) if (!t.open) return t;
+    return n;
+  }
+
+  /** Disc radius of a folded topic: grows with its ideas, never past its block. */
+  function bubbleR(t) {
+    const base = Math.min(54, 15 + 4.5 * Math.sqrt(t.nodes.length));
+    return Math.max(12, Math.min(base, 0.5 * Math.max(t.w, t.h) * cam.k));
+  }
+
+  /** Where the folded topics are this frame: the mean of their ideas. */
+  function placeBubbles() {
+    bubbles = [];
+    if (!world) return;
+    for (const t of world.topics) {
+      if (t.bubble <= 0.01 || !t.nodes.length) continue;
+      let x = 0;
+      let y = 0;
+      for (const n of t.nodes) {
+        x += n.x;
+        y += n.y;
+      }
+      const p = toScreen(x / t.nodes.length, y / t.nodes.length);
+      bubbles.push({ t, x: p.x, y: p.y, r: bubbleR(t), a: t.bubble });
+    }
+  }
+
+  /** The folded topic under a stage point (the innermost when two overlap). */
+  function bubbleAt(s) {
+    let best = null;
+    for (const b of bubbles) {
+      if (b.a < 0.5 || Math.hypot(b.x - s.x, b.y - s.y) > b.r + 4) continue;
+      if (!best || b.t.depth > best.t.depth) best = b;
+    }
+    return best;
+  }
+
+  /** The innermost topic block around a world point, or null. */
+  function topicAt(w) {
+    let best = null;
+    for (const t of world?.topics ?? []) {
+      if (t.shown < 0.5 && t.bubble < 0.5) continue;
+      if (w.x < t.x0 - 40 || w.x > t.x1 + 40 || w.y < t.y0 - 40 || w.y > t.y1 + 40) continue;
+      if (!best || t.depth > best.depth) best = t;
+    }
+    return best;
   }
 
   // ---------- drawing ----------
@@ -476,6 +639,7 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
         stars.push({ u: (s % 10007) / 10007, v: ((s >>> 7) % 9973) / 9973, r: 0.4 + ((s >>> 3) % 7) / 7, a: 0.14 + ((s >>> 11) % 9) * 0.02 });
       }
     }
+    limits();
     request();
   }
 
@@ -548,10 +712,16 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     learning.hidden = !learning.childElementCount;
   }
 
-  /** Centres a topic's cluster at a readable zoom; the map's own pan, nothing new. */
-  function jumpTo(cluster) {
-    if (!world || !cluster) return;
-    camTarget = frameOf([cluster]);
+  /**
+   * Frames a cluster, a topic block or several of them at a readable zoom;
+   * the map's own pan, nothing new. A folded topic opens on the way in.
+   */
+  function jumpTo(target) {
+    const boxes = (Array.isArray(target) ? target : [target]).filter(Boolean);
+    if (!world || !boxes.length) return;
+    const frame = frameOf(boxes);
+    if (reduced) Object.assign(cam, frame), (camTarget = null);
+    else camTarget = frame;
     request();
   }
 
@@ -601,42 +771,68 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
    * title shrinks to nothing at that zoom). A title reads as the heading of
    * the ideas under it, so it is only ever placed above its cluster, and
    * dropped rather than overprinted when that doesn't fit — zooming in
-   * separates the clusters and brings it back. `titleBox`
-   * is screen space: the click hit test compares pointer coordinates.
+   * separates the clusters and brings it back. Only open topics have titles
+   * here (a folded one is named under its disc, see drawBubbles); an open
+   * topic that holds only sub-topics gets a heading of its own above its
+   * block. `titleBox` / `headBox` are screen space: the click hit test
+   * compares pointer coordinates.
+   *
+   * @returns the screen boxes taken, for the labels drawn after
    */
   function drawClusterTitles() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const tfont = `600 16px ${FONT_READ}`;
     const sfont = `400 13px ${FONT_UI}`;
     const placed = [];
-    const nodePts = world.nodes.map((n) => toScreen(n.x, n.y));
-    const order = [...world.clusters].sort((a, b) => b.nodes.length - a.nodes.length);
-    for (const c of order) {
-      const sub = checksLine(c.checks);
+    const nodePts = world.nodes.filter(live).map((n) => toScreen(n.x, n.y));
+    const discs = bubbles.filter((b) => b.a > 0.5);
+    for (const c of world.clusters) c.titleBox = null;
+    for (const t of world.topics) t.headBox = null;
+    // Headings first (outermost first), then cluster titles (biggest first);
+    // the keyboard's cluster always wins.
+    const items = [
+      ...world.topics
+        .filter((t) => !t.cluster && t.children.length && t.shown > 0.01)
+        .map((t) => ({ obj: t, path: t.path, sub: '', cx: t.cx, y0: t.y0, alpha: t.shown, rank: t.depth })),
+      ...world.clusters
+        .filter((c) => c.topic.shown > 0.01)
+        .map((c) => ({ obj: c, path: c.path, sub: checksLine(c.checks), cx: c.cx, y0: c.y0, alpha: c.topic.shown, rank: 100 - c.nodes.length / 1000 })),
+    ].sort((a, b) => (b.obj === focusCluster) - (a.obj === focusCluster) || a.rank - b.rank);
+    for (const it of items) {
+      const c = it.obj;
+      // A block wholly beside the stage gets no title: one pinned to the edge
+      // would name a topic that isn't there (islands sit far apart).
+      if (toScreen(c.x1, 0).x < 0 || toScreen(c.x0, 0).x > W) continue;
+      const sub = it.sub;
       ctx.font = tfont;
-      c.lines ??= split(ctx, c.path, 360);
+      c.lines ??= split(ctx, it.path, 360);
       const widest = Math.max(...c.lines.map((line) => ctx.measureText(line).width));
       ctx.font = sfont;
       const totalW = Math.max(widest, sub ? ctx.measureText(sub).width : 0);
       const lineH = 20;
       const height = c.lines.length * lineH + (sub ? 20 : 0) + 4;
-      const top = toScreen(c.cx, c.y0).y;
-      const x = clamp(toScreen(c.cx, c.y0).x, totalW / 2 + 10, Math.max(totalW / 2 + 10, W - totalW / 2 - 10));
+      const top = toScreen(it.cx, it.y0).y;
+      const x = clamp(toScreen(it.cx, it.y0).x, totalW / 2 + 10, Math.max(totalW / 2 + 10, W - totalW / 2 - 10));
       const boxFor = (y0) => ({ x0: x - totalW / 2, x1: x + totalW / 2, y0, y1: y0 + height });
       const hits = (b) => placed.some((p) => p.x0 < b.x1 && b.x0 < p.x1 && p.y0 < b.y1 && b.y0 < p.y1);
-      // A title may not sit on another cluster's ideas either: the map's job at
-      // this zoom is to show where each topic is, not to overprint it.
-      const clears = (b) => !nodePts.some((p) => p.x > b.x0 - 6 && p.x < b.x1 + 6 && p.y > b.y0 - 6 && p.y < b.y1 + 6);
+      // A title may not sit on another cluster's ideas, nor on a folded
+      // topic's disc: the map's job at this zoom is to show where each topic
+      // is, not to overprint it.
+      const clears = (b) =>
+        !nodePts.some((p) => p.x > b.x0 - 6 && p.x < b.x1 + 6 && p.y > b.y0 - 6 && p.y < b.y1 + 6) &&
+        !discs.some((d) => d.x + d.r > b.x0 - 6 && d.x - d.r < b.x1 + 6 && d.y + d.r > b.y0 - 6 && d.y - d.r < b.y1 + 6);
       const candidates = [boxFor(top - 10 - height), boxFor(top - 10 - 2 * height - 8)].filter(
         (b) => b.y0 > 52 && b.y1 < H - 8,
       );
       const box = c === focusCluster ? (candidates[0] ?? null) : (candidates.find((b) => !hits(b) && clears(b)) ?? null);
-      if (!box) {
-        c.titleBox = null;
-        continue;
-      }
+      if (!box) continue;
       placed.push(box);
-      c.titleBox = box;
+      // Clickable once it is really there, not while it fades.
+      if (it.alpha > 0.5) {
+        if (c.chain) c.headBox = box;
+        else c.titleBox = box;
+      }
+      ctx.globalAlpha = forced ? 1 : it.alpha;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillStyle = forced ? 'CanvasText' : C.text;
@@ -653,44 +849,191 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
         ctx.lineWidth = 2;
         ctx.strokeRect(box.x0 - 8, box.y0 - 4, box.x1 - box.x0 + 16, box.y1 - box.y0 + 6);
       }
-    }
-  }
-
-  function drawEdges(dimOf, spot) {
-    for (const e of world.edges) {
-      const dim = Math.min(dimOf(e.a), dimOf(e.b));
-      const hot = spot && (e.a === spot || e.b === spot);
-      const p = curve(e, 0);
-      ctx.beginPath();
-      ctx.moveTo(p.x0, p.y0);
-      ctx.bezierCurveTo(p.x0, p.y1, p.x3, p.y2, p.x3, p.y3);
-      ctx.strokeStyle = forced ? 'CanvasText' : hot ? C.edgeHot : C.edge;
-      ctx.globalAlpha = forced ? 1 : dim;
-      ctx.lineWidth = hot ? 1.9 : 1.3;
-      ctx.stroke();
-      // Arrowhead at the idea that needs it.
-      const end = curve(e, 1);
-      const len = Math.hypot(end.tx, end.ty) || 1;
-      const ux = end.tx / len;
-      const uy = end.ty / len;
-      ctx.beginPath();
-      ctx.moveTo(end.x, end.y);
-      ctx.lineTo(end.x - ux * 8 - uy * 4, end.y - uy * 8 + ux * 4);
-      ctx.lineTo(end.x - ux * 8 + uy * 4, end.y - uy * 8 - ux * 4);
-      ctx.closePath();
-      ctx.fillStyle = ctx.strokeStyle;
-      ctx.fill();
       ctx.globalAlpha = 1;
     }
+    return placed;
   }
 
-  function drawNodes(k, dimOf, spot) {
+  function drawEdge(e, alpha, dimOf, spot) {
+    const dim = Math.min(dimOf(e.a), dimOf(e.b));
+    const hot = spot && (e.a === spot || e.b === spot);
+    const p = curve(e, 0);
+    ctx.beginPath();
+    ctx.moveTo(p.x0, p.y0);
+    ctx.bezierCurveTo(p.x0, p.y1, p.x3, p.y2, p.x3, p.y3);
+    ctx.strokeStyle = forced ? 'CanvasText' : hot ? C.edgeHot : C.edge;
+    ctx.globalAlpha = forced ? 1 : dim * alpha;
+    ctx.lineWidth = hot ? 1.9 : 1.3;
+    ctx.stroke();
+    // Arrowhead at the idea that needs it.
+    const end = curve(e, 1);
+    const len = Math.hypot(end.tx, end.ty) || 1;
+    const ux = end.tx / len;
+    const uy = end.ty / len;
+    ctx.beginPath();
+    ctx.moveTo(end.x, end.y);
+    ctx.lineTo(end.x - ux * 8 - uy * 4, end.y - uy * 8 + ux * 4);
+    ctx.lineTo(end.x - ux * 8 + uy * 4, end.y - uy * 8 - ux * 4);
+    ctx.closePath();
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Edges between visible ideas are drawn as curves here; an edge with an
+   * end inside a folded topic is counted toward the link between the two
+   * things actually drawn (an idea or the outermost folded topic), returned
+   * as from → to → count for drawLinks.
+   */
+  function drawEdges(dimOf, spot) {
+    const links = new Map();
+    for (const e of world.edges) {
+      const alpha = Math.min(seen(e.a), seen(e.b));
+      if (alpha > 0.01) drawEdge(e, alpha, dimOf, spot);
+      const from = repOf(e.a);
+      const to = repOf(e.b);
+      if (from === to || (from === e.a && to === e.b)) continue;
+      const row = links.get(from) ?? links.set(from, new Map()).get(from);
+      row.set(to, (row.get(to) ?? 0) + 1);
+    }
+    return links;
+  }
+
+  /**
+   * Prerequisites into, out of and between folded topics: one straight line
+   * per pair and direction, thicker the more edges it stands for, in stage px
+   * so it reads at any zoom. Each direction keeps to its own side, so A → B
+   * and B → A stay two lines.
+   */
+  function drawLinks(links, spot) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const discOf = new Map(bubbles.map((b) => [b.t, b]));
+    const end = (rep) => {
+      if (rep.chain) return discOf.get(rep) ?? null;
+      const p = toScreen(rep.x, rep.y);
+      return { x: p.x, y: p.y, r: rep.r * rep.scale * cam.k, a: seen(rep) };
+    };
+    for (const [from, row] of links) {
+      for (const [to, count] of row) {
+        const a = end(from);
+        const b = end(to);
+        if (!a || !b) continue;
+        const alpha = Math.min(a.a, b.a);
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.hypot(dx, dy);
+        if (alpha <= 0.01 || len < a.r + b.r + 8) continue;
+        // A gentle bow to the right of travel: A → B and B → A become two
+        // arcs, and links through a row of discs clear the middle ones.
+        const bow = Math.min(48, len * 0.15);
+        const cx = (a.x + b.x) / 2 - (dy / len) * bow;
+        const cy = (a.y + b.y) / 2 + (dx / len) * bow;
+        const la = Math.hypot(cx - a.x, cy - a.y) || 1;
+        const lb = Math.hypot(b.x - cx, b.y - cy) || 1;
+        const x0 = a.x + ((cx - a.x) / la) * (a.r + 3);
+        const y0 = a.y + ((cy - a.y) / la) * (a.r + 3);
+        const ux = (b.x - cx) / lb;
+        const uy = (b.y - cy) / lb;
+        const x1 = b.x - ux * (b.r + 3);
+        const y1 = b.y - uy * (b.r + 3);
+        const hot = (hoverTopic && (from === hoverTopic || to === hoverTopic)) || (spot && (from === spot || to === spot));
+        const width = Math.min(5, 1.2 + 1.1 * Math.log2(count)) + (hot ? 0.6 : 0);
+        ctx.globalAlpha = forced ? 1 : alpha;
+        ctx.strokeStyle = forced ? 'CanvasText' : hot ? C.linkHot : C.link;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.quadraticCurveTo(cx, cy, x1, y1);
+        ctx.stroke();
+        const head = 7 + width;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x1 - ux * head - uy * head * 0.5, y1 - uy * head + ux * head * 0.5);
+        ctx.lineTo(x1 - ux * head + uy * head * 0.5, y1 - uy * head - ux * head * 0.5);
+        ctx.closePath();
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Folded topics: a disc with the number of ideas inside, the topic's name
+   * and "n ideas · m topics" under it. Names go outermost and biggest first;
+   * one that would cover a title, an idea, another name or another disc is
+   * left out (its disc still shows the count, and hovering names it).
+   */
+  function drawBubbles(placed) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.textAlign = 'center';
+    for (const b of bubbles) {
+      const { t } = b;
+      const r = b.r * (t === hoverTopic ? 1.08 : 1);
+      ctx.globalAlpha = forced ? 1 : b.a;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = forced ? 'Canvas' : C.topicFill;
+      ctx.fill();
+      ctx.strokeStyle = forced ? 'CanvasText' : t === hoverTopic ? C.focus : C.topicRing;
+      ctx.lineWidth = t === hoverTopic ? 2.2 : 1.6;
+      ctx.stroke();
+      // Some of its ideas are picked for practice: the selection ring, as on an idea.
+      if (t.nodes.some((n) => selected.has(n.key))) {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, r + 6, 0, Math.PI * 2);
+        ctx.strokeStyle = forced ? 'Highlight' : C.select;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([7, 5]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.fillStyle = forced ? 'CanvasText' : C.text;
+      ctx.font = `600 ${r >= 24 ? 15 : 12}px ${FONT_UI}`;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(t.nodes.length), b.x, b.y + 1);
+    }
+    const nodePts = world.nodes.filter(live).map((n) => toScreen(n.x, n.y));
+    const named = bubbles.filter((b) => b.a > 0.5).sort((p, q) => p.t.depth - q.t.depth || q.t.nodes.length - p.t.nodes.length);
+    ctx.textBaseline = 'top';
+    for (const b of named) {
+      const { t } = b;
+      const ideas = t.nodes.length;
+      const sub = `${ideas} ${ideas === 1 ? 'idea' : 'ideas'}${t.subtopics ? ` · ${t.subtopics} ${t.subtopics === 1 ? 'topic' : 'topics'}` : ''}`;
+      ctx.font = `600 14px ${FONT_READ}`;
+      t.nameLines ??= wrap(ctx, t.title, 180);
+      const nameW = Math.max(...t.nameLines.map((line) => ctx.measureText(line).width));
+      ctx.font = `400 12px ${FONT_UI}`;
+      const w = Math.max(nameW, ctx.measureText(sub).width);
+      const y0 = b.y + b.r + 6;
+      const box = { x0: b.x - w / 2, x1: b.x + w / 2, y0, y1: y0 + t.nameLines.length * 18 + 16 };
+      const over = (p) => p.x0 < box.x1 && box.x0 < p.x1 && p.y0 < box.y1 && box.y0 < p.y1;
+      const onDisc = (d) => d !== b && d.a > 0.5 && d.x + d.r > box.x0 && d.x - d.r < box.x1 && d.y + d.r > box.y0 && d.y - d.r < box.y1;
+      const onIdea = (p) => p.x > box.x0 - 6 && p.x < box.x1 + 6 && p.y > box.y0 - 6 && p.y < box.y1 + 6;
+      if (placed.some(over) || bubbles.some(onDisc) || nodePts.some(onIdea)) continue;
+      placed.push(box);
+      ctx.globalAlpha = forced ? 1 : b.a;
+      ctx.fillStyle = forced ? 'CanvasText' : C.text;
+      ctx.font = `600 14px ${FONT_READ}`;
+      t.nameLines.forEach((line, i) => ctx.fillText(line, b.x, y0 + i * 18));
+      ctx.fillStyle = forced ? 'CanvasText' : C.textDim;
+      ctx.font = `400 12px ${FONT_UI}`;
+      ctx.fillText(sub, b.x, y0 + t.nameLines.length * 18);
+    }
+    ctx.textBaseline = 'alphabetic';
+    ctx.globalAlpha = 1;
+  }
+
+  function drawNodes(k, dimOf, spot, placed) {
     const labelNodes = [];
     for (const n of world.nodes) {
       const target = n === hover || n === focusNode ? 1.16 : 1;
       n.scale += (target - n.scale) * (reduced ? 1 : 0.2);
+      const alpha = seen(n);
+      if (alpha <= 0.01) continue;
       const r = n.r * n.scale;
-      const dim = dimOf(n);
+      const dim = dimOf(n) * alpha;
       const kind = kindOf(n);
 
       ctx.globalAlpha = dim;
@@ -732,14 +1075,14 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
       }
       // Label candidates are drawn after the nodes (see below) so a dense
       // cluster cannot bury its neighbours in overprinted titles.
-      if (k >= 0.55 || n === spot || selected.has(n.key)) labelNodes.push(n);
+      if (alpha > 0.6 && (k >= 0.55 || n === spot || selected.has(n.key))) labelNodes.push(n);
       ctx.globalAlpha = 1;
     }
 
     // Labels last, decluttered: the idea in focus wins, then selected ideas,
     // then the rest in graph order; a label that would overlap one already
-    // drawn is dropped (the hover card still shows every title in full).
-    const boxes = [];
+    // drawn, or a topic title, is dropped (the hover card still shows every
+    // title in full). Boxes are compared in stage px, with the titles'.
     const rank = (n) => (n === spot ? 3 : selected.has(n.key) ? 2 : 1);
     labelNodes.sort((a, b) => rank(b) - rank(a));
     ctx.textAlign = 'center';
@@ -750,14 +1093,12 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
       n.lines ??= wrap(ctx, n.title, 150);
       const widest = Math.max(...n.lines.map((line) => ctx.measureText(line).width));
       const r = n.r * n.scale;
-      const box = {
-        x0: n.x - widest / 2,
-        x1: n.x + widest / 2,
-        y0: n.y + r + 6,
-        y1: n.y + r + 8 + n.lines.length * 16,
-      };
-      if (boxes.some((b) => b.x0 < box.x1 && box.x0 < b.x1 && b.y0 < box.y1 && box.y0 < b.y1)) continue;
-      boxes.push(box);
+      const a = toScreen(n.x - widest / 2, n.y + r + 6);
+      const b = toScreen(n.x + widest / 2, n.y + r + 8 + n.lines.length * 16);
+      const box = { x0: a.x, x1: b.x, y0: a.y, y1: b.y };
+      if (placed.some((p) => p.x0 < box.x1 && box.x0 < p.x1 && p.y0 < box.y1 && box.y0 < p.y1)) continue;
+      placed.push(box);
+      ctx.globalAlpha = forced ? 1 : seen(n);
       ctx.fillStyle = forced ? 'CanvasText' : C.text;
       n.lines.forEach((line, i) => ctx.fillText(line, n.x, n.y + r + 8 + i * 16));
     }
@@ -802,16 +1143,19 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     if (!world) return;
     const k = cam.k;
 
-    drawClusterTitles();
+    placeBubbles();
+    const placed = drawClusterTitles();
     ctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * (W / 2 - cam.x * k), dpr * (H / 2 - cam.y * k));
 
     const spot = hover ?? focusNode;
     const near = spot ? new Set([spot, ...spot.needs, ...spot.leads]) : null;
     const dimOf = (n) => (near && !near.has(n) ? 0.28 : 1);
 
-    drawEdges(dimOf, spot);
-    drawNodes(k, dimOf, spot);
+    const links = drawEdges(dimOf, spot);
+    drawNodes(k, dimOf, spot, placed);
     drawEffects(t);
+    drawLinks(links, spot);
+    drawBubbles(placed);
   }
 
   // ---------- card and flyout ----------
@@ -906,6 +1250,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   }
 
   function placeCard() {
+    // A hovered idea that zooming folded away takes its card with it.
+    if (hover && !live(hover)) hover = null;
     const n = hover ?? focusNode;
     if (!n || (drag && drag.moved)) {
       card.hidden = true;
@@ -980,7 +1326,7 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
 
   /** True while a frame would change something on screen. */
   function moving() {
-    if (camTarget || sparks.length || rings.length) return true;
+    if (camTarget || sparks.length || rings.length || fading) return true;
     if (!world) return false;
     if (!reduced && active(world)) return true;
     const spot = hover ?? focusNode;
@@ -997,12 +1343,18 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     if (world) {
       if (!reduced) tick(world);
       if (camTarget) {
+        // Zoom eases in log space, so a long zoom-in (whole map → one topic)
+        // doesn't rush its first frames; it ends exactly on the target.
         const e = 0.14;
         cam.x += (camTarget.x - cam.x) * e;
         cam.y += (camTarget.y - cam.y) * e;
-        cam.k += (camTarget.k - cam.k) * e;
-        if (Math.abs(camTarget.x - cam.x) < 0.5 && Math.abs(camTarget.y - cam.y) < 0.5 && Math.abs(camTarget.k - cam.k) < 0.002) camTarget = null;
+        cam.k = Math.exp(Math.log(cam.k) + (Math.log(camTarget.k) - Math.log(cam.k)) * e);
+        if (Math.abs(camTarget.x - cam.x) * cam.k < 0.5 && Math.abs(camTarget.y - cam.y) * cam.k < 0.5 && Math.abs(camTarget.k / cam.k - 1) < 0.002) {
+          Object.assign(cam, camTarget);
+          camTarget = null;
+        }
       }
+      updateLod();
       for (const s of sparks) {
         s.life += dt;
         s.x += s.vx;
@@ -1039,14 +1391,18 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     const s = local(e);
     pointers.set(e.pointerId, s);
     if (pointers.size === 2) {
+      // Two fingers: zoom about their midpoint, which also pans with them.
       const [a, b] = [...pointers.values()];
-      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), k: cam.k };
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, k: cam.k, at: toWorld(mid.x, mid.y) };
       if (drag?.node) drag.node.fx = drag.node.fy = null;
       drag = null;
+      camTarget = null;
       return;
     }
     const w = toWorld(s.x, s.y);
-    const n = hit(world, w.x, w.y);
+    const bubble = bubbleAt(s);
+    const n = bubble ? null : hit(world, w.x, w.y, 6, live);
     camTarget = null;
     if (n) {
       n.fx = n.x;
@@ -1054,7 +1410,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
       drag = { node: n, sx: s.x, sy: s.y, moved: false, vx: 0, vy: 0, last: s, lastT: e.timeStamp };
       reheat(world, 0.3);
     } else {
-      drag = { pan: true, sx: s.x, sy: s.y, cx: cam.x, cy: cam.y, moved: false };
+      // A folded topic pans like the background; a click (no drag) opens it.
+      drag = { pan: true, topic: bubble?.t ?? null, sx: s.x, sy: s.y, cx: cam.x, cy: cam.y, moved: false };
     }
     request();
   });
@@ -1065,7 +1422,11 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     if (pointers.has(e.pointerId)) pointers.set(e.pointerId, s);
     if (pinch && pointers.size === 2) {
       const [a, b] = [...pointers.values()];
-      cam.k = clamp((pinch.k * Math.hypot(a.x - b.x, a.y - b.y)) / pinch.d, K_MIN, K_MAX);
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      cam.k = clamp((pinch.k * Math.hypot(a.x - b.x, a.y - b.y)) / pinch.d, kMin, K_MAX);
+      // Keep the world point that was under the midpoint under it.
+      cam.x = pinch.at.x - (mid.x - W / 2) / cam.k;
+      cam.y = pinch.at.y - (mid.y - H / 2) / cam.k;
       request();
       return;
     }
@@ -1092,8 +1453,16 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
       request();
       return;
     }
+    const bubble = bubbleAt(s);
+    const topic = bubble?.t ?? null;
+    if (topic !== hoverTopic) {
+      hoverTopic = topic;
+      // The disc's full name, for when its label had no room.
+      canvas.title = topic ? `${topic.path} — ${topic.nodes.length} ${topic.nodes.length === 1 ? 'idea' : 'ideas'}. Click to zoom in.` : '';
+      request();
+    }
     const w = toWorld(s.x, s.y);
-    const n = hit(world, w.x, w.y);
+    const n = topic ? null : hit(world, w.x, w.y, 6, live);
     if (n) {
       cancelHide();
       if (n !== hover) {
@@ -1103,10 +1472,12 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
       canvas.style.cursor = 'pointer';
       request();
     } else {
-      canvas.style.cursor = 'grab';
+      canvas.style.cursor = topic ? 'pointer' : 'grab';
       if (hover) hideSoon();
     }
   });
+
+  const inBox = (s, b) => b && s.x >= b.x0 && s.x <= b.x1 && s.y >= b.y0 && s.y <= b.y1;
 
   function endPointer(e) {
     pointers.delete(e.pointerId);
@@ -1132,8 +1503,13 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
       } else if (e.type === 'pointerup') toggleNode(n);
     } else if (!d.moved && e.type === 'pointerup') {
       const s = local(e);
-      const c = world.clusters.find((cl) => cl.titleBox && s.x >= cl.titleBox.x0 && s.x <= cl.titleBox.x1 && s.y >= cl.titleBox.y0 && s.y <= cl.titleBox.y1);
-      if (c) toggleCluster(c);
+      if (d.topic) jumpTo(d.topic);
+      else {
+        const c = world.clusters.find((cl) => inBox(s, cl.titleBox));
+        const t = c ? null : world.topics.find((tp) => inBox(s, tp.headBox));
+        if (c) toggleCluster(c);
+        else if (t) jumpTo(t);
+      }
     }
     request();
   }
@@ -1141,30 +1517,124 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   canvas.addEventListener('pointercancel', endPointer);
   canvas.addEventListener('pointerleave', () => {
     if (!drag && hover) hideSoon();
+    if (hoverTopic) {
+      hoverTopic = null;
+      canvas.title = '';
+      request();
+    }
   });
 
-  canvas.addEventListener(
+  // ---------- zoom: the map's, never the page's ----------
+  // Every zoom gesture over the stage zooms the map about the pointer and is
+  // cancelled for the page. A trackpad pinch arrives as ctrl+wheel in
+  // Chromium and WebKit, a mouse ctrl+wheel the same way, so both are caught
+  // on the whole stage (HUD, card and buttons included), not only the canvas;
+  // a plain wheel zooms over the canvas and scrolls whatever else it is over
+  // (the card's long statement). Listeners are non-passive so preventDefault
+  // holds. See docs/ui-design.md §7.6 "Zoom belongs to the map".
+  root.addEventListener(
     'wheel',
     (e) => {
-      if (!world) return;
+      const pinchy = e.ctrlKey || e.metaKey;
+      if (e.target !== canvas && !pinchy) return;
       e.preventDefault();
+      if (!world) return;
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? H : 1;
+      const dy = e.deltaY * unit;
+      // A pinch reports small deltas (≈ 1 per percent); a wheel notch ~100.
+      const step = pinchy ? clamp(dy, -25, 25) * 0.01 : clamp(dy, -200, 200) * 0.0015;
       const s = local(e);
-      const before = toWorld(s.x, s.y);
-      cam.k = clamp(cam.k * Math.exp(-e.deltaY * 0.0015), K_MIN, K_MAX);
-      const after = toWorld(s.x, s.y);
-      cam.x += before.x - after.x;
-      cam.y += before.y - after.y;
-      camTarget = null;
-      request();
+      zoomAt(Math.exp(-step), s.x, s.y);
     },
     { passive: false },
   );
+
+  // Safari / WKWebView (macOS trackpad): pinch arrives as gesture events.
+  // On iOS the same gesture also arrives as two pointers, handled above.
+  let gesture = null;
+  const gestureStart = (e) => {
+    e.preventDefault();
+    gesture = world && pointers.size < 2 ? { k: cam.k, s: local(e) } : null;
+  };
+  const gestureChange = (e) => {
+    e.preventDefault();
+    if (gesture && pointers.size < 2) zoomAt((gesture.k * e.scale) / cam.k, gesture.s.x, gesture.s.y);
+  };
+  const gestureEnd = (e) => {
+    e.preventDefault();
+    gesture = null;
+  };
+  root.addEventListener('gesturestart', gestureStart, { passive: false });
+  root.addEventListener('gesturechange', gestureChange, { passive: false });
+  root.addEventListener('gestureend', gestureEnd, { passive: false });
+
+  // WebKitGTK (Linux) magnifies the whole page on a touchpad pinch before the
+  // page sees any event. The app shell takes that gesture over and forwards
+  // it as `app-pinch` window events (crates/app/src/pinch.rs); the pinch is
+  // the map's when it begins over the stage, with nothing on top of it.
+  let nativePinch = null;
+  window.addEventListener('app-pinch', (e) => {
+    const { phase, scale, x, y } = e.detail ?? {};
+    if (phase === 'begin') {
+      nativePinch = null;
+      if (!world || !visible() || pointers.size >= 2) return;
+      if (!root.contains(document.elementFromPoint(x, y))) return;
+      const r = canvas.getBoundingClientRect();
+      nativePinch = { k: cam.k, s: { x: x - r.left, y: y - r.top } };
+    } else if (phase === 'update' && nativePinch && Number.isFinite(scale) && scale > 0) {
+      zoomAt((nativePinch.k * scale) / cam.k, nativePinch.s.x, nativePinch.s.y);
+    } else if (phase === 'end') nativePinch = null;
+  });
+
+  // Keys, while focus is in the stage (the idea list, the buttons): + and −
+  // step the zoom, 0 fits; with ctrl/⌘ too, so the page's own zoom keys
+  // zoom the map here instead of the app.
+  root.addEventListener('keydown', (e) => {
+    if (!world || e.altKey) return;
+    const step = { '+': 1.25, '=': 1.25, '-': 0.8, _: 0.8 }[e.key];
+    if (step) zoomStep(step);
+    else if (e.key === '0') fit(false);
+    else return;
+    e.preventDefault();
+  });
+
+  /** True when the camera already frames `box` (a second double-click steps out). */
+  function framing(box) {
+    const f = frameOf([box]);
+    return Math.abs(Math.log(f.k / cam.k)) < 0.15 && Math.hypot(f.x - cam.x, f.y - cam.y) * cam.k < 60;
+  }
+
+  // Double-click a topic (open or folded) to frame it; again to step out to
+  // its parent; on open water, or from a root, to frame the whole map.
   canvas.addEventListener('dblclick', (e) => {
+    if (!world) return;
     const s = local(e);
     const w = toWorld(s.x, s.y);
-    if (world && !hit(world, w.x, w.y)) fit(false);
+    if (hit(world, w.x, w.y, 6, live)) return;
+    // A title or heading click already acted (select / open); don't also fit.
+    if (world.clusters.some((c) => inBox(s, c.titleBox)) || world.topics.some((t) => inBox(s, t.headBox))) return;
+    let t = bubbleAt(s)?.t ?? topicAt(w);
+    while (t && framing(t)) t = t.parent;
+    if (t) jumpTo(t);
+    else fit(false);
   });
   fitButton.addEventListener('click', () => fit(false));
+  zoomInButton.addEventListener('click', () => zoomStep(1.4));
+  zoomOutButton.addEventListener('click', () => zoomStep(1 / 1.4));
+  currentButton.addEventListener('click', () => {
+    const boxes = currentClusters();
+    if (boxes.length) jumpTo(boxes);
+  });
+
+  /** The clusters holding the newest session's ideas (`learn.levels`). */
+  function currentClusters() {
+    const out = new Set();
+    for (const key of Object.keys(learn?.levels ?? {})) {
+      const node = entries.get(key)?.node;
+      if (node) out.add(node.cluster);
+    }
+    return [...out];
+  }
 
   card.addEventListener('pointerenter', cancelHide);
   card.addEventListener('pointerleave', () => {
@@ -1355,7 +1825,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     entries = new Map();
     sparks = [];
     rings = [];
-    hover = focusNode = focusCluster = null;
+    hover = focusNode = focusCluster = hoverTopic = null;
+    bubbles = [];
     cardFor = null;
     flyoutFor = null;
     card.hidden = true;
@@ -1378,6 +1849,7 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
       // (venue lists included) in the DOM.
       card.replaceChildren();
       fitButton.hidden = true;
+      zoomBox.hidden = true;
       status.replaceChildren(h('p', 'map-status-text', EMPTY));
       selected.clear();
       changed();
@@ -1386,7 +1858,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     }
     status.replaceChildren();
     fitButton.hidden = false;
-    world = createWorld(clusterGroups(topics, nodes, graph?.topicChecks ?? {}), links, { burst: !reduced });
+    zoomBox.hidden = false;
+    world = createWorld(clusterGroups(topics, nodes, graph?.topicChecks ?? {}), links, { burst: !reduced, topics });
     if (reduced) settle(world);
     renderGuide();
     a11y.replaceChildren(...a11yList());
@@ -1410,6 +1883,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     lastT = 0;
     resize();
     fit(true);
+    updateLod(true);
+    currentButton.hidden = !currentClusters().length;
     changed();
     request();
   }
@@ -1426,6 +1901,7 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     card.hidden = true;
     closeFlyout();
     fitButton.hidden = true;
+    zoomBox.hidden = true;
     status.replaceChildren(h('p', 'map-status-text', 'Loading…'));
     request();
   }
@@ -1442,6 +1918,7 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     card.hidden = true;
     closeFlyout();
     fitButton.hidden = true;
+    zoomBox.hidden = true;
     const p = h('p', 'map-status-text danger', `Couldn’t load the map: ${text} `);
     p.setAttribute('role', 'status');
     const b = h('button', 'btn text', 'Try again');

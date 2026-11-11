@@ -132,6 +132,17 @@
             <p id="desk-note-text"></p>
             <button class="btn" id="desk-note-button" type="button" hidden></button>
           </div>
+          <div class="desk-comment" id="desk-comment" hidden>
+            <button class="btn text desk-comment-toggle" id="desk-comment-toggle" type="button" aria-expanded="false" aria-controls="desk-comment-form">Comment</button>
+            <form class="desk-comment-form" id="desk-comment-form" hidden>
+              <label class="sr-only" for="desk-comment-input">Comment to the tutor</label>
+              <div class="composer-row">
+                <textarea class="input" id="desk-comment-input" rows="1" placeholder="Tell the tutor something. It stops and answers you."></textarea>
+                <button class="btn primary" type="submit">Send</button>
+              </div>
+              <p class="status" id="desk-comment-status" role="status"></p>
+            </form>
+          </div>
         </div>
       </footer>
     </section>
@@ -171,6 +182,7 @@
       <textarea id="prompt" class="input" rows="1" aria-labelledby="hero" aria-describedby="prompt-hint"></textarea>
       <button class="btn primary" id="send" type="submit">Start</button>
     </div>
+    <div class="menu add-menu" id="add-menu" role="menu" aria-labelledby="add-files" hidden></div>
     <div class="mention-pop" id="mention-pop" hidden>
       <ul class="mention-list" id="mention-list" role="listbox" aria-label="Files and folders"></ul>
     </div>
@@ -303,6 +315,19 @@
           </div>
           <p class="status" id="sync-status" role="status"></p>
         </div>
+      </section>
+      <section class="settings-section" aria-labelledby="libraries-heading">
+        <h2 id="libraries-heading">Libraries</h2>
+        <p class="help">Folders of references every agent can search: exam guides, question banks, notes. Only their text syncs; the copied originals stay on the device that imported them.</p>
+        <div class="library-list" id="library-list"></div>
+        <div class="field library-cap">
+          <label for="library-max-mb">Skip files over (MB)</label>
+          <input class="input" id="library-max-mb" type="number" min="1" step="1" inputmode="numeric" value="50" />
+        </div>
+        <div class="actions">
+          <button class="btn secondary" id="library-import" type="button">Import folder…</button>
+        </div>
+        <p class="status" id="library-status" role="status"></p>
       </section>
       <section class="settings-section" aria-labelledby="plugins-heading">
         <h2 id="plugins-heading">Plugins</h2>

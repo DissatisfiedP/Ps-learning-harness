@@ -89,7 +89,7 @@ The learner picks a model per role in Settings. The harness maps agents to roles
 **Tutor system prompt**, in order:
 1. `shared/voice.md`, `accuracy.md`, `learner-signals.md`, `questions.md`, `formatting.md`, `learner-files.md`, then `shared/workspace.md` when the session has an attached workspace.
 2. `tutor/base.md`, with:
-   - `{{session_state}}`: the pinned goal record, field brief, probe map, plan and current section, learner-model data, and platform, then a `## This device` section when this device lacks something: on mobile, the desktop-only plugins the session used (their tools and fragments are left out; `docs/sync-build.md`, "Sessions on mobile"), and on any device, a folder attached on another device ("The folder `<name>` is attached on another device; its files aren't available here.");
+   - `{{session_state}}`: the pinned goal record, field brief, probe map, plan and current section, platform, and `## Learner state` (built by `graph::read::learner_state` from the learner's knowledge graph each turn: node and topic counts, the topic tree with nodes homed per topic, then up to eight nodes whose id, title, statement or home matches the goal record's words, each with the learner's record; ≤ 1,600 characters, "no graph yet" when the graph is empty; the planner gets the same block), then a `## This device` section when this device lacks something: on mobile, the desktop-only plugins the session used (their tools and fragments are left out; `docs/sync-build.md`, "Sessions on mobile"), and on any device, a folder attached on another device ("The folder `<name>` is attached on another device; its files aren't available here.");
    - `{{phase}}`;
    - `{{phase_instructions}}`, filled from the phase file.
 3. Inside the phase file:
@@ -105,6 +105,8 @@ Its **messages** are the session conversation (the same messages the tutor sees,
 **Coach system prompt (target):** `shared/voice.md`, `accuracy.md`, `learner-signals.md`, `formatting.md`, then `coach/base.md` with `{{session_state}}`, then the fragments of the plugins active when the targets were taught. Practice mode today is `practice.md` alone, with no tools.
 
 **Jobs:** their own file, with `{{task}}` and the other placeholders filled from the job record.
+
+**Reference libraries** (`shared/library.md`, architecture §4.27): appended to the tutor, planner and researcher system prompts after composition, **only when `<repo>/library/` holds a library**, so a learner without one pays nothing. `{{libraries}}` is one line per library (name, id, topic, description, file counts by kind, scans without text), libraries linked to the session (a `library` attachment) first, at most 12. Its per-agent paragraphs are flag blocks set by the caller: `tutor` (question banks are for calibrating coverage, difficulty and format; write original questions unless the learner asks for bank ones; follow question-writing guides), `planner` (align sections to exam outlines), `researcher` (libraries before the web), `coach` (the same rule as the tutor, for when the coach is built).
 
 **Caching.** Shared fragments and agent bases come first and never change within a session, so providers that cache by prefix keep them. Phase and section parts change only at phase changes, section boundaries, plan revisions and plugin grants, never turn by turn.
 
@@ -122,6 +124,7 @@ Fragments wrapped in `{{#flag}} … {{/flag}}` are included only when the flag i
 | `hunt_active` | `hunts` is on **and** the current section's hunt is enabled and not skipped (per compose) | §5 |
 | `field_guide` | discourse and venues in briefs, plus the close guide, are built | §6 |
 | `calibration` | the calibration summary is built | §7 |
+| `branch` | per compose (tutor and planner): the session teaches one track of a plan split into `tracks` (its state has `branch`). Adds the teach-phase "one branch" block (own track only, revision sections, the hand-off close) and the planner's "revise only this track" rule. The tracks guidance itself is unconditional | architecture §4.26 |
 
 The learning-system flags gate **behavior** (what the model is told to do). Turn each one on in the same change that builds its code and session-state fields. With all of them off, the prompts compose as they did before these features were written.
 
@@ -142,17 +145,19 @@ Tools are scoped by agent and phase. A tool that is absent is never described to
 | `research_request` | tutor, coach (all phases) | `{ kind: verify \| scope, question, context }` or `{ kind: source, path, question }` → ack; the brief arrives as a message. Several can run at once |
 | `research` | planner | Same arguments; **blocks** and returns the brief as the tool result |
 | `file_find`, `file_read` | tutor, planner, coach | Read-only access to the learner's files: `file_find { pattern }` (name fragment or glob) → paths; `file_read { path, lines? }` → text (≤ 256 KiB), or a PDF's pages tagged `[p.3] …` (a scan's page says it has no text layer) |
-| `graph_search` | tutor, planner, graph builder | `{ query, scope: nodes \| topics }` (absent until the graph exists) |
+| `library_list`, `library_search`, `library_read` | tutor (all phases), planner, researcher (coach and problem checker once they have a tool loop) | Read-only access to the reference libraries' synced text (`library.rs`): `library_list { library?, kind? }` → each library with its files grouped by kind (`question-guide`, `question-bank`, `guide`, `notes`, `reference`), pages, and which have no text; `library_search { query, library?, kind? }` → up to 20 best lines, ≤ 3 per file, as `<library>/<file>:<line> [p.N] (kind) — snippet` (every word a case-insensitive term; more distinct terms, the whole phrase, and terms in the file's path or title rank higher); `library_read { path: "<library>/<file>", from?, to? }` → that line range of the extracted text (PDF pages tagged `[p.N]`), ≤ 256 KiB, ending `[more: continue with from=N]` when there is more. A scan with no text layer, an unreadable file, an unknown library or a path outside the index is refused with the reason |
+| `graph_search`, `graph_read` | tutor: measure, teach; planner | Read-only access to the learner's knowledge graph (`graph::read`): `graph_search { query }` → up to 20 matching nodes and topics, each node with id, home, title, statement and the learner's record (` · checks 3✓ 1✗` when imported evidence exists, ` · session 2026-10-02` = who recorded it and when); `graph_read { id }` → one node (kind, home path, statement, `requires` prerequisites, what needs it, other relations, evidence incl. its home topic's checks, aliases) or one topic (path, checks, subtopics with node counts, up to 40 nodes with their record); an alias resolves to the merged node. Both always listed; on an empty graph both return "The knowledge graph is empty: …". `graph_submit` stays builder-only |
 | `goal_set` | tutor: measure | See `tutor/phases/measure.md`; starts the `scope` job. With `levels`: purpose adds `course`, `depth: pass \| solid \| deep` (default `solid`); with `hunts`: `explore: off \| suggest \| on` (default `off`, forced `off` for `course`/`exam`); with `starting_point`: `startingPoint: measure \| quick \| new` (falls back to the device setting, else `measure`) |
+| `preference_add` | tutor: measure, teach, close | `{ instruction, replaces? }` → appends the instruction to the goal record's `preferences` (a new `goal` op; `replaces` drops an earlier one with that exact text), so the pinned session state carries it every turn. Refused before `goal_set` |
 | `probe_done` | tutor: measure | See `measure.md`; refused while a question is open or before the scope brief has arrived. On success the planner runs. With `levels`: each strand carries `levelReached: none \| explain \| use \| analyze \| design`. With `starting_point`: zero probe questions allowed for `new` (strands `unprobed` with `reason: "new"`), at most five for `quick` (`reason: "skipped"` for the rest) |
-| `plan_write` | planner | See `planner/base.md`. A section's `plugins` may name a plugin that isn't installed only if a cached registry index lists it; code then sets that section's `needsInstall` (the model cannot). Learning-system section fields: `targetLevel`, `assumedKnown`, `knownNote`, `learnerNote`, `hunt { available, reason }`; refused if `hunt.enabled` is set, or `hunt.available` while explore is `off` |
+| `plan_write` | planner | See `planner/base.md`. A section's `plugins` may name a plugin that isn't installed only if a cached registry index lists it; code then sets that section's `needsInstall` (the model cannot). Learning-system section fields: `targetLevel`, `assumedKnown`, `knownNote`, `learnerNote`, `hunt { available, reason }`; refused if `hunt.enabled` is set, or `hunt.available` while explore is `off`. Optional `tracks: [{ id, title, sectionIds, after }]` (architecture §4.26): refused unless ≥ 2 root tracks, every merge track joins ≥ 2 tracks, exactly one final track, each track feeds at most one merge, `after` acyclic and known, every section in exactly one track, and node `requires` stays on its own track or on tracks merging into it; refused after the first approval of a plan without tracks. In a branched session: refused unless the tracks' ids, titles and `after` and the other tracks' `sectionIds` are unchanged. `revision: true` marks the app's revision section; the planner may only keep one unchanged |
 | `plan_keep` | planner | `{ reason }`; answers a change request without changing the plan |
 | `plan_ask` | planner (with `plan_controls`) | `{ question, options[] }`; one question on the plan card, with the learner free to write their own answer. Calling it **ends the planner run** without a delivered notice; `answer_plan_question` starts a fresh run with the answer |
 | `plan_change_request` | tutor: teach | `{ reason: learner \| missing-foundation \| ahead \| detour \| probe-wrong, evidence, learnerWords? }` → ack; the planner's answer arrives as a message |
 | `plugin_request` | tutor: teach | `{ plugin, reason }` → granted, "already active", or refused (unknown, not installed/enabled, not on this platform, section limit of three) |
 | `plugin_search` | planner | `{ query }` → JSON array of up to five uninstalled matches (every whitespace-separated term must appear in id, title, description or use_when; only entries listing this device's platform) from the configured registries' cached indexes: `id`, `title`, `description`, `useWhen`, `avoidWhen`, `platforms`, `permissions`, `version`, `registry`; or a one-line "no plugin matches" message. Read-only; never fetches; installing is the learner's action |
-| `section_done` | tutor: teach | `{ sectionId, evidence, carryOver }`; refused while a section node lacks a passing check. With `levels`: also needs one passing check at `level ≥ targetLevel`. A known section closes on one passing check at its target level |
-| `session_end` | tutor: teach, close | `{}`. After the last `section_done` the phase is Close and the tutor writes the close, then calls it |
+| `section_done` | tutor: teach | `{ sectionId, evidence, carryOver }`; refused while a section node lacks a passing check. With `levels`: also needs one passing check at `level ≥ targetLevel`. A known section closes on one passing check at its target level. In a branched session the next section is the next one of its own track; after its last, a track that feeds a merge gets a hand-off instruction instead of the plain close |
+| `session_end` | tutor: teach, close | `{}`. After the last `section_done` the phase is Close and the tutor writes the close, then calls it. In a branched session the result adds what happens next: the merge session was created (this was the last input) or which branches it still waits for |
 | `hunt_send` | tutor: teach | `{ sectionId, question, lookAt: [{ kind: forum \| datasheet \| lecture \| video \| paper \| docs \| person, venue?, why }], bringBack: [string] }`; `huntId` is the call id. Refused unless the current section's hunt is available, enabled, not skipped, and has had no `huntSend` yet. Listed in every Teach turn; what the model is *told* about hunts arrives only with `hunt_active` |
 | `debrief_record` | tutor: teach | `{ huntId, claims: [{ claim, source?, verdict: correct \| partial \| wrong \| tip \| offroute, note, attribution?, scope? }] }`; refused without a `huntReturn` for that `huntId`; teaching questions in a hunted section are refused until it's recorded. Listed in every Teach turn, described with `hunt_active` |
 | `frontier_park` | tutor: all phases | `{ topic, why }` → appends `{ op: "frontier", opId, at, topic, why, from: { sessionId, huntId? } }` to `<repo>/frontier.jsonl` (created on first use). Listed in every phase; its instructions reach the model with `hunts` |
@@ -210,6 +215,7 @@ Besides the learner's words, the tutor can receive three kinds of app-written li
 - **Attachments.** Images arrive as image blocks after the message text. When the model can't see images (catalog says no vision) or the file is unreadable, the image becomes the line `[image attached] <name> (not sent to this model)`. Files and folders arrive as one line each, in a text block after the message text: `[attached file] <path>, <n> KiB — read it with file_read or file_find` (`<n> B` under 1 KiB; `[attached folder] <path> — …` with no size). The "— read it with …" hint is added only for agents that have the file tools (tutor, planner); Practice takes images only, and a file line replayed from an older Practice session ends after the size. `<path>` is `~/…` under home, relative to the workspace for a file inside it, and absolute elsewhere. Every message has text; an attachments-only message from an older build replays as just its images and lines. An image path is a repo path, not a document to read.
 - **View state.** When the learner interacted with an interactive figure since their last message, the latest summary per artifact (one line, ≤ 500 characters) is added after the message text and a blank line, one line per artifact sorted by id: `[view state <artifactId>] <summary>`. It is added only in the request; the stored message is what the learner typed.
 - **Mentions** are just path references; a `@` mention produces the same line as a picked file or folder (and a mentioned or picked image file is sent as an image).
+- **Linked libraries.** A library chosen with "+" on Home is a `{ kind: "library", path: <id>, name }` attachment on the first message, and reaches the model as `` [linked library] <name> (`<id>`) — search it with library_search, read it with library_read `` (the hint only for agents with the library tools). It is a link to synced text, not a folder grant.
 
 The learner's attachments are readable through `file_find` / `file_read`: home, the attached workspace and every granted path are roots. Nothing else is.
 
@@ -225,14 +231,15 @@ The learner's attachments are readable through `file_find` / `file_read`: home, 
 
 | File | Ceiling | File | Ceiling |
 |---|---|---|---|
-| `shared/voice.md` | 150 | `tutor/base.md` | 1183 |
-| `shared/accuracy.md` | 174 | `tutor/phases/measure.md` | 1595 |
-| `shared/learner-signals.md` | 406 | `tutor/phases/teach.md` | 1809 |
+| `shared/voice.md` | 150 | `tutor/base.md` | 1277 |
+| `shared/accuracy.md` | 174 | `tutor/phases/measure.md` | 1655 |
+| `shared/learner-signals.md` | 406 | `tutor/phases/teach.md` | 1969 |
 | `shared/questions.md` | 733 | `tutor/hunt.md` | 690 |
 | `shared/formatting.md` | 216 | `tutor/modes/argument.md` | 463 |
 | `shared/learner-files.md` | 228 | `tutor/modes/fact.md` | 378 |
 | `shared/workspace.md` | 122 | `tutor/modes/mechanism.md` | 460 |
-| `planner/base.md` | 2118 | `tutor/modes/perceptual.md` | 370 |
+| `shared/library.md` | 250 | | |
+| `planner/base.md` | 2403 | `tutor/modes/perceptual.md` | 370 |
 | `planner/exam.md` | 351 | `tutor/modes/procedure.md` | 483 |
 | `coach/base.md` | 1676 | `practice.md` | 326 |
 | `compaction.md` | 288 | `jobs/researcher.md` | 1021 |
@@ -243,3 +250,11 @@ The learner's attachments are readable through `file_find` / `file_read`: home, 
 Raised on 2026-11-07 for the learning-system blocks: `planner/base.md` (the `plan_ask` run-end rule, unmeasured strands), `tutor/phases/teach.md` (verbatim calibration, the field-guide breakdown), `tutor/hunt.md` (exact `lookAt` kinds), `jobs/researcher.md` (ask vs discussion venues).
 
 Raised on 2026-11-10 for answer feedback placement: `shared/voice.md` (address the learner, don't echo the screen), `shared/questions.md` (the prompt holds only the question; the `---` separator; the private verdict note), `tutor/phases/teach.md` (when a step opens with a prediction). Same day, `jobs/graph-builder.md` (already 1542 against 1070; now what is not a source of claims, and field-named topics).
+
+Raised on 2026-11-11 for graph access before planning: `tutor/phases/measure.md` (search the graph before probing, don't re-probe held nodes), `planner/base.md` (held prerequisites from the graph, reuse its ids and titles).
+
+Raised on 2026-11-11 for branch sessions (architecture §4.26): `planner/base.md` (when to split into tracks, the tracks example, the branch-only revision rule), `tutor/phases/teach.md` (the `branch` block: own track only, revision sections, the hand-off close).
+
+Raised on 2026-11-11 for learner comments: `tutor/base.md` (a comment or set-aside question comes first; `preference_add` makes how-to-teach instructions standing orders).
+
+Added on 2026-11-11 for reference libraries (architecture §4.27): `shared/library.md` at 250 (239 today; the libraries list itself is generated and not counted).
