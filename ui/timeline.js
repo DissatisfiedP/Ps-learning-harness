@@ -12,6 +12,8 @@
 //   divider           { text }                       compaction
 //   section           { sectionId, close, plan }     UI-only, from `phase` ops
 //   artifacts         { ops }                        figures with no reply block
+//   hunt              { huntId, sectionId, args, hunt }  from `hunt_send`; lifecycle from session_state
+//   debrief           { huntId, question, claims }   the `debrief` op's sorted claims
 //
 // `tl.plan` is the latest `plan` op payload; section openers take their
 // title and goal from it. `tl.lastExercise` is the newest question or choice
@@ -98,6 +100,19 @@ export function applyOp(tl, op) {
       return null;
     case 'phase':
       return applyPhase(tl, op);
+    case 'debrief': {
+      // The tutor's sorted claims (`debrief_record`), where it recorded them:
+      // after the reply text that came with the call. The hunt's question
+      // comes from its card, when the card is in the flow.
+      const hunt = tl.byKey.get(`hunt:${op.huntId}`);
+      return add(tl, {
+        kind: 'debrief',
+        key: `debrief:${op.huntId ?? op.opId}`,
+        huntId: op.huntId ?? null,
+        question: hunt?.args?.question ?? null,
+        claims: Array.isArray(op.claims) ? op.claims : [],
+      });
+    }
     case 'artifact':
       if (op.artifactId) {
         tl.artifacts.set(op.artifactId, op);

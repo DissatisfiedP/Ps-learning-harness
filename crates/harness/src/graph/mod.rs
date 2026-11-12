@@ -30,6 +30,7 @@ use crate::knowledge::{
 use crate::state::Kind;
 use crate::Error;
 
+pub mod history;
 pub mod read;
 pub mod validate;
 
@@ -168,12 +169,15 @@ pub enum GraphOp {
         missed: Option<u32>,
     },
     /// Move a node. `by: "learner"` outranks any later `by: "builder"`.
+    /// `provenance` says who moved it and when (`{"type": "learner", "at"}`).
     Place {
         op_id: String,
         at: String,
         node_id: String,
         home: String,
         by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<Value>,
     },
     /// Upsert the edge addressed by `(from, to, relation)`.
     Edge {
@@ -215,12 +219,16 @@ pub enum GraphOp {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         why: String,
     },
-    /// An accepted topic split: create the child topics and place the nodes.
+    /// An accepted topic split: create the child topics and move the topic's
+    /// own nodes into them. Accepting is the learner's act, so those moves
+    /// rank as learner placements; `provenance` is `{"type": "learner"}`.
     Split {
         op_id: String,
         at: String,
         topic: String,
         groups: Vec<SplitGroup>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<Value>,
     },
     /// Where a topic's material lives: a forum to ask, a place people discuss,
     /// a reference to read. Deduped by `(topicId, name)`, last writer wins.
@@ -351,9 +359,12 @@ impl GraphOp {
         self
     }
 
+    /// A placement by `by` (`learner` or `builder`), stamped with a
+    /// provenance of that type.
     pub fn place(node_id: &str, home: &str, by: &str) -> Self {
         let (op_id, at) = stamp();
         GraphOp::Place {
+            provenance: Some(provenance(by, None, &at)),
             op_id,
             at,
             node_id: node_id.trim().to_owned(),
@@ -422,9 +433,11 @@ impl GraphOp {
         }
     }
 
+    /// The split the learner accepted.
     pub fn split(topic: &str, groups: Vec<SplitGroup>) -> Self {
         let (op_id, at) = stamp();
         GraphOp::Split {
+            provenance: Some(provenance("learner", None, &at)),
             op_id,
             at,
             topic: topic.trim().to_owned(),
@@ -856,9 +869,16 @@ pub fn fold(ops: &[GraphOp]) -> KnowledgeMap {
                         title: title.to_owned(),
                         parent: Some(topic.clone()),
                     });
+                    // Only the topic's own nodes move: one the learner placed
+                    // elsewhere since the proposal stays where they put it.
+                    // The moves are the learner's (they accepted the split),
+                    // so a later builder upsert cannot undo them.
                     for node_id in &group.node_ids {
                         if let Some(&i) = node_at.get(node_id) {
-                            rows[i].node.home = id.clone();
+                            if rows[i].node.home == *topic {
+                                rows[i].node.home = id.clone();
+                                rows[i].learner_home = true;
+                            }
                         }
                     }
                 }
@@ -1587,12 +1607,16 @@ pub struct SplitDecision {
     pub remaining: usize,
 }
 
-/// Accept or dismiss proposed splits. Accepting appends a `split` op; the
-/// proposal file is rewritten either way.
+/// Accept or dismiss proposed splits. Accepting appends a `split` op (with
+/// learner provenance); the proposal file is rewritten either way. `titles`
+/// renames an accepted proposal's groups, by topic and group index: the
+/// names are suggestions until the learner accepts them, and a blank or
+/// missing entry keeps the proposed name.
 pub fn decide_splits(
     repo: &Path,
     accept: &[String],
     dismiss: &[String],
+    titles: &HashMap<String, Vec<String>>,
 ) -> Result<SplitDecision, Error> {
     let map = crate::knowledge::load(repo)?;
     let mut file = read_split_file(repo);
@@ -1603,7 +1627,13 @@ pub fn decide_splits(
     for topic in accept {
         match file.proposals.iter().position(|p| &p.topic == topic) {
             Some(i) => {
-                let proposal = file.proposals.remove(i);
+                let mut proposal = file.proposals.remove(i);
+                let names = titles.get(topic).map(Vec::as_slice).unwrap_or(&[]);
+                for (group, name) in proposal.groups.iter_mut().zip(names) {
+                    if !name.trim().is_empty() {
+                        group.title = name.trim().to_owned();
+                    }
+                }
                 ops.push(GraphOp::split(&proposal.topic, proposal.groups));
                 out.accepted.push(topic.clone());
             }
@@ -1641,6 +1671,53 @@ pub fn decide_splits(
     out.remaining = file.proposals.len();
     write_split_file(repo, &file)?;
     Ok(out)
+}
+
+/// What `place_node` did: the idea (its canonical id) and the two homes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Placed {
+    pub node_id: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// The learner moved an idea to another topic (arch §4.5 "learner-
+/// overridable"): one `place` op `by: "learner"` with learner provenance,
+/// which outranks every later builder placement or node upsert. An alias
+/// moves the node it folds into. Refused for an unknown or tombstoned idea,
+/// an unknown topic, or the topic the idea already lives in.
+pub fn place_node(repo: &Path, node_id: &str, home: &str) -> Result<Placed, Error> {
+    let (node_id, home) = (node_id.trim(), home.trim());
+    let map = crate::knowledge::load(repo)?;
+    if map.is_tombstoned(node_id) {
+        return Err(Error::Invalid(format!(
+            "idea `{node_id}` was removed from the map"
+        )));
+    }
+    let Some(node) = map.node(node_id) else {
+        return Err(Error::Invalid(format!(
+            "there is no idea `{node_id}` on the map"
+        )));
+    };
+    if !map.topics.iter().any(|t| t.id == home) {
+        return Err(Error::Invalid(format!(
+            "there is no topic `{home}` on the map"
+        )));
+    }
+    if node.home == home {
+        return Err(Error::Invalid(format!(
+            "`{}` is already in that topic",
+            node.title
+        )));
+    }
+    let placed = Placed {
+        node_id: node.id.clone(),
+        from: node.home.clone(),
+        to: home.to_owned(),
+    };
+    append(repo, &[GraphOp::place(&node.id, home, "learner")])?;
+    Ok(placed)
 }
 
 #[cfg(test)]
@@ -1949,7 +2026,7 @@ mod tests {
         assert_eq!(read_split_file(&repo).proposals.len(), 1);
 
         // Dismissing it stops it being proposed while the node count holds.
-        let out = decide_splits(&repo, &[], &["big".to_owned()]).unwrap();
+        let out = decide_splits(&repo, &[], &["big".to_owned()], &HashMap::new()).unwrap();
         assert_eq!(out.dismissed, ["big"]);
         assert!(splits(&repo).unwrap().is_empty());
         assert_eq!(read_split_file(&repo).dismissed[0].nodes, 34);
@@ -1981,7 +2058,7 @@ mod tests {
         big_topic(&repo, 34);
         let proposals = splits(&repo).unwrap();
         assert_eq!(proposals.len(), 1);
-        let out = decide_splits(&repo, &["big".to_owned()], &[]).unwrap();
+        let out = decide_splits(&repo, &["big".to_owned()], &[], &HashMap::new()).unwrap();
         assert_eq!(out.accepted, ["big"]);
         assert_eq!(out.remaining, 0);
         let map = crate::knowledge::load(&repo).unwrap();
@@ -2000,8 +2077,124 @@ mod tests {
         assert!(ops.contains(r#""op":"split""#), "{ops}");
 
         // Deciding a topic with no proposal is a readable error.
-        let err = decide_splits(&repo, &["big".to_owned()], &[]).unwrap_err();
+        let err = decide_splits(&repo, &["big".to_owned()], &[], &HashMap::new()).unwrap_err();
         assert!(err.to_string().contains("no split is proposed"), "{err}");
+    }
+
+    #[test]
+    fn an_accepted_split_takes_the_learners_names_and_holds_against_the_builder() {
+        let repo = temp("split-rank");
+        big_topic(&repo, 34);
+        let proposal = splits(&repo).unwrap().remove(0);
+        let moved_away = proposal.groups[1].node_ids[0].clone();
+        // The learner moves one of the proposal's nodes elsewhere first.
+        append(&repo, &[GraphOp::topic("other", "Other", None)]).unwrap();
+        place_node(&repo, &moved_away, "other").unwrap();
+
+        let titles = HashMap::from([(
+            "big".to_owned(),
+            vec!["Sequences".to_owned(), "  ".to_owned()],
+        )]);
+        decide_splits(&repo, &["big".to_owned()], &[], &titles).unwrap();
+        let map = crate::knowledge::load(&repo).unwrap();
+        let child = |title: &str| {
+            map.topics
+                .iter()
+                .find(|t| t.title == title)
+                .map(|t| t.id.clone())
+        };
+        let first = child("Sequences").expect("the learner's name");
+        let second = child(&proposal.groups[1].title).expect("a blank name keeps the proposal's");
+        let first_node = &proposal.groups[0].node_ids[0];
+        assert_eq!(map.node(first_node).unwrap().home, first);
+        assert_eq!(
+            map.node(&moved_away).unwrap().home,
+            "other",
+            "a node the learner placed elsewhere stays"
+        );
+        assert_eq!(
+            map.node(&proposal.groups[1].node_ids[1]).unwrap().home,
+            second
+        );
+        let ops = std::fs::read_to_string(repo.join(OPS)).unwrap();
+        let split = ops.lines().find(|l| l.contains(r#""op":"split""#)).unwrap();
+        assert!(split.contains(r#""type":"learner""#), "{split}");
+
+        // The builder re-submitting the node with its old home can't undo it.
+        append(
+            &repo,
+            &[GraphOp::node(
+                first_node,
+                None,
+                "claim",
+                Kind::Fact,
+                "big",
+                None,
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::knowledge::load(&repo)
+                .unwrap()
+                .node(first_node)
+                .unwrap()
+                .home,
+            first
+        );
+    }
+
+    #[test]
+    fn the_learner_places_an_idea_and_the_builder_cannot_move_it_back() {
+        let repo = temp("place");
+        append(&repo, &base()).unwrap();
+        append(
+            &repo,
+            &[
+                GraphOp::node("a2", Some("A again"), "a holds", Kind::Fact, "t", None),
+                GraphOp::same_as("a", "a2"),
+            ],
+        )
+        .unwrap();
+
+        // An alias moves the idea it folds into.
+        let placed = place_node(&repo, "a2", "t2").unwrap();
+        assert_eq!(
+            (
+                placed.node_id.as_str(),
+                placed.from.as_str(),
+                placed.to.as_str()
+            ),
+            ("a", "t", "t2")
+        );
+        let ops = std::fs::read_to_string(repo.join(OPS)).unwrap();
+        let line = ops.lines().last().unwrap();
+        let op: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(op["op"], "place");
+        assert_eq!(op["by"], "learner");
+        assert_eq!(op["provenance"]["type"], "learner");
+        append(
+            &repo,
+            &[
+                GraphOp::node("a", None, "a holds", Kind::Fact, "t", None),
+                GraphOp::place("a", "t", "builder"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::knowledge::load(&repo)
+                .unwrap()
+                .node("a")
+                .unwrap()
+                .home,
+            "t2"
+        );
+
+        let err = |id: &str, home: &str| place_node(&repo, id, home).unwrap_err().to_string();
+        assert!(err("ghost", "t").contains("no idea `ghost`"));
+        assert!(err("a", "nowhere").contains("no topic `nowhere`"));
+        assert!(err("a", "t2").contains("already in that topic"));
+        append(&repo, &[GraphOp::tombstone("b", "wrong")]).unwrap();
+        assert!(err("b", "t2").contains("removed"));
     }
 
     #[test]

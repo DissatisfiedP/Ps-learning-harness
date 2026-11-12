@@ -448,13 +448,52 @@ impl Harness {
     }
 
     /// Accept and/or dismiss proposed topic splits. Accepting appends a
-    /// `split` op per topic; either way the proposal file is rewritten.
+    /// `split` op per topic, with the learner's names for its groups where
+    /// they gave one (`titles`: topic → name per group); either way the
+    /// proposal file is rewritten.
     pub fn decide_splits(
         &self,
         accept: &[String],
         dismiss: &[String],
+        titles: &HashMap<String, Vec<String>>,
     ) -> Result<graph::SplitDecision, Error> {
-        graph::decide_splits(&self.repo, accept, dismiss)
+        graph::decide_splits(&self.repo, accept, dismiss, titles)
+    }
+
+    /// The learner dragged an idea to another topic on the Map: one `place`
+    /// op `by: "learner"`, which outranks every later builder placement
+    /// (architecture §4.5).
+    pub fn place_node(&self, node_id: &str, home: &str) -> Result<graph::Placed, Error> {
+        graph::place_node(&self.repo, node_id, home)
+    }
+
+    /// Where an idea came from, for the Map's card (architecture §4.4): every
+    /// op that created, updated, moved, split or merged it, with the title of
+    /// each session its provenance names (when the session still exists).
+    pub fn node_provenance(&self, node_id: &str) -> Result<graph::history::NodeHistory, Error> {
+        let mut history = graph::history::node_history(&self.repo, node_id)?;
+        let named = history.events.iter().any(|e| {
+            e.provenance
+                .as_ref()
+                .is_some_and(|p| p.get("sessionId").is_some())
+        });
+        if named {
+            let titles: HashMap<String, String> = self
+                .store
+                .list()?
+                .into_iter()
+                .map(|s| (s.id, s.title))
+                .collect();
+            for event in &mut history.events {
+                let sid = event
+                    .provenance
+                    .as_ref()
+                    .and_then(|p| p.get("sessionId"))
+                    .and_then(serde_json::Value::as_str);
+                event.session_title = sid.and_then(|s| titles.get(s)).cloned();
+            }
+        }
+        Ok(history)
     }
 
     /// Practice mode: appends the learner's message (creating the session

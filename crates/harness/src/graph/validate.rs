@@ -280,10 +280,7 @@ pub fn check(
             }
         }
         node_ids.insert(id.to_owned());
-        let proven = n
-            .provenance
-            .clone()
-            .unwrap_or_else(|| default_provenance.clone());
+        let proven = stamped(n.provenance.as_ref(), &default_provenance);
         ops.push(
             GraphOp::node(
                 id,
@@ -371,10 +368,7 @@ pub fn check(
             }
             deps.push((from.to_owned(), to.to_owned()));
         }
-        let proven = e
-            .provenance
-            .clone()
-            .unwrap_or_else(|| default_provenance.clone());
+        let proven = stamped(e.provenance.as_ref(), &default_provenance);
         ops.push(GraphOp::edge(
             from,
             to,
@@ -610,6 +604,27 @@ fn provenance_problem(p: &Value) -> Option<String> {
     }
 }
 
+/// The model's provenance with what the run knows filled in: a submission
+/// that says only `{"type": "hunt"}` still names the session it came from and
+/// when, so the Map can link the claim back to that session. Fields the model
+/// set are kept; no provenance at all is the run's own (`builder`).
+fn stamped(submitted: Option<&Value>, default: &Value) -> Value {
+    let Some(Value::Object(fields)) = submitted else {
+        return default.clone();
+    };
+    let mut out = fields.clone();
+    if let Value::Object(base) = default {
+        for key in ["sessionId", "at"] {
+            if let Some(v) = base.get(key) {
+                if !out.contains_key(key) {
+                    out.insert(key.to_owned(), v.clone());
+                }
+            }
+        }
+    }
+    Value::Object(out)
+}
+
 /// Whether `from` can already reach `to` through `requires` edges — the cycle
 /// test. `contrasts`, `supports` and `attacks` claim no order and are never
 /// passed in.
@@ -735,6 +750,25 @@ mod tests {
             AT,
         );
         assert!(refused.is_err());
+    }
+
+    #[test]
+    fn a_submitted_provenance_keeps_its_fields_and_gains_the_session() {
+        let batch = accepted(json!({
+            "nodes": [{"nodeId": "c", "statement": "c holds", "kind": "fact", "home": "t",
+                "provenance": {"type": "hunt", "huntId": "h1", "quote": "c holds, says the forum"}}],
+        }));
+        let GraphOp::Node {
+            provenance: Some(p),
+            ..
+        } = &batch.ops[0]
+        else {
+            panic!("{:?}", batch.ops);
+        };
+        assert_eq!(p["type"], "hunt", "the model's type wins");
+        assert_eq!(p["quote"], "c holds, says the forum");
+        assert_eq!(p["sessionId"], "s1", "the run's session fills the gap");
+        assert_eq!(p["at"], AT);
     }
 
     #[test]

@@ -867,14 +867,385 @@ function plannerQuestionBlock(question, edits, onAnswerQuestion) {
 }
 
 /**
+ * A plan's structured controls (ui-design §7.7.1), shared by the plan card
+ * (approval) and the plan sheet (teaching): the plan-level "⋯" (Depth,
+ * Explore, Sitting, Style), each box's "⋯" and the side drawer it opens with
+ * the section's description and its actions (Tools, How far, Include, the
+ * parts already known, Hunt, a note). Every action writes into `edits` (the
+ * session's `s.planEdits`) and calls `onEdit({ figure })`; the surface owns
+ * the action row that sends them as one `edit_plan`. The hunt toggle is its
+ * own immediate `set_hunt`.
+ *
+ * `teaching` turns on the sections' progress: boxes say "Current"/"Done",
+ * and a finished section's drawer offers no edits (there is nothing left to
+ * change about it; "Change plan" can still ask to revisit it).
+ */
+function createPlanEditor(plan, {
+  edits,
+  state = null,
+  teaching = false,
+  knownRefuted = [],
+  installed = new Set(),
+  labels = new Map(),
+  onHuntToggle,
+  onInstall = null,
+  onEdit,
+  onError,
+}) {
+  const refuted = new Set(knownRefuted ?? []);
+  const sections = plan.sections ?? [];
+  const nodes = new Map((plan.nodes ?? []).map((n) => [n.id, n]));
+  const sectionById = new Map(sections.map((s) => [s.id, s]));
+  const { sectionStatus } = progressOf(state);
+  const boxStatus = (id) => (teaching ? sectionStatus(id) : 'open');
+  const drawerId = nextId('drawer');
+  let openSectionId = edits.drawer ?? null;
+
+  const drawer = h('aside', 'plan-node-drawer');
+  drawer.id = drawerId;
+  drawer.hidden = true;
+  drawer.tabIndex = -1;
+
+  // ---- plan-level controls ----
+  const setPlan = (key, value) => {
+    if (value === undefined || value === null) delete edits.plan[key];
+    else edits.plan[key] = value;
+    onEdit({});
+  };
+  const planOptions = optionsDisclosure({
+    label: 'Plan options',
+    open: edits.open.has('plan'),
+    onToggle: (open) => (open ? edits.open.add('plan') : edits.open.delete('plan')),
+    controls: [
+      choiceRows('Depth', nextId('plan-depth'), DEPTH_CHOICES, edits.plan.depth ?? plan.depth ?? '', (v) => setPlan('depth', v)),
+      choiceRows('Explore', nextId('plan-explore'), EXPLORE_CHOICES, edits.plan.explore ?? plan.explore ?? '', (v) => setPlan('explore', v)),
+      minutesField(edits.plan.minutesPerSitting ?? plan.minutesPerSitting, (v) => setPlan('minutesPerSitting', v)),
+      choiceRows('Style', nextId('plan-style'), STYLE_CHOICES, edits.plan.style ?? plan.style ?? '', (v) => setPlan('style', v)),
+    ],
+  });
+
+  /**
+   * What a box draws beyond its title: its section's state in words, and the
+   * "⋯" that opens this drawer (plan-diagram.js places and announces it).
+   * Nothing is "current" while the plan is still a proposal.
+   */
+  function annotate(id) {
+    const section = sectionById.get(id);
+    if (!section) return null;
+    const known = Boolean(section.assumedKnown) && !refuted.has(id);
+    return {
+      known,
+      badges: sectionBadges(section, edits.sections[id] ?? {}, { status: boxStatus(id), known }),
+      action: {
+        label: `Details and options for ${section.title ?? id}`,
+        controls: drawerId,
+        expanded: openSectionId === id,
+      },
+    };
+  }
+
+  // The "⋯"s that control this drawer, wherever they are drawn.
+  const actionEls = () => [...document.querySelectorAll(`.plan-node-action[aria-controls="${drawerId}"]`)];
+  const actionEl = (id) => actionEls().find((a) => a.dataset.sectionId === id) ?? null;
+
+  /** `aria-expanded` follows the one open drawer. */
+  function syncExpanded() {
+    for (const act of actionEls()) act.setAttribute('aria-expanded', String(act.dataset.sectionId === openSectionId));
+  }
+
+  function closeDrawer({ restore = false, focus = null } = {}) {
+    if (openSectionId === null) return;
+    const opener = focus ?? (restore ? actionEl(openSectionId) : null);
+    openSectionId = null;
+    edits.drawer = null;
+    drawer.hidden = true;
+    drawer.replaceChildren();
+    drawer.removeAttribute('aria-labelledby');
+    syncExpanded();
+    opener?.focus?.({ preventScroll: true });
+  }
+
+  let returnTo = null; // a control outside the diagram that opened the drawer
+  function openDrawer(id, { from = null } = {}) {
+    if (openSectionId === id) {
+      closeDrawer({ restore: true, focus: from ?? returnTo });
+      return;
+    }
+    const section = sectionById.get(id);
+    if (!section) return;
+    openSectionId = id;
+    edits.drawer = id;
+    returnTo = from;
+    fillDrawer(section);
+    drawer.hidden = false;
+    syncExpanded();
+    // Focus lands in the drawer but is never trapped there (§9.1): Tab walks
+    // out the way it came and Escape puts focus back on what opened it.
+    drawer.querySelector('.plan-node-drawer-title')?.focus({ preventScroll: true });
+  }
+
+  function wireAction(act) {
+    const id = act.dataset.sectionId;
+    act.addEventListener('click', () => openDrawer(id));
+    act.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        openDrawer(id);
+      }
+    });
+  }
+
+  /** Wires the "⋯"s of a freshly drawn diagram. */
+  function wire(svg) {
+    for (const act of svg.querySelectorAll('.plan-node-action')) wireAction(act);
+  }
+
+  /** Everything the old card's section block said, and every control it had. */
+  function fillDrawer(section) {
+    const edit = (edits.sections[section.id] ??= {});
+    const head = h('div', 'plan-node-drawer-head');
+    const heading = h('h3', 'plan-node-drawer-title', section.title ?? section.id);
+    heading.id = `${drawerId}-title`;
+    heading.tabIndex = -1;
+    drawer.setAttribute('aria-labelledby', heading.id);
+    const close = button('Close', 'text plan-node-drawer-close');
+    close.setAttribute('aria-label', 'Close section details');
+    close.addEventListener('click', () => closeDrawer({ restore: true, focus: returnTo }));
+    head.append(heading, close);
+
+    const body = h('div', 'plan-node-drawer-body');
+    const how = [capitalize(section.mode), section.style].filter(Boolean).join(' · ');
+    const aim = section.targetLevel ? `Aim: ${levelLabel(section.targetLevel)}` : '';
+    if (how || aim) body.append(h('p', 'plan-meta', [how, aim].filter(Boolean).join(' · ')));
+    if (section.exit) body.append(h('p', 'plan-line', `Goal: ${section.exit}`));
+    const covers = coversLine(section, nodes);
+    if (covers) body.append(h('p', 'plan-line', covers));
+    if ((section.notes ?? '').trim()) body.append(prose(section.notes, 'prose plan-node-notes'));
+    if (Boolean(section.assumedKnown) && !refuted.has(section.id)) {
+      body.append(h('p', 'plan-line known-line', 'You said you know this. One quick check when we get here.'));
+    }
+    if (section.desktopOnly) body.append(h('p', 'plan-line', 'Desktop only'));
+    if (section.revision) {
+      body.append(h('p', 'plan-line', 'Revision: a short re-check of ideas from the tracks that merge here, before this track goes on.'));
+    }
+    if (boxStatus(section.id) === 'done') {
+      body.append(h('p', 'plan-line', 'Done. To go back over it, use “Change plan”.'));
+    } else {
+      body.append(...sectionControls(section, edit));
+    }
+    drawer.replaceChildren(head, body);
+  }
+
+  /** The section's actions, exactly as the card has always offered them. */
+  function sectionControls(section, edit) {
+    const controls = [];
+    if (section.plugins?.length) {
+      const fs = h('fieldset', 'tools');
+      const legend = h('legend', '');
+      legend.innerHTML = `Tools<span class="sr-only"> for ${escapeHtml(section.title ?? section.id)}</span>`;
+      fs.append(legend);
+      // `needsInstall` (W9) is the code-computed set of plugins the planner
+      // proposed that weren't installed at plan_write — all registry-
+      // installable and on this platform. The live `installed` set wins for a
+      // plugin installed since the plan was written (it becomes a checkbox);
+      // the field tells the card which missing plugins are install offers, so
+      // a stale or foreign missing id is still shown but never offered as one.
+      const proposed = new Set(section.needsInstall ?? []);
+      const boxes = [];
+      for (const plugin of section.plugins) {
+        const label = labels.get(plugin) || plugin;
+        if (!installed.has(plugin)) {
+          const missing = h('span', 'tool missing');
+          if (onInstall && (proposed.has(plugin) || section.needsInstall == null)) {
+            // Offer consent; never install as a side effect of approving (W9).
+            const chip = button(`${label} — install`, 'text install-chip');
+            chip.addEventListener('click', () => onInstall(plugin, chip));
+            missing.append(chip);
+          } else {
+            missing.append(h('span', 'plan-line', `${label} — not installed`));
+          }
+          fs.append(missing);
+          continue;
+        }
+        const kept = edit.plugins ?? section.plugins;
+        const l = h('label', 'tool');
+        const c = h('input');
+        c.type = 'checkbox';
+        c.value = plugin;
+        c.checked = kept.includes(plugin);
+        c.addEventListener('change', () => {
+          const next = boxes.filter((b) => b.checked).map((b) => b.value);
+          const same = next.length === section.plugins.filter((p) => installed.has(p)).length;
+          if (same) delete edit.plugins;
+          else edit.plugins = next;
+          onEdit({ figure: true });
+        });
+        l.append(c, h('span', '', label));
+        boxes.push(c);
+        fs.append(l);
+      }
+      controls.push(fs);
+      if (!teaching && section.plugins.some((p) => !installed.has(p))) {
+        controls.push(h('p', 'plan-line', 'Not installed: skipped if approved.'));
+      }
+    }
+    controls.push(
+      choiceRows('How far', nextId(`sec-level-${section.id}`), LEVELS, edit.targetLevel ?? section.targetLevel ?? '', (v) => {
+        edit.targetLevel = v;
+        onEdit({ figure: true });
+      }),
+      choiceRows(
+        'Include',
+        nextId(`sec-keep-${section.id}`),
+        [['keep', 'Keep'], ['drop', "Don't need this"]],
+        edit.keep === false ? 'drop' : 'keep',
+        (v) => {
+          if (v === 'drop') edit.keep = false;
+          else delete edit.keep;
+          onEdit({ figure: true });
+        },
+      ),
+    );
+    const known = textareaField('Parts I already know…', {
+      rows: 2,
+      value: edit.knownNote ?? section.knownNote ?? '',
+      placeholder: 'e.g. I already know KVL, just not loaded dividers.',
+    });
+    known.input.addEventListener('input', () => {
+      if (known.input.value.trim()) edit.knownNote = known.input.value;
+      else delete edit.knownNote;
+      onEdit({});
+    });
+    controls.push(known.wrap);
+    if (section.hunt?.available) {
+      const huntWrap = h('div', 'field');
+      const label = h('label', 'tool');
+      const c = h('input');
+      c.type = 'checkbox';
+      c.checked = edit.hunt === undefined ? Boolean(section.hunt.enabled) : edit.hunt;
+      c.addEventListener('change', () => {
+        edit.hunt = c.checked;
+        onEdit({ figure: true });
+        // The learner's toggle is immediate: one op, no planner round trip.
+        Promise.resolve(onHuntToggle?.(section.id, c.checked)).catch((err) => onError(err));
+      });
+      label.append(c, h('span', '', 'Hunt'));
+      const why = h('p', 'help', section.hunt.reason || 'Find something out for yourself before this section.');
+      huntWrap.append(label, why);
+      controls.push(huntWrap);
+    }
+    const note = textareaField('Note for the planner', {
+      rows: 2,
+      value: edit.learnerNote ?? section.learnerNote ?? '',
+      placeholder: 'Anything else the planner should know.',
+    });
+    note.input.addEventListener('input', () => {
+      if (note.input.value.trim()) edit.learnerNote = note.input.value;
+      else delete edit.learnerNote;
+      onEdit({});
+    });
+    controls.push(note.wrap);
+    return controls;
+  }
+
+  /** Escape closes the drawer from anywhere in `scope`; nothing holds focus (§9.1). */
+  function closeOnEscape(scope) {
+    scope.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && openSectionId !== null) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeDrawer({ restore: true, focus: returnTo });
+      }
+    });
+  }
+
+  /**
+   * A surface rebuilt under an open drawer (a state refresh, a plan
+   * revision) keeps it open on the same section — the learner did not change
+   * sections.
+   */
+  function restore() {
+    if (openSectionId === null) return;
+    const section = sectionById.get(openSectionId);
+    if (section) {
+      fillDrawer(section);
+      drawer.hidden = false;
+      syncExpanded();
+    } else {
+      openSectionId = null;
+      edits.drawer = null;
+    }
+  }
+
+  /** Clears the collected edits after they were sent (or discarded). */
+  function reset() {
+    edits.plan = {};
+    for (const edit of Object.values(edits.sections)) for (const k of Object.keys(edit)) delete edit[k];
+    edits.comment = '';
+  }
+
+  return { drawer, annotate, wire, openDrawer, closeOnEscape, restore, reset, planOptions, boxStatus };
+}
+
+/**
+ * The pending-edit row shared by the card and the sheet (§7.7.1): an optional
+ * "Comment for the planner", the primary "Send changes", "Discard" and a
+ * status line. `refresh()` shows it only while something is pending.
+ */
+function editRow({ edits, editor, onSendEdits, onDiscard, onSent }) {
+  const noteField = textareaField('Comment for the planner', {
+    rows: 2,
+    placeholder: 'Optional.',
+    value: edits.comment ?? '',
+  });
+  const send = button('Send changes', 'primary');
+  send.hidden = true;
+  const discard = button('Discard', 'text');
+  discard.hidden = true;
+  const status = statusLine();
+  status.el.id = nextId('plan-edit-status');
+  send.setAttribute('aria-describedby', status.el.id);
+  noteField.input.addEventListener('input', () => {
+    edits.comment = noteField.input.value;
+  });
+  send.addEventListener('click', async () => {
+    if (!hasPlanEdits(edits)) return;
+    const payload = planEditsPayload(edits);
+    send.disabled = true;
+    discard.disabled = true;
+    status.set('Sending…');
+    try {
+      await onSendEdits(payload, (edits.comment ?? '').trim());
+      editor.reset();
+      noteField.input.value = '';
+      discard.disabled = false;
+      onSent?.();
+      status.set('Sent. Revising the plan…');
+    } catch (err) {
+      send.disabled = false;
+      discard.disabled = false;
+      status.set(String(err), true);
+    }
+  });
+  discard.addEventListener('click', () => {
+    editor.reset();
+    noteField.input.value = '';
+    // The surface is rebuilt so every control shows the plan's own values
+    // again (the collected edits are gone).
+    onDiscard?.();
+  });
+  return { noteField, send, discard, status };
+}
+
+/**
  * The plan card, flowchart first (ui-design §7.2.9, §7.7.1–§7.7.3). Owner
  * direction, 2026-11-07: the diagram *is* the card — the long reading list of
  * editable section blocks is gone. Each box carries its section's state as a
  * line of badges and a "⋯" inside its own corner; that opens the side drawer
- * with the section's description and the actions (How far, Include, the parts
- * already known, Tools, Hunt, a note). Every action writes into `edits`, sent
- * as one `edit_plan` by "Send changes"; the hunt toggle is its own `set_hunt`;
- * Approve is disabled while anything is pending.
+ * with the section's description and the actions (createPlanEditor). Every
+ * action writes into `edits`, sent as one `edit_plan` by "Send changes"; the
+ * hunt toggle is its own `set_hunt`; Approve is disabled while anything is
+ * pending.
  */
 export function planCard(plan, {
   edits,
@@ -913,63 +1284,40 @@ export function planCard(plan, {
   title.id = headId;
   title.tabIndex = -1;
 
-  const refuted = new Set(knownRefuted ?? []);
   const sections = plan.sections ?? [];
-  const nodes = new Map((plan.nodes ?? []).map((n) => [n.id, n]));
-  const sectionById = new Map(sections.map((s) => [s.id, s]));
-  const { sectionStatus, nodeStatus } = progressOf(state);
-  const drawerId = nextId('drawer');
-  let openSectionId = edits.drawer ?? null;
-
-  const noteField = textareaField('Comment for the planner', {
-    rows: 2,
-    placeholder: 'Optional.',
-    value: edits.comment ?? '',
-  });
-  noteField.input.addEventListener('input', () => {
-    edits.comment = noteField.input.value;
-    refresh();
+  // Nothing is "current" or "done" while the plan is still a proposal: the
+  // boxes show the plan's own state, not where teaching would start.
+  const teaching = Boolean(state) && state.phase !== 'awaitApproval' && state.phase !== 'plan' && state.phase !== 'measure';
+  const editor = createPlanEditor(plan, {
+    edits,
+    state,
+    teaching,
+    knownRefuted,
+    installed,
+    labels,
+    onHuntToggle,
+    onInstall,
+    onEdit: ({ figure = false }) => refresh({ figure }),
+    onError: (err) => row.status.set(String(err), true),
   });
 
   const actions = h('div', 'actions');
   const approve = button('Approve plan', 'primary');
   // One primary action at a time: "Send changes" carries the click while edits
   // are pending, and Approve stays visible but disabled until they are gone.
-  const send = button('Send changes', 'primary');
-  send.hidden = true;
-  const discard = button('Discard', 'text');
-  discard.hidden = true;
+  const row = editRow({ edits, editor, onSendEdits, onDiscard, onSent: () => refresh({ figure: true }) });
+  row.status.el.id = 'plan-edit-status';
+  row.send.setAttribute('aria-describedby', 'plan-edit-status');
   const change = changeDisclosure('Suggest a change', 'text', { formOpen, draft, onDraft, onFormOpen, onRequest });
-  actions.append(approve, send, discard, change.reveal);
-  const status = statusLine();
-  status.el.id = 'plan-edit-status';
+  actions.append(approve, row.send, row.discard, change.reveal);
   approve.setAttribute('aria-describedby', 'plan-edit-status');
-  send.setAttribute('aria-describedby', 'plan-edit-status');
+  row.noteField.input.addEventListener('input', () => refresh());
 
   const questionPending = Boolean(question) && edits.answered == null;
 
-
-  // ---- plan-level controls ----
-  const setPlan = (key, value) => {
-    if (value === undefined || value === null) delete edits.plan[key];
-    else edits.plan[key] = value;
-    refresh();
-  };
-  const planControls = optionsDisclosure({
-    label: 'Plan options',
-    open: edits.open.has('plan'),
-    onToggle: (open) => (open ? edits.open.add('plan') : edits.open.delete('plan')),
-    controls: [
-      choiceRows('Depth', 'plan-depth', DEPTH_CHOICES, edits.plan.depth ?? plan.depth ?? '', (v) => setPlan('depth', v)),
-      choiceRows('Explore', 'plan-explore', EXPLORE_CHOICES, edits.plan.explore ?? plan.explore ?? '', (v) => setPlan('explore', v)),
-      minutesField(edits.plan.minutesPerSitting ?? plan.minutesPerSitting, (v) => setPlan('minutesPerSitting', v)),
-      choiceRows('Style', 'plan-style', STYLE_CHOICES, edits.plan.style ?? plan.style ?? '', (v) => setPlan('style', v)),
-    ],
-  });
-
   const headRow = h('div', 'plan-row');
-  headRow.append(title, planControls.wrap);
-  doc.append(headRow, planControls.panel);
+  headRow.append(title, editor.planOptions.wrap);
+  doc.append(headRow, editor.planOptions.panel);
   if (plan.approach) doc.append(prose(plan.approach));
   if (question) doc.append(plannerQuestionBlock(question, edits, onAnswerQuestion));
 
@@ -990,39 +1338,10 @@ export function planCard(plan, {
   fig.hidden = !sections.length;
   doc.append(fig);
   if (tracks && sections.length) doc.append(trackList(plan, { own: state?.branch?.track ?? null }));
-
-  // ---- the drawer: one section's long description and its actions ----
-  const drawer = h('aside', 'plan-node-drawer');
-  drawer.id = drawerId;
-  drawer.hidden = true;
-  drawer.tabIndex = -1;
-  doc.append(drawer);
-
-  /**
-   * What a box draws beyond its title: its section's state in words, and the
-   * "⋯" that opens this drawer (plan-diagram.js places and announces it).
-   * Nothing is "current" while the plan is still a proposal.
-   */
-  function annotate(id) {
-    const section = sectionById.get(id);
-    if (!section) return null;
-    const known = Boolean(section.assumedKnown) && !refuted.has(id);
-    return {
-      known,
-      badges: sectionBadges(section, edits.sections[id] ?? {}, { status: boxStatus(id), known }),
-      action: {
-        label: `Details and options for ${section.title ?? id}`,
-        controls: drawerId,
-        expanded: openSectionId === id,
-      },
-    };
-  }
+  doc.append(editor.drawer);
 
   let drawnWidth = 0;
-  // Nothing is "current" or "done" while the plan is still a proposal: the
-  // boxes show the plan's own state, not where teaching would start.
-  const teaching = Boolean(state) && state.phase !== 'awaitApproval' && state.phase !== 'plan' && state.phase !== 'measure';
-  const boxStatus = (id) => (teaching ? sectionStatus(id) : 'open');
+  const { nodeStatus } = progressOf(state);
 
   /** Lays the diagram out at the card's own width and wires its "⋯"s. */
   function draw() {
@@ -1035,15 +1354,15 @@ export function planCard(plan, {
       // than the sheet's overview (ui-design §7.2.9).
       scale: 1.3,
       maxW: width,
-      sectionStatus: boxStatus,
+      sectionStatus: editor.boxStatus,
       nodeStatus,
-      annotate,
+      annotate: editor.annotate,
       track: state?.branch?.track ?? null,
     });
     svg.setAttribute('width', String(Math.round(artW)));
     svg.setAttribute('height', String(Math.round(artH)));
     frame.replaceChildren(svg);
-    for (const act of svg.querySelectorAll('.plan-node-action')) wireAction(act);
+    editor.wire(svg);
     drawnWidth = Math.round(frame.clientWidth || width);
   }
 
@@ -1062,210 +1381,8 @@ export function planCard(plan, {
     ro.observe(frame);
   }
 
-  const actionEl = (id) =>
-    [...doc.querySelectorAll('.plan-node-action')].find((a) => a.dataset.sectionId === id) ?? null;
-
-  /** `aria-expanded` follows the one open drawer. */
-  function syncExpanded() {
-    for (const act of doc.querySelectorAll('.plan-node-action')) {
-      act.setAttribute('aria-expanded', String(act.dataset.sectionId === openSectionId));
-    }
-  }
-
-  function closeDrawer({ restore = false } = {}) {
-    if (openSectionId === null) return;
-    const opener = restore ? actionEl(openSectionId) : null;
-    openSectionId = null;
-    edits.drawer = null;
-    drawer.hidden = true;
-    drawer.replaceChildren();
-    drawer.removeAttribute('aria-labelledby');
-    syncExpanded();
-    opener?.focus?.({ preventScroll: true });
-  }
-
-  function openDrawer(id) {
-    if (openSectionId === id) {
-      closeDrawer({ restore: true });
-      return;
-    }
-    const section = sectionById.get(id);
-    if (!section) return;
-    openSectionId = id;
-    edits.drawer = id;
-    fillDrawer(section);
-    drawer.hidden = false;
-    syncExpanded();
-    // Focus lands in the drawer but is never trapped there (§9.1): Tab walks
-    // out the way it came and Escape puts focus back on the box's "⋯".
-    drawer.querySelector('.plan-node-drawer-title')?.focus({ preventScroll: true });
-  }
-
-  function wireAction(act) {
-    const id = act.dataset.sectionId;
-    act.addEventListener('click', () => openDrawer(id));
-    act.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
-        e.preventDefault();
-        openDrawer(id);
-      }
-    });
-  }
-
-  /** Everything the old card's section block said, and every control it had. */
-  function fillDrawer(section) {
-    const edit = (edits.sections[section.id] ??= {});
-    const head = h('div', 'plan-node-drawer-head');
-    const heading = h('h3', 'plan-node-drawer-title', section.title ?? section.id);
-    heading.id = `${drawerId}-title`;
-    heading.tabIndex = -1;
-    drawer.setAttribute('aria-labelledby', heading.id);
-    const close = button('Close', 'text plan-node-drawer-close');
-    close.setAttribute('aria-label', 'Close section details');
-    close.addEventListener('click', () => closeDrawer({ restore: true }));
-    head.append(heading, close);
-
-    const body = h('div', 'plan-node-drawer-body');
-    const how = [capitalize(section.mode), section.style].filter(Boolean).join(' · ');
-    const aim = section.targetLevel ? `Aim: ${levelLabel(section.targetLevel)}` : '';
-    if (how || aim) body.append(h('p', 'plan-meta', [how, aim].filter(Boolean).join(' · ')));
-    if (section.exit) body.append(h('p', 'plan-line', `Goal: ${section.exit}`));
-    const covers = coversLine(section, nodes);
-    if (covers) body.append(h('p', 'plan-line', covers));
-    if ((section.notes ?? '').trim()) body.append(prose(section.notes, 'prose plan-node-notes'));
-    if (Boolean(section.assumedKnown) && !refuted.has(section.id)) {
-      body.append(h('p', 'plan-line known-line', 'You said you know this. One quick check when we get here.'));
-    }
-    if (section.desktopOnly) body.append(h('p', 'plan-line', 'Desktop only'));
-    if (section.revision) {
-      body.append(h('p', 'plan-line', 'Revision: a short re-check of ideas from the tracks that merge here, before this track goes on.'));
-    }
-    body.append(...sectionControls(section, edit));
-    drawer.replaceChildren(head, body);
-  }
-
-  /** The section's actions, exactly as the card has always offered them. */
-  function sectionControls(section, edit) {
-    const controls = [];
-    if (section.plugins?.length) {
-      const fs = h('fieldset', 'tools');
-      const legend = h('legend', '');
-      legend.innerHTML = `Tools<span class="sr-only"> for ${escapeHtml(section.title ?? section.id)}</span>`;
-      fs.append(legend);
-      // `needsInstall` (W9) is the code-computed set of plugins the planner
-      // proposed that weren't installed at plan_write — all registry-
-      // installable and on this platform. The live `installed` set wins for a
-      // plugin installed since the plan was written (it becomes a checkbox);
-      // the field tells the card which missing plugins are install offers, so
-      // a stale or foreign missing id is still shown but never offered as one.
-      const proposed = new Set(section.needsInstall ?? []);
-      const boxes = [];
-      for (const plugin of section.plugins) {
-        const label = labels.get(plugin) || plugin;
-        if (!installed.has(plugin)) {
-          const missing = h('span', 'tool missing');
-          if (proposed.has(plugin) || section.needsInstall == null) {
-            // Offer consent; never install as a side effect of approving (W9).
-            const chip = button(`${label} — install`, 'text install-chip');
-            chip.addEventListener('click', () => onInstall?.(plugin, chip));
-            missing.append(chip);
-          } else {
-            missing.append(h('span', 'plan-line', `${label} — not installed`));
-          }
-          fs.append(missing);
-          continue;
-        }
-        const kept = edit.plugins ?? section.plugins;
-        const l = h('label', 'tool');
-        const c = h('input');
-        c.type = 'checkbox';
-        c.value = plugin;
-        c.checked = kept.includes(plugin);
-        c.addEventListener('change', () => {
-          const next = boxes.filter((b) => b.checked).map((b) => b.value);
-          const same = next.length === section.plugins.filter((p) => installed.has(p)).length;
-          if (same) delete edit.plugins;
-          else edit.plugins = next;
-          refresh({ figure: true });
-        });
-        l.append(c, h('span', '', label));
-        boxes.push(c);
-        fs.append(l);
-      }
-      controls.push(fs);
-      if (section.plugins.some((p) => !installed.has(p))) {
-        controls.push(h('p', 'plan-line', 'Not installed: skipped if approved.'));
-      }
-    }
-    controls.push(
-      choiceRows('How far', `sec-level-${section.id}`, LEVELS, edit.targetLevel ?? section.targetLevel ?? '', (v) => {
-        edit.targetLevel = v;
-        refresh({ figure: true });
-      }),
-      choiceRows(
-        'Include',
-        `sec-keep-${section.id}`,
-        [['keep', 'Keep'], ['drop', "Don't need this"]],
-        edit.keep === false ? 'drop' : 'keep',
-        (v) => {
-          if (v === 'drop') edit.keep = false;
-          else delete edit.keep;
-          refresh({ figure: true });
-        },
-      ),
-    );
-    const known = textareaField('Parts I already know…', {
-      rows: 2,
-      value: edit.knownNote ?? section.knownNote ?? '',
-      placeholder: 'e.g. I already know KVL, just not loaded dividers.',
-    });
-    known.input.addEventListener('input', () => {
-      if (known.input.value.trim()) edit.knownNote = known.input.value;
-      else delete edit.knownNote;
-      refresh();
-    });
-    controls.push(known.wrap);
-    if (section.hunt?.available) {
-      const huntWrap = h('div', 'field');
-      const label = h('label', 'tool');
-      const c = h('input');
-      c.type = 'checkbox';
-      c.checked = edit.hunt === undefined ? Boolean(section.hunt.enabled) : edit.hunt;
-      c.addEventListener('change', () => {
-        edit.hunt = c.checked;
-        refresh({ figure: true });
-        // The learner's toggle is immediate: one op, no planner round trip.
-        Promise.resolve(onHuntToggle?.(section.id, c.checked)).catch((err) => status.set(String(err), true));
-      });
-      label.append(c, h('span', '', 'Hunt'));
-      const why = h('p', 'help', section.hunt.reason || 'Find something out for yourself before this section.');
-      huntWrap.append(label, why);
-      controls.push(huntWrap);
-    }
-    const note = textareaField('Note for the planner', {
-      rows: 2,
-      value: edit.learnerNote ?? section.learnerNote ?? '',
-      placeholder: 'Anything else the planner should know.',
-    });
-    note.input.addEventListener('input', () => {
-      if (note.input.value.trim()) edit.learnerNote = note.input.value;
-      else delete edit.learnerNote;
-      refresh();
-    });
-    controls.push(note.wrap);
-    return controls;
-  }
-
-  // Escape closes the drawer from anywhere in the card; the card is not a
-  // dialog, so nothing here holds focus (ui-design §9.1).
-  doc.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && openSectionId !== null) {
-      e.stopPropagation();
-      closeDrawer({ restore: true });
-    }
-  });
-  // One box per section is the card now; the actions live in the drawer the
-  // box's "⋯" opens (§7.7.1).
+  // Escape closes the drawer from anywhere in the card.
+  editor.closeOnEscape(doc);
 
   /**
    * The action row, and — when asked — the boxes' own state words. Nothing
@@ -1278,60 +1395,26 @@ export function planCard(plan, {
     // One planner job at a time: the backend refuses edits while it runs.
     approve.disabled = busy || pending;
     approve.hidden = false;
-    send.hidden = !pending;
-    send.disabled = busy;
-    discard.hidden = !pending || questionPending;
-    noteField.wrap.hidden = !pending || questionPending;
+    row.send.hidden = !pending;
+    row.send.disabled = busy;
+    row.discard.hidden = !pending || questionPending;
+    row.noteField.wrap.hidden = !pending || questionPending;
     actions.hidden = questionPending;
-    if (busy && !status.el.textContent) {
-      status.set(pending ? 'Revising. Send changes when it arrives.' : 'Revising. Approve when it arrives.');
+    if (busy && !row.status.el.textContent) {
+      row.status.set(pending ? 'Revising. Send changes when it arrives.' : 'Revising. Approve when it arrives.');
     }
   }
-
-  /** Clears the collected edits after they were sent (or discarded). */
-  function resetEdits() {
-    edits.plan = {};
-    for (const edit of Object.values(edits.sections)) for (const k of Object.keys(edit)) delete edit[k];
-    edits.comment = '';
-    noteField.input.value = '';
-    refresh({ figure: true });
-  }
-
-  send.addEventListener('click', async () => {
-    if (!hasPlanEdits(edits)) return;
-    const payload = planEditsPayload(edits);
-    send.disabled = true;
-    discard.disabled = true;
-    status.set('Sending…');
-    try {
-      await onSendEdits(payload, (edits.comment ?? '').trim());
-      resetEdits();
-      status.set('Sent. Revising the plan…');
-    } catch (err) {
-      send.disabled = false;
-      discard.disabled = false;
-      status.set(String(err), true);
-    }
-  });
 
   approve.addEventListener('click', async () => {
     if (busy || hasPlanEdits(edits) || questionPending) return;
     approve.disabled = true;
-    status.set('Approving…');
+    row.status.set('Approving…');
     try {
       await onApprove();
     } catch (err) {
       approve.disabled = false;
-      status.set(String(err), true);
+      row.status.set(String(err), true);
     }
-  });
-
-  discard.addEventListener('click', () => {
-    discard.disabled = false;
-    resetEdits();
-    // The app rebuilds the card so every control shows the plan's own values
-    // again (the collected edits are gone); focus lands on the new heading.
-    onDiscard?.();
   });
 
   // Approving a plan with parallel tracks forks sessions: say so where the
@@ -1341,21 +1424,9 @@ export function planCard(plan, {
     branchNote.id = nextId('branch-note');
     approve.setAttribute('aria-describedby', `${branchNote.id} plan-edit-status`);
   }
-  doc.append(noteField.wrap, ...(branchNote ? [branchNote] : []), actions, status.el, change.form);
+  doc.append(row.noteField.wrap, ...(branchNote ? [branchNote] : []), actions, row.status.el, change.form);
   if (sections.length) draw();
-  // A card rebuilt under an open drawer (a state refresh, a plan revision)
-  // keeps it open on the same section — the learner did not change sections.
-  if (openSectionId !== null) {
-    const section = sectionById.get(openSectionId);
-    if (section) {
-      fillDrawer(section);
-      drawer.hidden = false;
-      syncExpanded();
-    } else {
-      openSectionId = null;
-      edits.drawer = null;
-    }
-  }
+  editor.restore();
   refresh();
   return doc;
 }
@@ -1363,7 +1434,7 @@ export function planCard(plan, {
 
 /** The plan list: sections with their status words and their claims —
  *  grouped under their track's heading when the plan has tracks. */
-function sectionList(st) {
+function sectionList(st, { onOptions = null } = {}) {
   const plan = st.plan;
   const nodes = new Map((plan.nodes ?? []).map((n) => [n.id, n]));
   const sections = plan.sections ?? [];
@@ -1397,6 +1468,15 @@ function sectionList(st) {
       t.append(h('span', 'sheet-status', ` — ${aimText}`));
     }
     li.append(t);
+    if (onOptions) {
+      // The same drawer the box's "⋯" opens, reachable from the list too (and
+      // from the Ideas view, whose boxes are claims, not sections).
+      const opt = button('Options', 'text sheet-section-options');
+      opt.setAttribute('aria-label', `Details and options for ${s.title ?? s.id}`);
+      opt.dataset.sectionId = s.id;
+      opt.addEventListener('click', () => onOptions(s.id, opt));
+      li.append(opt);
+    }
     const ids = s.nodeIds ?? [];
     if (ids.length) {
       const ul = h('ul', 'sheet-nodes');
@@ -1532,11 +1612,37 @@ export function planOverlay(st, {
   onClose,
   onLevel,
   onDrawer,
+  editing = null,
 }) {
   const plan = st.plan;
   const root = h('div', 'plan-overlay-inner');
   const headId = headingId ?? nextId('plan');
   const views = new Map(); // level -> { svg, pan, width, height }
+
+  // While teaching, the sheet carries the card's structured controls
+  // (ui-design §7.2.9, §7.7.1): a "⋯" in every topic box, the same side
+  // drawer, the plan-level options and one pending-edit bar. `editing` is
+  // null for a finished session and for the card's own "Expand".
+  const edits = editing?.edits ?? null;
+  const question = editing?.question ?? null;
+  const questionPending = Boolean(question) && edits?.answered == null;
+  const editor = editing && !st.ended
+    ? createPlanEditor(plan, {
+        edits,
+        state: st,
+        teaching: true,
+        knownRefuted: st.knownRefuted ?? [],
+        installed: editing.installed ?? new Set(),
+        labels: editing.labels ?? new Map(),
+        onHuntToggle: editing.onHuntToggle,
+        onInstall: editing.onInstall ?? null,
+        onEdit: ({ figure = false }) => {
+          if (figure) redrawTopics();
+          refreshEdits();
+        },
+        onError: (err) => row.status.set(String(err), true),
+      })
+    : null;
 
   const bar = h('div', 'plan-bar');
   const where = h('p', 'plan-where');
@@ -1589,7 +1695,43 @@ export function planOverlay(st, {
   zoomFit.setAttribute('aria-label', 'Fit the plan to the screen');
   zoomBox.append(zoomOut, zoomIn, zoomFit);
 
-  const hint = h('p', 'plan-hint', 'Drag to pan · scroll to zoom');
+  const hint = h('p', 'plan-hint', editor ? 'Drag to pan · scroll to zoom · ⋯ in a box for its options' : 'Drag to pan · scroll to zoom');
+
+  // ---- the pending-edit bar (only while teaching) ----
+  const editBar = h('div', 'plan-edit-bar');
+  editBar.hidden = true;
+  const row = editor
+    ? editRow({
+        edits,
+        editor,
+        onSendEdits: editing.onSendEdits,
+        onDiscard: editing.onDiscard,
+        onSent: () => {
+          redrawTopics();
+          refreshEdits();
+        },
+      })
+    : null;
+  if (row) {
+    row.noteField.input.addEventListener('input', () => refreshEdits());
+    const buttons = h('div', 'actions');
+    buttons.append(row.send, row.discard);
+    editBar.append(row.noteField.wrap, buttons, row.status.el);
+  }
+
+  /** Shows the bar while anything is pending (or a send just reported). */
+  function refreshEdits() {
+    if (!row) return;
+    const pending = hasPlanEdits(edits);
+    const busy = Boolean(editing.busy);
+    row.send.hidden = !pending;
+    row.send.disabled = busy;
+    row.discard.hidden = !pending;
+    row.noteField.wrap.hidden = !pending;
+    if (busy && pending && !row.status.el.textContent) row.status.set('Revising. Send changes when it arrives.');
+    editBar.hidden = questionPending || (!pending && !row.status.el.textContent);
+    hint.hidden = !editBar.hidden;
+  }
 
   let current = null; // { pan, level }
   function show() {
@@ -1641,22 +1783,43 @@ export function planOverlay(st, {
     return Number.isFinite(x0) ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
   }
 
-  function makeView(which) {
+  /** One level's drawing; the topics view carries the editor's "⋯"s. */
+  function drawArt(which) {
     const { sectionStatus, nodeStatus } = progressOf(st);
     const art = planDiagram(plan, {
       level: which,
       maxW: which === 'ideas' ? 900 : 1200,
       sectionStatus,
       nodeStatus,
+      annotate: which === 'topics' && editor ? editor.annotate : null,
       track: st.branch?.track ?? null,
     });
     art.svg.setAttribute('width', String(Math.round(art.width)));
     art.svg.setAttribute('height', String(Math.round(art.height)));
+    if (which === 'topics' && editor) editor.wire(art.svg);
+    return art;
+  }
+
+  function makeView(which) {
+    const art = drawArt(which);
     // Focus order: the overlay's autofocus target is the heading, so the
     // diagram's boxes are reached by Tab from there, in layer order.
     const entry = { ...art, pan: attachPanZoom(stage, view) };
     views.set(which, entry);
     return entry;
+  }
+
+  /** Redraws the topic boxes' state words in place, keeping pan and zoom. */
+  function redrawTopics() {
+    const entry = views.get('topics');
+    if (!entry) return;
+    const art = drawArt('topics');
+    Object.assign(entry, { svg: art.svg, width: art.width, height: art.height });
+    if (current === entry) {
+      view.replaceChildren(art.svg);
+      view.dataset.width = String(art.width);
+      view.dataset.height = String(art.height);
+    }
   }
 
   zoomIn.addEventListener('click', () => current?.pan.zoomIn());
@@ -1678,7 +1841,13 @@ export function planOverlay(st, {
   drawerHead.append(drawerClose);
   drawer.append(drawerHead);
   if (plan.goal) drawer.append(h('p', 'sheet-goal', plan.goal));
-  drawer.append(sectionList(st));
+  if (question) drawer.append(plannerQuestionBlock(question, edits, editing.onAnswerQuestion));
+  if (editor) {
+    const optionsRow = h('div', 'plan-row sheet-plan-options');
+    optionsRow.append(h('p', 'sheet-options-label', 'Plan options'), editor.planOptions.wrap);
+    drawer.append(optionsRow, editor.planOptions.panel);
+  }
+  drawer.append(sectionList(st, { onOptions: editor ? (id, from) => editor.openDrawer(id, { from }) : null }));
   if (st.activePlugins?.length) drawer.append(h('p', 'sheet-tools', `Tools in use: ${st.activePlugins.join(', ')}`));
   if (!st.ended) {
     const change = changeDisclosure('Change plan', 'secondary', { formOpen, draft, onDraft, onFormOpen, onRequest });
@@ -1693,7 +1862,13 @@ export function planOverlay(st, {
     if (open) drawerClose.focus({ preventScroll: true });
   });
 
-  root.append(bar, stage, hint, zoomBox, drawer);
+  root.append(bar, stage, hint, editBar, zoomBox, drawer);
+  if (editor) {
+    root.append(editor.drawer);
+    editor.closeOnEscape(root);
+    editor.restore();
+    refreshEdits();
+  }
   // First paint after the dialog is laid out (its box is 0×0 before showModal).
   queueMicrotask(show);
   root.show = show;
@@ -1986,6 +2161,66 @@ export function huntCard(item, { onReturn, onSkip, readOnly = false, current = n
   });
   submitOnModEnter(form);
   block.append(form);
+  return block;
+}
+
+// ---------- the debrief's sorted claims (ui-design §7.7.4) ----------
+
+// Verdicts in the order the list groups them, in words with an ink glyph
+// (never colour alone).
+const DEBRIEF_GROUPS = [
+  ['correct', 'Correct ✓'],
+  ['partial', 'Partly ◐'],
+  ['wrong', 'Not right ✗'],
+  ['tip', 'Rule of thumb'],
+  ['offroute', 'Saved for later'],
+];
+
+/**
+ * What the tutor's `debrief_record` sorted: every claim the learner brought
+ * back, grouped by verdict, each with the tutor's note, where it came from
+ * and, for a rule of thumb, whose it is and when it applies. It sits in the
+ * flow where the tutor recorded the sort, after the debrief's own words.
+ */
+export function debriefList(item) {
+  const claims = Array.isArray(item.claims) ? item.claims.filter((c) => c && c.claim) : [];
+  const block = h('section', 'debrief');
+  const id = nextId('debrief');
+  block.setAttribute('aria-labelledby', id);
+  const kicker = h('h2', 'small-caps debrief-kicker', 'Debrief');
+  kicker.id = id;
+  block.append(kicker);
+  if (item.question) block.append(h('p', 'debrief-question', `What you brought back on: ${item.question}`));
+  const known = new Set(DEBRIEF_GROUPS.map(([v]) => v));
+  const groups = [...DEBRIEF_GROUPS];
+  // A verdict outside the five (an older or foreign log) still shows, by name.
+  for (const c of claims) if (!known.has(c.verdict)) {
+    known.add(c.verdict);
+    groups.push([c.verdict, capitalize(String(c.verdict ?? 'Other'))]);
+  }
+  for (const [verdict, label] of groups) {
+    const list = claims.filter((c) => c.verdict === verdict);
+    if (!list.length) continue;
+    const group = h('div', `debrief-group debrief-${verdict}`);
+    const head = h('h3', 'debrief-verdict', `${label} · ${list.length}`);
+    head.id = nextId('verdict');
+    const ul = h('ul', 'debrief-claims');
+    ul.setAttribute('aria-labelledby', head.id);
+    for (const c of list) {
+      const li = h('li', 'debrief-claim');
+      li.append(richLine('p', 'debrief-claim-text', c.claim));
+      if (c.note) li.append(prose(c.note, 'prose debrief-note'));
+      const meta = [];
+      if (c.attribution) meta.push(`Whose: ${c.attribution}`);
+      if (c.scope) meta.push(`When it applies: ${c.scope}`);
+      if (c.source) meta.push(`Source: ${c.source}`);
+      for (const line of meta) li.append(h('p', 'debrief-meta', line));
+      ul.append(li);
+    }
+    group.append(head, ul);
+    block.append(group);
+  }
+  if (!claims.length) block.append(h('p', 'waiting', 'The tutor recorded no claims.'));
   return block;
 }
 

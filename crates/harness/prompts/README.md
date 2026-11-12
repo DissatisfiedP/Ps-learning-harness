@@ -166,7 +166,7 @@ Tools are scoped by agent and phase. A tool that is absent is never described to
 | `web_search`, `page_fetch`, `source_outline`, `source_search`, `source_read`, `source_page_image`, `brief_submit` | researcher | See `jobs/researcher.md`; search via `crates/research-search` (Brave → Wikipedia); `page_fetch` returns a PDF's page-tagged text, and `source_page_image { path \| url, page }` attaches one scanned page's image (≤ 4 per run) |
 | `message_read` | graph builder | `{ from, to? }` (to defaults to the last) or `{ index }` → those messages of the prompt's numbered list, whole, each headed `<n>. <who>:`; a number outside the list is refused with the valid range. The log records "read messages <from>–<to>", not the text |
 | `graph_search` | graph builder | `{ query }` → up to 20 graph nodes and topics matching the query, with ids, titles and homes. Read-only |
-| `graph_submit` | graph builder | See `jobs/graph-builder.md` |
+| `graph_submit` | graph builder | See `jobs/graph-builder.md`. A node's or edge's `provenance` is `{ type: session \| import \| hunt \| learner \| builder, sessionId?, huntId?, quote?, at? }`; the app fills in the run's `sessionId` and `at` when the model leaves them out, and a missing provenance is `{ type: "builder", sessionId, at }`. `quote` is the transcript sentence the claim rests on, verbatim; the Map's card shows it under "Where this came from" |
 | `split_suggest` | topic splitter | See `jobs/topic-splitter.md` |
 | `demo_test`, `demo_submit` / `figure_render`, `figure_submit` | demo builder / figure maker | See their files |
 

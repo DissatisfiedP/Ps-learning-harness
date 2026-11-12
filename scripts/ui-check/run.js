@@ -306,7 +306,7 @@ const SHOTS = process.env.UI_CHECK_SHOTS;
  *  `insets` emulates an edge-to-edge phone's status bar/notch and gesture bar
  *  (`env(safe-area-inset-*)`), e.g. `{ top: 47, bottom: 34 }`; `mobile` also
  *  turns on touch, so `(pointer: coarse)` matches as on a phone. */
-async function openApp(scenario, { width = 1440, height = 900, mobile = false, dark = false, insets = null } = {}) {
+async function openApp(scenario, { width = 1440, height = 900, mobile = false, dark = false, insets = null, query = '', reducedMotion = false } = {}) {
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
   await send('Page.enable', {}, sessionId);
@@ -314,13 +314,16 @@ async function openApp(scenario, { width = 1440, height = 900, mobile = false, d
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }, sessionId);
   if (mobile) await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }, sessionId);
   if (insets) await send('Emulation.setSafeAreaInsetsOverride', { insets }, sessionId);
-  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: dark ? 'dark' : 'light' }] }, sessionId);
+  await send('Emulation.setEmulatedMedia', { features: [
+    { name: 'prefers-color-scheme', value: dark ? 'dark' : 'light' },
+    { name: 'prefers-reduced-motion', value: reducedMotion ? 'reduce' : 'no-preference' },
+  ] }, sessionId);
   await send('Page.addScriptToEvaluateOnNewDocument', {
     source: `window.__errors = [];
       addEventListener('error', (e) => __errors.push(String(e.message)));
       addEventListener('unhandledrejection', (e) => __errors.push(String(e.reason?.message ?? e.reason)));`,
   }, sessionId);
-  await send('Page.navigate', { url: `http://tauri.localhost/index.html?check&sync=${scenario}` }, sessionId);
+  await send('Page.navigate', { url: `http://tauri.localhost/index.html?check&sync=${scenario}${query}` }, sessionId);
   const evaluate = async (expression) => {
     const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId);
     if (r.exceptionDetails) throw new Error(`${expression}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
@@ -335,7 +338,10 @@ async function openApp(scenario, { width = 1440, height = 900, mobile = false, d
     await Bun.write(join(SHOTS, `${name}.png`), Buffer.from(data, 'base64'));
   };
   const close = () => send('Target.closeTarget', { targetId });
-  return { evaluate, shot, close };
+  /** A real pointer (CDP mouse events, which Chromium turns into pointer events). */
+  const mouse = (type, x, y, buttons = 0) =>
+    send('Input.dispatchMouseEvent', { type, x, y, button: type === 'mouseMoved' && !buttons ? 'none' : 'left', buttons, clickCount: type === 'mouseMoved' ? 0 : 1 }, sessionId);
+  return { evaluate, shot, close, mouse };
 }
 
 const HOME = `(() => {
@@ -795,7 +801,212 @@ async function library() {
   console.log('library: Home + menu (files, folder as library, link list), import → chip with result line, linked state, Escape, Settings → Libraries row checked');
 }
 
-const cases = { ipc, placement, sync, library };
+
+const FIXTURE = { query: '&fixture=learn' };
+const argsOf = (cmd) => `(window.__bridge.log.filter((c) => c.cmd === '${cmd}').map((c) => c.args))`;
+
+/** Where an idea is drawn on the Map, in viewport px: focus its hidden
+ *  checkbox (the card then sits beside it, at the idea's height unless the
+ *  stage's edge clamps it), then sweep the pointer beside the card until the
+ *  canvas reports a hit on that idea. */
+async function locate(page, key, title) {
+  // The status line sits over the stage's centre and takes the pointer; it
+  // was read already, so clear it the way the next map action would.
+  await page.evaluate(`document.querySelector('#map-page .map-status').replaceChildren()`);
+  await page.evaluate(`document.querySelector('#map-page .map-a11y input[data-key="${key}"]').focus()`);
+  await sleep(700); // a focus off-screen pans the camera there
+  const box = await page.evaluate(`(() => { const r = document.querySelector('#map-page .map-card').getBoundingClientRect();
+    const s = document.getElementById('map-page').getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom, st: s.top, sb: s.bottom }; })()`);
+  await page.evaluate(`document.activeElement.blur()`);
+  const ys = [box.t + 28, box.t + 34, box.t + 22];
+  // A card pinned to the stage's bottom (or top) edge no longer marks the
+  // idea's height: sweep the band the idea can be in.
+  if (box.b >= box.sb - 12) for (let y = box.t + 40; y < box.sb; y += 6) ys.push(y);
+  if (box.t <= box.st + 12) for (let y = box.st; y < box.t + 22; y += 6) ys.push(y);
+  for (const y of ys) {
+    for (let d = 14; d <= 110; d += 4) {
+      for (const x of [box.l - d, box.r + d]) {
+        await page.mouse('mouseMoved', x, y);
+        const ok = await page.evaluate(`(() => { const c = document.querySelector('#map-page .map-card');
+          return document.querySelector('#map-page canvas').style.cursor === 'pointer' && !c.hidden && c.querySelector('.map-card-title')?.textContent === ${JSON.stringify(title)}; })()`);
+        if (ok) return { x, y };
+      }
+    }
+  }
+  throw new Error(`could not find ${title} on the map (card ${JSON.stringify(box)})`);
+}
+
+async function map() {
+  const page = await openApp('none', { ...FIXTURE, reducedMotion: true });
+  await page.evaluate(click('open-map'));
+  await until('the map with a split to review', () => page.evaluate(`(() => { const b = document.querySelector('#map-page .map-splits'); return Boolean(b && !b.hidden); })()`));
+  const button = await page.evaluate(`document.querySelector('#map-page .map-splits').textContent`);
+  expect(button === 'Review 1 topic split', `split button: ${button}`);
+  await page.shot('map-split-button');
+
+  // Split review: rename part 1, accept, close → one decide_splits, map reloads.
+  await page.evaluate(`document.querySelector('#map-page .map-splits').click()`);
+  const dialog = await page.evaluate(`(() => { const d = document.querySelector('dialog.splits');
+    return { open: d.open, focus: document.activeElement?.id, topic: d.querySelector('.proposal-edge')?.textContent,
+      relation: d.querySelector('.proposal-relation')?.textContent, labels: [...d.querySelectorAll('.split-name-label')].map((l) => l.textContent),
+      names: [...d.querySelectorAll('.split-name')].map((i) => i.value), ideas: [...d.querySelectorAll('.split-ideas li')].map((l) => l.textContent) }; })()`);
+  expect(dialog.open && dialog.focus === 'splits-heading' && dialog.topic === 'Mathematics › Calculus' && dialog.relation === '4 ideas → 2 new topics inside it'
+    && dialog.labels.join('|') === 'Name for part 1|Name for part 2' && dialog.names[0] === 'Limit of a function (1)'
+    && dialog.ideas.join('|') === 'Limit of a function|Continuity at a point|Derivative as a limit|Chain rule', `split dialog: ${JSON.stringify(dialog)}`);
+  await page.shot('map-split-dialog');
+  await page.evaluate(`(() => { const d = document.querySelector('dialog.splits');
+    const i = d.querySelector('.split-name'); i.value = 'Limits and continuity'; i.dispatchEvent(new Event('input'));
+    [...d.querySelectorAll('.proposal-actions button')].find((b) => b.textContent === 'Accept').click();
+    return true; })()`);
+  const accepted = await page.evaluate(`document.querySelector('dialog.splits .proposal-state')?.textContent`);
+  expect(accepted === 'Accepted — saved when you close this list.', `accepted state: ${accepted}`);
+  await page.evaluate(`document.querySelector('dialog.splits .proposals-head button').click()`);
+  await until('the split saved and the map reloaded', () => page.evaluate(`[...document.querySelectorAll('#map-page .map-a11y legend')].some((l) => l.textContent === 'Mathematics › Calculus › Limits and continuity')`));
+  const decided = await page.evaluate(argsOf('decide_splits'));
+  expect(JSON.stringify(decided) === JSON.stringify([{ accept: ['calc'], dismiss: [], titles: { calc: ['Limits and continuity', 'Derivative as a limit (2)'] } }]),
+    `decide_splits: ${JSON.stringify(decided)}`);
+  let status = await page.evaluate(`document.querySelector('#map-page .map-status')?.textContent`);
+  expect(status === 'Split “Mathematics › Calculus” into new topics.', `split status: ${status}`);
+  const splitsLeft = await page.evaluate(`document.querySelector('#map-page .map-splits').hidden`);
+  expect(splitsLeft, 'the split button is gone once nothing is left to review');
+  await page.shot('map-after-split');
+
+  // Drag "Quadratic formula" (Algebra) onto "Limit of a function": the drop
+  // asks first, with that topic chosen; Move records a learner place.
+  const from = await locate(page, 'quadratic', 'Quadratic formula');
+  const to = await locate(page, 'limit', 'Limit of a function');
+  await page.mouse('mouseMoved', from.x, from.y);
+  await page.mouse('mousePressed', from.x, from.y, 1);
+  for (let i = 1; i <= 12; i++) {
+    await page.mouse('mouseMoved', from.x + ((to.x - from.x) * i) / 12, from.y + ((to.y - from.y) * i) / 12, 1);
+    await sleep(16);
+  }
+  await page.shot('map-drag-target');
+  await page.mouse('mouseReleased', to.x, to.y);
+  await until('the move dialog', () => page.evaluate(`document.querySelector('dialog.map-move').open`));
+  const move = await page.evaluate(`(() => { const d = document.querySelector('dialog.map-move'); const s = d.querySelector('select');
+    return { intro: d.querySelector('.proposals-intro').textContent, value: s.value, chosen: s.selectedOptions[0]?.textContent,
+      options: [...s.options].map((o) => o.textContent), focus: document.activeElement?.textContent }; })()`);
+  expect(move.intro === '“Quadratic formula” is in Mathematics › Algebra.' && move.value === 'limits-and-continuity'
+    && move.chosen === 'Mathematics › Calculus › Limits and continuity' && !move.options.includes('Mathematics › Algebra') && move.focus === 'Move',
+    `move dialog after the drop: ${JSON.stringify(move)}`);
+  const before = await page.evaluate(`${argsOf('place_node')}.length`);
+  expect(before === 0, 'nothing is placed before the learner confirms');
+  await page.shot('map-move-dialog');
+  await page.evaluate(`document.querySelector('dialog.map-move button[type="submit"]').click()`);
+  await until('the move saved and the map reloaded', () => page.evaluate(`(() => { const s = document.querySelector('#map-page .map-status'); return /^Moved/.test(s?.textContent ?? ''); })()`));
+  const placed = await page.evaluate(argsOf('place_node'));
+  expect(JSON.stringify(placed) === JSON.stringify([{ nodeId: 'quadratic', home: 'limits-and-continuity' }]), `place_node: ${JSON.stringify(placed)}`);
+  status = await page.evaluate(`document.querySelector('#map-page .map-status').textContent`);
+  expect(status === 'Moved “Quadratic formula” to Mathematics › Calculus › Limits and continuity.', `move status: ${status}`);
+
+  // Provenance on the card: the import and the learner's move…
+  await locate(page, 'quadratic', 'Quadratic formula');
+  await until('the card’s record', () => page.evaluate(`!document.querySelector('#map-page .map-card-origin-wait')`));
+  let origin = await page.evaluate(`[...document.querySelectorAll('#map-page .map-card-origin-item')].map((li) => li.textContent)`);
+  expect(origin.length === 2 && /^Imported · /.test(origin[0]) && /^Moved by you to Mathematics › Calculus › Limits and continuity · /.test(origin[1]),
+    `quadratic's record: ${JSON.stringify(origin)}`);
+  // …and the session it came from (a link back), its quote and a merge.
+  await locate(page, 'chain', 'Chain rule');
+  await until('the card’s record', () => page.evaluate(`!document.querySelector('#map-page .map-card-origin-wait')`));
+  origin = await page.evaluate(`[...document.querySelectorAll('#map-page .map-card-origin-item')].map((li) => li.textContent)`);
+  expect(/^From “Derivatives” · .*Chain rule is what the lesson rests on\.$/.test(origin[0]) && /^Merged with “Differentiating a composition”: the same claim/.test(origin[1]),
+    `chain's record: ${JSON.stringify(origin)}`);
+  await page.shot('map-card-provenance');
+
+  // Without a pointer: the hidden list's "Move …" opens the same dialog.
+  await page.evaluate(`(() => { const b = [...document.querySelectorAll('#map-page .map-a11y button')].find((x) => x.textContent === 'Move “Chain rule” to another topic…'); b.focus(); b.click(); })()`);
+  const kb = await page.evaluate(`(() => { const d = document.querySelector('dialog.map-move'); return { open: d.open, focus: document.activeElement?.tagName }; })()`);
+  expect(kb.open && kb.focus === 'SELECT', `keyboard move dialog: ${JSON.stringify(kb)}`);
+  await page.evaluate(`[...document.querySelectorAll('dialog.map-move button')].find((b) => b.textContent === 'Cancel').click()`);
+  await until('the dialog closed', () => page.evaluate(`!document.querySelector('dialog.map-move').open && !document.querySelector('dialog.map-move').childElementCount`));
+  const back = await page.evaluate(`document.activeElement?.textContent`);
+  expect(back === 'Move “Chain rule” to another topic…', `focus after Cancel: ${back}`);
+  const unmoved = await page.evaluate(`${argsOf('place_node')}.length`);
+  expect(unmoved === 1, 'Cancel places nothing');
+
+  // The record's session link opens that session.
+  await locate(page, 'chain', 'Chain rule');
+  await page.evaluate(`document.querySelector('#map-page .map-card-origin-link').click()`);
+  await until('the source session', () => page.evaluate(`document.getElementById('map').hidden && document.getElementById('session-title')?.textContent === 'Derivatives'`));
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+  console.log('map: split review (rename, accept → decide_splits, reload), drag onto another topic → move dialog → place_node, card provenance (import, move, session link + quote, merge), keyboard move, link opens the session');
+}
+
+async function session() {
+  const page = await openApp('none', FIXTURE);
+  await until('the session list', () => page.evaluate(`Boolean(document.querySelector('#session-list .session-open'))`));
+  await page.evaluate(`document.querySelector('#session-list .session-open').click()`);
+  await until('the debrief in the flow', () => page.evaluate(`Boolean(document.querySelector('#timeline .debrief'))`));
+
+  // The debrief's sorted claims, after the debrief's own words.
+  const debrief = await page.evaluate(`(() => { const d = document.querySelector('#timeline .debrief');
+    const reply = [...document.querySelectorAll('#timeline .entry.tutor')].find((e) => /Good finds/.test(e.textContent));
+    return { heads: [...d.querySelectorAll('.debrief-verdict')].map((h) => h.textContent), question: d.querySelector('.debrief-question')?.textContent,
+      tip: [...d.querySelectorAll('.debrief-tip .debrief-meta')].map((p) => p.textContent), sources: [...d.querySelectorAll('.debrief-meta')].map((p) => p.textContent).filter((t) => t.startsWith('Source')),
+      partial: d.querySelector('.debrief-partial .debrief-note')?.textContent.trim(), after: Boolean(reply && reply.compareDocumentPosition(d) & Node.DOCUMENT_POSITION_FOLLOWING),
+      label: document.getElementById(d.getAttribute('aria-labelledby'))?.textContent }; })()`);
+  expect(debrief.heads.join('|') === 'Correct ✓ · 1|Partly ◐ · 1|Not right ✗ · 1|Rule of thumb · 1|Saved for later · 1'
+    && debrief.question === 'What you brought back on: Find out what people mean by a limit, and where they disagree.'
+    && debrief.tip.join('|') === 'Whose: calculus teachers|When it applies: single-variable functions you can sketch'
+    && debrief.sources.join('|') === 'Source: lecture notes|Source: a forum thread'
+    && debrief.partial === 'It is the value approached; the function need not reach it.' && debrief.after && debrief.label === 'Debrief',
+    `debrief list: ${JSON.stringify(debrief)}`);
+  await page.evaluate(`document.querySelector('#timeline .debrief').scrollIntoView({ block: 'center' })`);
+  await page.shot('session-debrief');
+
+  // The plan sheet while teaching carries the card's structured controls.
+  await until('the Plan button', () => page.evaluate(`!document.getElementById('plan-toggle').hidden`));
+  await page.evaluate(click('plan-toggle'));
+  await until('the plan sheet', () => page.evaluate(`document.getElementById('plan-panel').open`));
+  await page.evaluate(`[...document.querySelectorAll('#plan-panel .plan-level')].find((b) => b.textContent === 'Topics').click()`);
+  await until('the topic boxes with their ⋯', () => page.evaluate(`document.querySelectorAll('#plan-panel .plan-node-action').length === 2`));
+  await page.evaluate(`document.querySelector('#plan-panel .plan-node-action[data-section-id="s2"]').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+  const drawer = await page.evaluate(`(() => { const d = document.querySelector('#plan-panel .plan-node-drawer');
+    return { shown: !d.hidden, title: d.querySelector('.plan-node-drawer-title')?.textContent, focus: document.activeElement?.className,
+      legends: [...d.querySelectorAll('legend')].map((l) => l.textContent), labels: [...d.querySelectorAll('label')].map((l) => l.textContent),
+      expanded: document.querySelector('#plan-panel .plan-node-action[data-section-id="s2"]').getAttribute('aria-expanded'),
+      bar: document.querySelector('#plan-panel .plan-edit-bar').hidden }; })()`);
+  expect(drawer.shown && drawer.title === 'Derivatives' && drawer.focus === 'plan-node-drawer-title' && drawer.expanded === 'true'
+    && drawer.legends.join('|') === 'How far|Include' && drawer.labels.includes('Parts I already know…') && drawer.labels.includes('Note for the planner') && drawer.bar,
+    `sheet drawer: ${JSON.stringify(drawer)}`);
+  await page.evaluate(`(() => { const d = document.querySelector('#plan-panel .plan-node-drawer');
+    d.querySelector('input[type="radio"][value="analyze"]').click();
+    const t = [...d.querySelectorAll('.field')].find((f) => f.querySelector('label')?.textContent === 'Parts I already know…').querySelector('textarea');
+    t.value = 'I know the power rule.'; t.dispatchEvent(new Event('input')); return true; })()`);
+  const pending = await page.evaluate(`(() => { const p = document.getElementById('plan-panel');
+    return { bar: !p.querySelector('.plan-edit-bar').hidden, hint: p.querySelector('.plan-hint').hidden, send: !p.querySelector('.plan-edit-bar .btn.primary').hidden,
+      badge: [...p.querySelectorAll('.plan-node')].map((g) => g.textContent).find((t) => /Derivatives/.test(t)) }; })()`);
+  expect(pending.bar && pending.hint && pending.send && /Analyze only/.test(pending.badge ?? ''), `pending edits: ${JSON.stringify(pending)}`);
+  await page.shot('session-sheet-drawer');
+  // Escape closes the drawer, not the sheet, and focus returns to the box's ⋯.
+  await page.evaluate(escape);
+  const esc = await page.evaluate(`({ open: document.getElementById('plan-panel').open, drawer: document.querySelector('#plan-panel .plan-node-drawer').hidden,
+    focus: document.activeElement?.dataset?.sectionId })`);
+  expect(esc.open && esc.drawer && esc.focus === 's2', `Escape in the sheet: ${JSON.stringify(esc)}`);
+  // Plan-level options live in the Sections drawer; its "Options" reach a section too.
+  await page.evaluate(`document.querySelector('#plan-panel .plan-drawer-toggle').click()`);
+  await page.evaluate(`document.querySelector('#plan-panel .plan-drawer button[aria-label="Plan options"]').click()`);
+  await page.evaluate(`document.querySelector('#plan-panel .plan-drawer input[type="radio"][value="deep"]').click()`);
+  await page.evaluate(`[...document.querySelectorAll('#plan-panel .sheet-section-options')].find((b) => b.dataset.sectionId === 's1').click()`);
+  const s1 = await page.evaluate(`(() => { const d = document.querySelector('#plan-panel .plan-node-drawer');
+    return { title: d.querySelector('.plan-node-drawer-title')?.textContent, hunt: [...d.querySelectorAll('label')].some((l) => l.textContent === 'Hunt') }; })()`);
+  expect(s1.title === 'Limits' && s1.hunt, `section from the list: ${JSON.stringify(s1)}`);
+  await page.shot('session-sheet-sections');
+  await page.evaluate(`document.querySelector('#plan-panel .plan-edit-bar .btn.primary').click()`);
+  await until('the edits sent', () => page.evaluate(`document.querySelector('#plan-panel .plan-edit-bar .form-status')?.textContent === 'Sent. Revising the plan…'`));
+  const sent = await page.evaluate(argsOf('edit_plan'));
+  expect(JSON.stringify(sent) === JSON.stringify([{ sessionId: 'L1', edits: { depth: 'deep', sections: [{ sectionId: 's2', targetLevel: 'analyze', knownNote: 'I know the power rule.' }] }, comment: '' }]),
+    `edit_plan: ${JSON.stringify(sent)}`);
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+  console.log('session: debrief list (five verdict groups, notes, sources, tip attribution/scope, after the reply), plan sheet controls (box ⋯ → drawer, level + known parts, Escape, plan options, list Options, Send → one edit_plan)');
+}
+
+const cases = { ipc, placement, sync, library, map, session };
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases);
 try {
   for (const name of wanted) {

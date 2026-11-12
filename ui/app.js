@@ -26,6 +26,7 @@ import { getPlugin, loadPlugins, pluginIds } from './pluginstore.js';
 import {
   choiceCard,
   closeExtras,
+  debriefList,
   dividerEl,
   huntCard,
   jobChip,
@@ -196,6 +197,8 @@ const map = createMap(els.mapPage, {
   onChange: renderMapDesk,
   onReviewDecided: () => showMap(),
   onStartFrontier: (itemId, button) => startFromFrontier(itemId, button),
+  // An idea's "Where this came from" links back to the session it came from.
+  onOpenSession: (id) => openSession(id),
 });
 
 // ---------- utilities ----------
@@ -487,6 +490,8 @@ function renderItem(item) {
         onReturn: (huntId, payload) => cmd('hunt_return', { sessionId: s.id, huntId, payload }),
         onSkip: (huntId) => cmd('hunt_skip', { sessionId: s.id, huntId }),
       });
+    case 'debrief':
+      return debriefList(item);
     default:
       return document.createElement('div');
   }
@@ -814,7 +819,10 @@ function sessionEvent(s, ev) {
       }
       renderPhase();
       renderDesk();
-      if (ev.agent !== 'tutor') renderPlanCard({ free: false });
+      if (ev.agent !== 'tutor') {
+        renderPlanCard({ free: false });
+        renderPanel();
+      }
       syncBusy();
       break;
     case 'turnEnd':
@@ -827,7 +835,10 @@ function sessionEvent(s, ev) {
       }
       renderPhase();
       renderDesk();
-      if (ev.agent !== 'tutor') renderPlanCard({ free: false });
+      if (ev.agent !== 'tutor') {
+        renderPlanCard({ free: false });
+        renderPanel();
+      }
       syncBusy();
       break;
     case 'text': {
@@ -1411,10 +1422,25 @@ function renderPanel() {
   if (!els.planToggle.hidden) els.planToggle.setAttribute('aria-label', planButtonName(st));
   let checks = 0;
   for (const list of Object.values(st.checks ?? {})) checks += list.length;
-  const key = [st.planVersion, st.currentSection, st.completedSections.length, st.lastNodeId, checks, st.activePlugins.join(','), st.ended].join('|');
+  // While teaching, the sheet carries the card's structured controls; their
+  // unsent edits live in `s.planEdits` (cleared by a new plan version) and
+  // survive a rebuild of the sheet.
+  const editable = !st.ended && (st.phase === 'teach' || st.phase === 'close');
+  if (editable && s.panelPlanVersion !== st.planVersion) {
+    s.panelPlanVersion = st.planVersion;
+    s.planEdits = newPlanEdits();
+  }
+  const busy = editable && running(s.id, 'planner');
+  const installed = pluginIds();
+  const question = editable ? st.pendingPlanQuestion ?? null : null;
+  const key = [
+    st.planVersion, st.currentSection, st.completedSections.length, st.lastNodeId, checks, st.activePlugins.join(','), st.ended,
+    editable ? `e${s.planEditsRev}|${busy ? 1 : 0}|${question?.callId ?? ''}|${[...installed].sort().join(',')}|${(st.knownRefuted ?? []).join(',')}` : '',
+  ].join('|');
   if (key === s.panelKey) return;
   s.panelKey = key;
   const hadFocus = els.planPanel.contains(document.activeElement);
+  const planPlugins = editable ? st.plan.sections.flatMap((sec) => sec.plugins ?? []) : [];
   els.planPanel.replaceChildren(
     planOverlay(st, {
       headingId: 'plan-sheet-heading',
@@ -1428,6 +1454,26 @@ function renderPanel() {
       onClose: () => els.planPanel.close(),
       onLevel: (level) => (s.panelLevel = level),
       onDrawer: (open) => (s.panelDrawer = open),
+      editing: editable
+        ? {
+            edits: s.planEdits,
+            busy,
+            question,
+            installed,
+            labels: new Map(planPlugins.map((id) => [id, getPlugin(id)?.title || pluginLabel(id)])),
+            onSendEdits: (edits, comment) => cmd('edit_plan', { sessionId: s.id, edits, comment }),
+            onDiscard: () => {
+              s.planEdits = newPlanEdits();
+              s.planEditsRev += 1;
+              renderPanel();
+              focusQuiet($('#plan-sheet-heading'));
+            },
+            onHuntToggle: (sectionId, enabled) => cmd('set_hunt', { sessionId: s.id, sectionId, enabled }).then(() => scheduleState()),
+            onAnswerQuestion: (answer) => cmd('answer_plan_question', { sessionId: s.id, answer }),
+            // No install chips while teaching: a plugin installed now is not
+            // granted until the tutor asks for it (`plugin_request`).
+          }
+        : null,
     }),
   );
   if (hadFocus) focusQuiet($('#plan-sheet-heading'));
@@ -1958,8 +2004,15 @@ async function showMap() {
   const visit = ++state.mapLoad;
   map.loading();
   try {
-    const [graph, review, learning] = await Promise.all([call('knowledge_map'), call('edge_proposals'), mapLearning()]);
-    if (visit === state.mapLoad && !els.mapView.hidden) map.render(graph, review, learning);
+    // The split proposals are recomputed per visit (`graph_splits`); a failure
+    // there costs the review button, never the map.
+    const [graph, review, learning, splits] = await Promise.all([
+      call('knowledge_map'),
+      call('edge_proposals'),
+      mapLearning(),
+      call('graph_splits').catch(() => []),
+    ]);
+    if (visit === state.mapLoad && !els.mapView.hidden) map.render(graph, review, learning, splits);
   } catch (e) {
     if (visit === state.mapLoad && !els.mapView.hidden) map.failed(message(e), showMap);
   }

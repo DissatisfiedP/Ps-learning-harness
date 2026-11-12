@@ -738,6 +738,7 @@ pub fn graph_tools() -> Vec<ToolSpec> {
                         "type": { "type": "string", "enum": ["session", "import", "hunt", "learner", "builder"] },
                         "sessionId": { "type": "string" },
                         "huntId": { "type": "string" },
+                        "quote": { "type": "string", "description": "The sentence of the transcript the claim rests on, verbatim; the learner sees it on the map." },
                         "at": { "type": "string" }
                     }, "required": ["type"] }
                 }, "required": ["nodeId", "statement", "kind", "home"] } },

@@ -1077,15 +1077,49 @@ dialog {
 .map-zoom-btn { min-inline-size: 36px; min-block-size: 36px; justify-content: center; font-size: 1.1rem !important; }
 .map-current { min-block-size: 36px; padding-inline: var(--s3); }
 @media (pointer: coarse) { .map-zoom-btn, .map-current { min-block-size: 44px; } .map-zoom-btn { min-inline-size: 44px; } }
-/* Proposed links: the extractor's review list sits next to Fit, quiet until
-   there is something to decide. */
-.map-proposals {
+/* Proposed links and topic splits: the review lists sit next to Fit, quiet
+   until there is something to decide. */
+.map-reviews {
   position: absolute; inset-block-start: var(--s3); inset-inline-end: calc(var(--s5) + 56px);
+  display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s2);
+  max-inline-size: calc(100% - 2 * var(--s5) - 56px);
+}
+.map-proposals, .map-splits {
   color: rgba(240 236 228 / 0.85); background: rgba(16 24 21 / 0.7);
   border: 1px solid rgba(140 196 174 / 0.35); border-radius: var(--r);
   padding: var(--s1) var(--s3);
 }
-.map-proposals[hidden] { display: none; }
+.map-proposals[hidden], .map-splits[hidden] { display: none; }
+.split-groups { margin: var(--s3) 0 0; padding-inline-start: 1.4em; }
+.split-group + .split-group { margin-block-start: var(--s3); }
+.split-name-label { display: block; font: 400 var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-3); }
+.split-name { inline-size: min(100%, 32em); }
+.split-ideas { margin-block-start: var(--s1); font: 400 var(--fs-small)/1.5 var(--font-ui); color: var(--ink-2); }
+.split-ideas ul { margin: var(--s1) 0 0; padding-inline-start: 1.2em; }
+.map-move-form .field { margin-block-start: var(--s4); }
+.map-move-select { inline-size: 100%; }
+.proposals-status.danger { color: var(--danger); }
+/* Where an idea came from, on its card: the record in small words, the
+   sessions as links back. */
+.map-card-origin {
+  margin-block-start: var(--s2); padding-block-start: var(--s2);
+  border-block-start: 1px solid rgba(140 196 174 / 0.22);
+  max-block-size: 28vh; overflow-y: auto;
+}
+.map-card .map-card-origin-title { font: 600 var(--fs-meta)/1.4 var(--font-ui); color: #8CC4AE; }
+.map-card-origin-title:focus-visible { outline: 2px solid #A6D4C1; outline-offset: 2px; }
+.map-card-origin-list { margin: var(--s1) 0 0; padding: 0; list-style: none; font: 400 var(--fs-meta)/1.45 var(--font-ui); color: rgba(240 236 228 / 0.8); }
+.map-card-origin-list li + li { margin-block-start: 2px; }
+.map-card-origin-wait { color: rgba(240 236 228 / 0.5); }
+.map-card-origin-when { color: rgba(240 236 228 / 0.5); }
+.map-card-origin-quote { display: block; margin-block-start: 2px; font-style: italic; color: rgba(240 236 228 / 0.7); }
+.map-card-origin-link, .map-card-move {
+  padding: 0; border: 0; background: none; font: inherit; cursor: pointer;
+  color: #A6D4C1; text-decoration: underline; text-underline-offset: 2px;
+}
+.map-card-move { display: block; margin-block-start: var(--s2); font-weight: 600; }
+.map-card-origin-link:hover, .map-card-move:hover { color: #F0ECE4; }
+.map-card-origin-link:focus-visible, .map-card-move:focus-visible { outline: 2px solid #A6D4C1; outline-offset: 2px; }
 dialog.proposals {
   inline-size: min(720px, 92vw); max-block-size: 82dvh;
   margin: auto; padding: var(--s4) var(--s5) var(--s6);
@@ -1437,6 +1471,36 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
 .hunt-confirm-text { font-size: var(--fs-small); color: var(--ink-2); }
 .hunt-files-input { font: 400 var(--fs-small)/1.4 var(--font-ui); max-inline-size: 100%; }
 .hunt .you { margin-block-start: var(--s4); }
+
+/* The debrief's sorted claims: a compact reference list under the tutor's
+   reply. Verdicts are words and glyphs in ink, never colour (§7.7.4). */
+.debrief { padding-block: var(--s3); border-block: var(--hair); }
+.debrief-kicker { margin-block-end: var(--s1); }
+.debrief-question { font: 400 var(--fs-small)/1.45 var(--font-ui); color: var(--ink-3); }
+.debrief-group { margin-block-start: var(--s3); }
+.debrief-verdict { font: 600 var(--fs-small)/1.4 var(--font-ui); color: var(--ink); }
+.debrief-claims { margin: var(--s1) 0 0; padding-inline-start: 1.2em; }
+.debrief-claim + .debrief-claim { margin-block-start: var(--s2); }
+.debrief-claim-text { font: 400 var(--fs-ui)/1.45 var(--font-read); color: var(--ink); }
+.debrief-note { margin-block-start: 2px; font-size: var(--fs-small); color: var(--ink-2); }
+.debrief-meta { font: 400 var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-3); }
+
+/* The plan sheet's structured controls while teaching (§7.2.9): the plan
+   options above the section list, an "Options" per section, and one bar of
+   pending edits where the hint line was. */
+.sheet-plan-options { margin-block-start: var(--s4); align-items: center; }
+.sheet-options-label { font: 600 var(--fs-small)/1.4 var(--font-ui); color: var(--ink-2); }
+.sheet-section-options { margin-inline-start: calc(-1 * var(--s2)); font-size: var(--fs-small); }
+.plan-edit-bar {
+  display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2);
+  padding-block-start: var(--s2); border-block-start: var(--hair);
+}
+.plan-edit-bar[hidden] { display: none; }
+/* Left-aligned and capped, so the side drawer (420 px, inline end) never
+   covers "Send changes". */
+.plan-edit-bar .field { inline-size: min(40rem, 100%); margin: 0; }
+.plan-edit-bar .actions { margin: 0; }
+.plan-edit-bar .form-status { margin: 0; }
 
 /* Close: field guide, confidence and what's parked. Reference, not reading. */
 .close-extras { font: 400 var(--fs-small)/1.5 var(--font-ui); color: var(--ink-2); }

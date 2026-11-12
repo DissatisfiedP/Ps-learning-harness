@@ -175,14 +175,32 @@ async fn graph_splits(h: H<'_>) -> Result<Vec<harness::ProposedSplit>> {
     blocking(&h, |h| h.graph_splits()).await
 }
 
-/// Accept or dismiss proposed topic splits; accepting appends `split` ops.
+/// Accept or dismiss proposed topic splits; accepting appends `split` ops,
+/// with the learner's names for the groups (`titles`: topic → name per group).
 #[tauri::command]
 async fn decide_splits(
     h: H<'_>,
     accept: Vec<String>,
     dismiss: Vec<String>,
+    titles: Option<std::collections::HashMap<String, Vec<String>>>,
 ) -> Result<harness::graph::SplitDecision> {
-    blocking(&h, move |h| h.decide_splits(&accept, &dismiss)).await
+    let titles = titles.unwrap_or_default();
+    blocking(&h, move |h| h.decide_splits(&accept, &dismiss, &titles)).await
+}
+
+/// The learner moved an idea to another topic on the Map (a learner `place` op).
+#[tauri::command]
+async fn place_node(h: H<'_>, node_id: String, home: String) -> Result<harness::graph::Placed> {
+    blocking(&h, move |h| h.place_node(&node_id, &home)).await
+}
+
+/// Where an idea came from, for the Map's card.
+#[tauri::command]
+async fn node_provenance(
+    h: H<'_>,
+    node_id: String,
+) -> Result<harness::graph::history::NodeHistory> {
+    blocking(&h, move |h| h.node_provenance(&node_id)).await
 }
 
 #[tauri::command]
@@ -997,6 +1015,8 @@ pub fn run() {
             graph_status,
             graph_splits,
             decide_splits,
+            place_node,
+            node_provenance,
             subscribe_events,
             start_teaching,
             send_learner_message,

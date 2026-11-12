@@ -180,7 +180,7 @@ function curve(e, u) {
  * @param {HTMLElement} root  the map stage
  * @param {{ onChange(count: number): void }} hooks
  */
-export function createMap(root, { onChange, onReviewDecided = null, onStartFrontier = null }) {
+export function createMap(root, { onChange, onReviewDecided = null, onStartFrontier = null, onOpenSession = null }) {
   const selected = new Set(); // node ids; survives re-renders
   let entries = new Map(); // node id -> { input, node }
   let learn = null; // the newest plan's learning context (levels, calibration, frontier)
@@ -219,6 +219,21 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   const proposalsDialog = h('dialog', 'proposals');
   proposalsDialog.setAttribute('aria-labelledby', 'proposals-heading');
   document.body.append(proposalsDialog);
+  // Topic splits the splitter proposes (arch §4.5): reviewed like links, in a
+  // page-level modal; nothing is restructured until the learner accepts.
+  const splitsButton = h('button', 'btn text map-splits', 'Review topic splits');
+  splitsButton.type = 'button';
+  splitsButton.hidden = true;
+  const splitsDialog = h('dialog', 'proposals splits');
+  splitsDialog.setAttribute('aria-labelledby', 'splits-heading');
+  document.body.append(splitsDialog);
+  // Moving an idea to another topic without dragging (WCAG 2.5.7), and the
+  // confirmation a drag ends in.
+  const moveDialog = h('dialog', 'proposals map-move');
+  moveDialog.setAttribute('aria-labelledby', 'map-move-heading');
+  document.body.append(moveDialog);
+  const review2 = h('div', 'map-reviews');
+  review2.append(proposalsButton, splitsButton);
   // Zoom by hand without a wheel or a pinch, and the way back to the newest
   // session's ideas (shown only when some of them are on the map).
   const zoomBox = h('div', 'map-zoom');
@@ -234,7 +249,7 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   zoomInButton.setAttribute('aria-label', 'Zoom in');
   zoomBox.append(currentButton, zoomOutButton, zoomInButton);
   zoomBox.hidden = true;
-  root.replaceChildren(canvas, hud, proposalsButton, fitButton, zoomBox, a11y, card, flyout, status);
+  root.replaceChildren(canvas, hud, review2, fitButton, zoomBox, a11y, card, flyout, status);
   const ctx = canvas.getContext('2d');
 
   const glow = { white: sprite('#F6EBD6') };
@@ -278,6 +293,13 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   let decisionBusy = false;
   /** Idea id → titles of the claims it is easily confused with. */
   let contrastTitles = new Map();
+  /** The splitter's proposals still awaiting a decision (`graph_splits`). */
+  let splitReview = [];
+  let splitBusy = false;
+  /** Topic id → its full path, for every topic in the graph. */
+  let topicPaths = new Map();
+  /** Idea id → its `node_provenance` record (a promise), fetched on first show. */
+  let origins = new Map();
 
   // ---- proposed links (the extract_edges review surface) ------------------
   // The extractor proposes edges with a reason each — a prerequisite
@@ -417,6 +439,290 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     if (e.target === proposalsDialog) proposalsDialog.close();
   });
   proposalsButton.addEventListener('click', openProposals);
+
+  // ---- topic splits (the splitter's review surface, arch §4.5) ------------
+  // A topic grown past 30 ideas in groups that barely depend on each other is
+  // proposed as sub-topics. The groups' names are suggestions: the learner can
+  // rename each part before accepting, and nothing moves until they accept.
+
+  const pathOfTopic = (id) => topicPaths.get(id) ?? id;
+  const ideaTitle = (id) => entries.get(id)?.node.title ?? id;
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+  function drawSplits() {
+    splitsButton.hidden = splitReview.length === 0;
+    splitsButton.textContent = `Review ${plural(splitReview.length, 'topic split')}`;
+  }
+
+  function splitRow(p, collect) {
+    const li = h('li', 'proposal split');
+    const ideas = p.groups.reduce((n, g) => n + (g.nodeIds?.length ?? 0), 0);
+    li.append(h('p', 'proposal-edge', pathOfTopic(p.topic)));
+    li.append(h('p', 'proposal-relation', `${plural(ideas, 'idea')} → ${plural(p.groups.length, 'new topic')} inside it`));
+    const groups = h('ol', 'split-groups');
+    const names = p.groups.map((g, i) => {
+      const row = h('li', 'split-group');
+      const id = `split-name-${++uid}`;
+      const label = h('label', 'split-name-label', `Name for part ${i + 1}`);
+      label.htmlFor = id;
+      const input = h('input', 'input split-name');
+      input.type = 'text';
+      input.id = id;
+      input.value = g.title ?? '';
+      row.append(label, input);
+      if (g.why) row.append(h('p', 'proposal-why', g.why));
+      const list = h('details', 'split-ideas');
+      list.append(h('summary', '', plural(g.nodeIds?.length ?? 0, 'idea')));
+      const ul = h('ul');
+      for (const nid of g.nodeIds ?? []) ul.append(h('li', '', ideaTitle(nid)));
+      list.append(ul);
+      row.append(list);
+      groups.append(row);
+      return input;
+    });
+    li.append(groups);
+    const actions = h('div', 'proposal-actions');
+    const yes = h('button', 'btn text', 'Accept');
+    yes.type = 'button';
+    yes.addEventListener('click', () => {
+      // The names are read when the list closes, so a rename after Accept counts.
+      collect.accept.set(p.topic, () => names.map((n) => n.value.trim()));
+      li.classList.add('is-accepted');
+      actions.replaceChildren(h('span', 'proposal-state', 'Accepted — saved when you close this list.'));
+    });
+    const no = h('button', 'btn text', 'Dismiss');
+    no.type = 'button';
+    no.addEventListener('click', () => {
+      collect.dismiss.push(p.topic);
+      li.remove();
+    });
+    actions.append(yes, no);
+    li.append(actions);
+    return li;
+  }
+
+  function openSplits() {
+    const collect = { accept: new Map(), dismiss: [] };
+    const head = h('div', 'proposals-head');
+    const title = h('h2', '', 'Topic splits');
+    title.id = 'splits-heading';
+    title.tabIndex = -1;
+    const close = h('button', 'btn text', 'Close');
+    close.type = 'button';
+    close.addEventListener('click', () => splitsDialog.close());
+    head.append(title, close);
+    const body = h('div', 'proposals-body');
+    body.append(
+      head,
+      h(
+        'p',
+        'proposals-intro',
+        'These topics have grown into groups of ideas that barely depend on each other. Accept makes each group a topic inside the old one, under the names below; nothing changes until you accept.',
+      ),
+    );
+    const ol = h('ol', 'proposals-list');
+    for (const p of splitReview) ol.append(splitRow(p, collect));
+    body.append(ol);
+    splitsDialog.onclose = async () => {
+      if ((!collect.accept.size && !collect.dismiss.length) || splitBusy) return;
+      splitBusy = true;
+      try {
+        const titles = Object.fromEntries([...collect.accept].map(([topic, read]) => [topic, read()]));
+        const out = await call('decide_splits', { accept: [...collect.accept.keys()], dismiss: collect.dismiss, titles });
+        const said = [];
+        const split = out?.accepted ?? [];
+        if (split.length) said.push(`Split ${split.map((t) => `“${pathOfTopic(t)}”`).join(', ')} into new topics`);
+        if (out?.dismissed?.length) said.push(`${plural(out.dismissed.length, 'split')} dismissed`);
+        splitsDialog.replaceChildren();
+        await onReviewDecided?.();
+        status.replaceChildren(h('p', 'map-status-text', `${said.join('; ')}.`));
+      } catch (err) {
+        status.replaceChildren(h('p', 'map-status-text danger', `Couldn't save the splits: ${message(err)}`));
+      } finally {
+        splitBusy = false;
+      }
+    };
+    splitsDialog.replaceChildren(body);
+    splitsDialog.showModal();
+    title.focus({ preventScroll: true });
+  }
+  splitsDialog.addEventListener('click', (e) => {
+    if (e.target === splitsDialog) splitsDialog.close();
+  });
+  splitsButton.addEventListener('click', openSplits);
+
+  // ---- moving an idea to another topic (arch §4.5, a learner `place`) -----
+  // Dropping a dragged idea on another topic asks here first, with that topic
+  // chosen; the card's "Move to another topic…" opens the same dialog, so the
+  // move never needs a drag (WCAG 2.5.7).
+
+  function openMove(node, targetId = null) {
+    const opener = document.activeElement;
+    const head = h('div', 'proposals-head');
+    const title = h('h2', '', 'Move an idea');
+    title.id = 'map-move-heading';
+    title.tabIndex = -1;
+    head.append(title);
+    const form = h('form', 'map-move-form');
+    form.noValidate = true;
+    form.append(head, h('p', 'proposals-intro', `“${node.title}” is in ${node.cluster.path}.`));
+    const choices = [...topicPaths].filter(([id]) => id !== node.cluster.id).sort((a, b) => a[1].localeCompare(b[1]));
+    const stateLine = h('p', 'proposals-status');
+    stateLine.setAttribute('role', 'status');
+    const actions = h('div', 'proposals-foot');
+    const cancel = h('button', 'btn text', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', () => moveDialog.close());
+    let select = null;
+    if (choices.length) {
+      const field = h('div', 'field');
+      const id = `map-move-to-${++uid}`;
+      const label = h('label', '', 'Move it to');
+      label.htmlFor = id;
+      select = h('select', 'input map-move-select');
+      select.id = id;
+      for (const [tid, path] of choices) {
+        const opt = h('option', '', path);
+        opt.value = tid;
+        opt.selected = tid === targetId;
+        select.append(opt);
+      }
+      field.append(label, select);
+      form.append(field, h('p', 'help', 'Your move stays: the graph builder never moves it back.'));
+      const go = h('button', 'btn primary', 'Move');
+      go.type = 'submit';
+      actions.append(go, cancel);
+    } else {
+      form.append(h('p', 'help', 'There is no other topic to move it to.'));
+      actions.append(cancel);
+    }
+    form.append(actions, stateLine);
+    let moved = false;
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!select) return;
+      const home = select.value;
+      for (const c of form.querySelectorAll('button, select')) c.disabled = true;
+      stateLine.textContent = 'Moving…';
+      try {
+        await call('place_node', { nodeId: node.id, home });
+        moved = true;
+        moveDialog.close();
+        await onReviewDecided?.();
+        status.replaceChildren(h('p', 'map-status-text', `Moved “${node.title}” to ${pathOfTopic(home)}.`));
+      } catch (err) {
+        for (const c of form.querySelectorAll('button, select')) c.disabled = false;
+        stateLine.textContent = `Couldn't move it: ${message(err)}`;
+        stateLine.classList.add('danger');
+      }
+    });
+    moveDialog.onclose = () => {
+      moveDialog.replaceChildren();
+      if (!moved && opener?.isConnected) opener.focus({ preventScroll: true });
+    };
+    moveDialog.replaceChildren(form);
+    moveDialog.showModal();
+    (targetId && select ? form.querySelector('button[type="submit"]') : select ?? cancel).focus({ preventScroll: true });
+  }
+  moveDialog.addEventListener('click', (e) => {
+    if (e.target === moveDialog) moveDialog.close();
+  });
+
+  /** The other topic a dragged idea is over (an open one with ideas), or null. */
+  function dropTarget(w, n) {
+    let best = null;
+    for (const c of world?.clusters ?? []) {
+      if (c === n.cluster || (c.topic?.shown ?? 1) < 0.5) continue;
+      if (w.x < c.x0 - 24 || w.x > c.x1 + 24 || w.y < c.y0 - 24 || w.y > c.y1 + 24) continue;
+      if (!best || (c.topic?.depth ?? 0) > (best.topic?.depth ?? 0)) best = c;
+    }
+    return best;
+  }
+
+  // ---- where an idea came from (arch §4.4, `node_provenance`) -------------
+
+  function originOf(id) {
+    if (!origins.has(id)) {
+      origins.set(id, call('node_provenance', { nodeId: id }).catch((err) => ({ error: message(err) })));
+    }
+    return origins.get(id);
+  }
+
+  function day(at) {
+    const d = new Date(at);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  /** "the session ‘Title’" as a link back to it, or plain words without one. */
+  function sessionRef(e) {
+    const sid = e.provenance?.sessionId;
+    if (!sid) return null;
+    if (!e.sessionTitle) return document.createTextNode('a session no longer on this device');
+    const b = h('button', 'map-card-origin-link', `“${e.sessionTitle}”`);
+    b.type = 'button';
+    b.setAttribute('aria-label', `Open the session ${e.sessionTitle}`);
+    b.addEventListener('click', () => onOpenSession?.(sid));
+    return b;
+  }
+
+  /** One step of the record, in words. */
+  function originItem(e) {
+    const li = h('li', 'map-card-origin-item');
+    const type = e.provenance?.type ?? '';
+    const ref = sessionRef(e);
+    const say = (...parts) => {
+      for (const p of parts) if (p) li.append(typeof p === 'string' ? document.createTextNode(p) : p);
+    };
+    switch (e.kind) {
+      case 'placed':
+        say(e.by === 'learner' ? 'Moved by you to ' : 'Placed by the graph builder in ', pathOfTopic(e.home));
+        break;
+      case 'split':
+        say(`Moved into “${e.group}” when you split `, pathOfTopic(e.home));
+        break;
+      case 'merged':
+        say(`Merged with “${e.otherTitle ?? e.other}”: the same claim`);
+        break;
+      default: {
+        const again = e.kind === 'updated';
+        if (type === 'import') say(again ? 'Updated by an import' : 'Imported');
+        else if (type === 'hunt') say(again ? 'Restated from a hunt' : 'Brought back from a hunt', ref ? ' in ' : '', ref);
+        else if (type === 'learner') say(again ? 'Edited by you' : 'Added by you');
+        else if (ref) say(again ? 'Restated in ' : 'From ', ref);
+        else say(again ? 'Updated' : 'Recorded');
+      }
+    }
+    const when = day(e.at);
+    if (when) li.append(h('span', 'map-card-origin-when', ` · ${when}`));
+    if (e.provenance?.quote) li.append(h('q', 'map-card-origin-quote', e.provenance.quote));
+    return li;
+  }
+
+  /** The card's "Where this came from": filled in when the record arrives. */
+  function originSection(n) {
+    const wrap = h('div', 'map-card-origin');
+    const head = h('p', 'map-card-origin-title', 'Where this came from');
+    head.tabIndex = -1;
+    const list = h('ul', 'map-card-origin-list');
+    list.append(h('li', 'map-card-origin-wait', 'Loading…'));
+    wrap.append(head, list);
+    originOf(n.id).then((record) => {
+      if (record?.error) {
+        list.replaceChildren(h('li', 'map-card-origin-wait', `Couldn't read it: ${record.error}`));
+      } else {
+        const events = record?.events ?? [];
+        // A claim restated by many sessions keeps its first steps and its
+        // latest ones; the middle is a count.
+        const shown = events.length > 6 ? [...events.slice(0, 2), null, ...events.slice(-4)] : events;
+        list.replaceChildren(
+          ...shown.map((e) => (e ? originItem(e) : h('li', 'map-card-origin-wait', `… ${events.length - 6} more`))),
+        );
+        if (!events.length) list.replaceChildren(h('li', 'map-card-origin-wait', 'Nothing recorded.'));
+      }
+      request();
+    });
+    return wrap;
+  }
 
   const changed = () => onChange(selected.size);
   const visible = () => !root.closest('[hidden]') && document.visibilityState === 'visible';
@@ -1130,6 +1436,19 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     ctx.globalCompositeOperation = 'source-over';
   }
 
+  /** The topic a dragged idea would move to: a dashed outline round its ideas. */
+  function drawDropTarget(k) {
+    const c = drag?.node && drag.target;
+    if (!c) return;
+    ctx.save();
+    ctx.strokeStyle = forced ? 'Highlight' : C.select;
+    ctx.lineWidth = 2 / k;
+    ctx.setLineDash([8 / k, 6 / k]);
+    const pad = 18;
+    ctx.strokeRect(c.x0 - pad, c.y0 - pad, c.w + 2 * pad, c.h + 2 * pad);
+    ctx.restore();
+  }
+
   function draw(t) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (forced) {
@@ -1152,6 +1471,7 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     const dimOf = (n) => (near && !near.has(n) ? 0.28 : 1);
 
     const links = drawEdges(dimOf, spot);
+    drawDropTarget(k);
     drawNodes(k, dimOf, spot, placed);
     drawEffects(t);
     drawLinks(links, spot);
@@ -1247,6 +1567,11 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     card.append(links);
     const places = venueSection(n.cluster.id);
     if (places) card.append(places);
+    card.append(originSection(n));
+    const move = h('button', 'map-card-move', 'Move to another topic…');
+    move.type = 'button';
+    move.addEventListener('click', () => openMove(n));
+    card.append(move);
   }
 
   function placeCard() {
@@ -1448,6 +1773,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
           drag.node.x = w.x;
           drag.node.y = w.y;
         }
+        // Over another topic, the drop will ask to move the idea there.
+        drag.target = drag.moved ? dropTarget(w, drag.node) : null;
         reheat(world, 0.25);
       }
       request();
@@ -1491,7 +1818,17 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     if (d.node) {
       const n = d.node;
       n.fx = n.fy = null;
-      if (d.moved) {
+      if (d.moved && d.target && e.type === 'pointerup') {
+        // Dropped on another topic: nothing moves until the learner says so.
+        // The idea floats back home while the dialog asks.
+        n.vx = n.vy = 0;
+        reheat(world, 0.3);
+        if (reduced) {
+          n.x = n.homeX;
+          n.y = n.homeY;
+        }
+        openMove(n, d.target.id);
+      } else if (d.moved) {
         // Fling: keep the hand's speed, then let the springs bring it home.
         n.vx = clamp(d.vx, -20, 20);
         n.vy = clamp(d.vy, -20, 20);
@@ -1734,6 +2071,21 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
           if (!count) b.disabled = true;
           links.append(b);
         }
+        // The card's own controls, reachable without a pointer: where the idea
+        // came from (focus moves into the card) and moving it.
+        const origin = h('button', 'map-card-link', `Where “${n.title}” came from`);
+        origin.type = 'button';
+        origin.addEventListener('click', () => {
+          hover = null;
+          focusNode = n;
+          cardFor = null;
+          placeCard();
+          card.querySelector('.map-card-origin-title')?.focus({ preventScroll: true });
+        });
+        const move = h('button', 'map-card-link', `Move “${n.title}” to another topic…`);
+        move.type = 'button';
+        move.addEventListener('click', () => openMove(n));
+        links.append(origin, move);
         fs.append(label, desc, links);
         entries.set(n.key, { input, node: n });
       }
@@ -1814,8 +2166,31 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     return out;
   }
 
-  /** Renders the map; the selection keeps the ideas that still exist. */
-  function render(graph, reviewIn = null, learningIn = null) {
+  /** Topic id → its full path (`Mathematics › Calculus › Limits`). */
+  function pathsOf(topics) {
+    const byId = new Map(topics.map((t) => [t.id, t]));
+    const out = new Map();
+    for (const t of topics) {
+      const parts = [];
+      const seen = new Set();
+      for (let cur = t; cur && !seen.has(cur.id); cur = byId.get(cur.parent)) {
+        seen.add(cur.id);
+        parts.unshift(cur.title || cur.id);
+      }
+      out.set(t.id, parts.join(' › '));
+    }
+    return out;
+  }
+
+  /**
+   * Renders the map; the selection keeps the ideas that still exist.
+   * `splitsIn` is `graph_splits`: the topic splits awaiting a decision.
+   */
+  function render(graph, reviewIn = null, learningIn = null, splitsIn = []) {
+    origins = new Map();
+    topicPaths = pathsOf(graph?.topics ?? []);
+    splitReview = (splitsIn ?? []).filter((p) => topicPaths.has(p.topic) && (p.groups ?? []).length);
+    drawSplits();
     reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     forced = matchMedia('(forced-colors: active)').matches;
     if (forced) reduced = true;
@@ -1891,6 +2266,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
 
   function loading() {
     world = null;
+    splitReview = [];
+    drawSplits();
     learn = null;
     venuesByTopic = new Map();
     renderLearning();
@@ -1908,6 +2285,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
 
   function failed(text, retry) {
     world = null;
+    splitReview = [];
+    drawSplits();
     learn = null;
     venuesByTopic = new Map();
     renderLearning();

@@ -868,14 +868,34 @@ Behavior:
   logic).
 - Opening focuses the heading. The diagram's boxes are `tabindex="0"` with `<title>` tooltips, in
   layer order after the bar's controls.
-- **Shipped difference:** the overlay does *not* carry the plan card's per-box "⋯" and side drawer
-  yet. Its section drawer ("Sections") shows the ordered list with aim, the known section's status
-  ("Known · not checked yet" / "Known · checked ✓", or "Checked: needs teaching after all" after a
-  `knownRefuted`) and the current position; plan changes while teaching go through its "Change
-  plan" form, the background-planner path the card's edits also use. The card is the surface the
-  learner approves on, so the per-section controls live there (owner-requested, 2026-11-07); wiring
-  them into a modal that re-renders on `panelKey` — with `edit_plan` now legal in any phase that has
-  a plan — is the next step, not part of this change.
+- **Structured controls while teaching (built 2026-11-12).** In Teach and Close (not once the
+  session has ended, and not when the card's "Expand" opened the overlay — the card underneath is
+  the editing surface then) the sheet carries the plan card's controls (§7.7.1), built from the same
+  code (`cards.js::createPlanEditor`):
+  - the **Topics** view's boxes carry the "⋯" inside their corner and open the same side drawer —
+    the section's description, then Tools, How far, Include, Parts I already know…, Hunt (only when
+    the planner marked one available) and Note for the planner. A **finished** section's drawer
+    describes it and says "Done. To go back over it, use “Change plan”." instead of offering edits.
+    The **Ideas** view's boxes are claims, so they have no "⋯"; the Sections drawer reaches every
+    section instead (next point);
+  - the **Sections** drawer starts with "Plan options ⋯" (Depth / Explore / Sitting / Style), and
+    every section in its list gets an "Options" text button (accessible name "Details and options
+    for ⟨title⟩") that opens the same side drawer over it; the free-text "Change plan" form stays at
+    its end;
+  - **pending edits** replace the hint line with one bar: "Comment for the planner", the primary
+    "Send changes" and "Discard". Send writes exactly one `edit_plan` (the same payload as the card)
+    and the bar reads "Sent. Revising the plan…"; while the planner runs, Send is disabled ("Revising.
+    Send changes when it arrives."). Discard rebuilds the sheet with the plan's own values. Badges on
+    the boxes ("Analyze only", "Not needed", "Hunt on") redraw in place without moving the pan/zoom;
+  - a planner question (`plan_ask`) asked about those edits appears at the top of the Sections
+    drawer, as on the card, and the bar stays hidden until it is answered;
+  - Escape closes the side drawer first (the sheet stays open) and returns focus to the "⋯" or
+    "Options" that opened it; a second Escape closes the sheet;
+  - no install chips: a plugin installed mid-lesson is not granted until the tutor asks for it, so a
+    missing plugin reads "⟨Title⟩ — not installed".
+  The edits live in the session's `planEdits` (cleared by a new plan version) and survive the sheet
+  being rebuilt; the sheet's `panelKey` adds the planner's busy state, the question, the installed
+  set and the discard count, so it re-renders when those change.
 
 #### 7.2.10 Phase and progress indicator
 
@@ -1246,6 +1266,70 @@ teach against them.
 - **The core re-validates**: unknown ids, self-edges, duplicates and anything that would close a cycle are refused at accept time and reported with the reason — the extractor's file can be wrong without the graph becoming wrong. Refused rows leave the file too, so they are not asked about twice.
 - An empty file has no button and no dialog: a Map with nothing to review looks exactly like one without proposals.
 
+**Topic splits are reviewed the same way (built 2026-11-12).** A topic grown past 30 ideas whose
+internal prerequisites fall into separate groups is proposed as sub-topics (architecture §4.5; the
+splitter in `graph/mod.rs`). Each Map visit recomputes the proposals (`graph_splits`, which keeps
+names the graph builder chose); when any exist, `Review N topic splits` sits beside the links button
+and opens a modal list:
+
+```
+ Topic splits                                                       Close
+ These topics have grown into groups of ideas that barely depend on each
+ other. Accept makes each group a topic inside the old one, under the names
+ below; nothing changes until you accept.
+ ─────────────────────────────────────────────────────────────────────
+ Mathematics › Calculus
+ 34 ideas → 2 new topics inside it
+   1. Name for part 1  [Limits and continuity        ]
+      17 ideas linked by prerequisites; …
+      ▸ 17 ideas
+   2. Name for part 2  [Derivative as a limit (2)    ]
+ [Accept]  [Dismiss]
+```
+
+- **The names are the learner's.** A proposal's group titles are suggestions (the builder's, or a
+  placeholder from the group's biggest idea); each is an editable field, read when the list closes,
+  so renaming after Accept counts. A blank field keeps the proposed name.
+- Decisions are saved when the list closes, as one `decide_splits({ accept, dismiss, titles })`
+  (`titles`: topic → one name per group). Accepting appends one `split` op with learner provenance:
+  the fold creates the child topics under the old one and moves **only the topic's own ideas** into
+  them (an idea the learner placed elsewhere since stays put), and those moves rank as learner
+  placements, so a later builder upsert cannot move an idea back. Dismissing remembers the topic's
+  idea count and the proposal does not return until that count changes. The Map reloads and the
+  status line says what happened ("Split “Mathematics › Calculus” into new topics.").
+- The group's idea titles are behind a closed `details` per part: the decision is about the
+  partition and its names; the list is there to check it.
+
+**Moving an idea to another topic (built 2026-11-12).** The topic tree is the builder's guess and
+the learner overrides it (architecture §4.5 "learner-overridable"):
+
+- **Drag** an idea over another open topic's ideas: that cluster gets a dashed outline in the
+  selection ink (`Highlight` in forced colours) while the pointer is over it. **Dropping** there
+  never moves anything by itself — the idea floats home and the `Move an idea` dialog opens with
+  that topic already chosen and focus on **Move**. A drop on open water or the idea's own topic is
+  the old fling.
+- The same dialog opens from the card's last control, **"Move to another topic…"**, and from the
+  hidden list's per-idea button `Move “⟨title⟩” to another topic…`, so the move never needs a drag
+  (WCAG 2.5.7). It says where the idea is now, offers every other topic by full path in a native
+  `select`, and says "Your move stays: the graph builder never moves it back." Cancel or Escape
+  returns focus to whatever opened it.
+- **Move** calls `place_node({ nodeId, home })`, which appends one `place` op `by: "learner"` with
+  `provenance: { type: "learner", at }`. The core refuses an unknown or removed idea, an unknown
+  topic, or the topic it is already in, and the dialog shows the reason in place. On success the Map
+  reloads and the status line reads "Moved “Quadratic formula” to Mathematics › Calculus › Limits
+  and continuity."
+
+**Where an idea came from (built 2026-11-12).** The card ends with a `Where this came from` section
+(architecture §4.4), filled from `node_provenance({ nodeId })` the first time the card shows that
+idea in a visit: every op that created, updated, moved, split or merged it, oldest first, in words —
+"From “⟨session title⟩”" (the title is a link that opens that session), "Brought back from a hunt
+in “…”", "Imported", "Added by you", "Moved by you to ⟨path⟩", "Placed by the graph builder in
+⟨path⟩", "Moved into “⟨part⟩” when you split ⟨path⟩", "Merged with “⟨other title⟩”: the same
+claim" — each with its date, and the builder's verbatim `quote` in italics under it when it gave
+one. A session that no longer exists reads "a session no longer on this device", with no link. A
+claim restated by many runs shows its first two steps, "… N more", and its last four. The hidden
+list's `Where “⟨title⟩” came from` button moves focus into the card's section, so the record and
+its links are reachable from the keyboard.
 
 **Claims are styled by kind** (`mechanism`, `fact`, `procedure`, `perceptual`, `argument`), which
 the graph stores per claim: ink colour, ring weight and ring dash differ per kind, and the kind is
@@ -1422,7 +1506,7 @@ motion is off as above.
 **Focus.** Opening focuses the page heading (`tabindex="-1"`); "← Home" returns focus to Home's
 "Map" button.
 
-**Backend.** One read-only command, `knowledge_map()`, returns
+**Backend.** `knowledge_map()` returns
 
 ```
 { "topics":     [{ "id", "title", "parent": null | "id" }],
@@ -1656,10 +1740,18 @@ Details and the two gaps:
   description)" under each, as specified.
 - The returned block shows the notes, then the links, then that phrase per file, and "Debrief in
   progress." — or "Debriefed. Teaching continues." once `hunt.debriefed` is true.
-- **Not shipped:** the sorted-claim list from `debrief_record`. `session_state` carries no claims, and
-  the `debrief` op's payload is not part of the UI contract, so
-  rendering them would mean a second width of backend change. The debrief's prose reply is where the
-  learner sees the sort for now.
+- **The sorted-claim list (built 2026-11-12, `cards.js::debriefList`, item kind `debrief`).** The
+  `debrief` op (`{ huntId, claims: [{ claim, verdict, note, source?, attribution?, scope? }] }`) is
+  part of the UI contract now: `timeline.js` turns it into a flow item where it sits in the op log —
+  after the reply text that came with the `debrief_record` call, since a reply's message op is
+  written before its tool ops. The item is a `section` labelled by its small-caps kicker "Debrief",
+  then "What you brought back on: ⟨the hunt's question⟩", then one group per verdict that has
+  claims, in the order Correct ✓, Partly ◐, Not right ✗, Rule of thumb, Saved for later (a heading
+  `h3` with the count, e.g. "Partly ◐ · 1", which labels its list). Each claim is the learner's
+  words in the reading face, the tutor's note under it (Markdown), then in `--fs-meta --ink-3`
+  "Whose: ⟨attribution⟩", "When it applies: ⟨scope⟩" for a tip and "Source: ⟨source⟩" when given.
+  Ink only, top and bottom hairlines, no fill: it is reference beside the reply, not a second
+  exercise. A verdict outside the five still renders, under its own name.
 
 #### 7.7.5 Close: field guide and calibration
 
@@ -1973,7 +2065,9 @@ Nothing in this table scrolls, moves focus or animates.
    - the workspace (§7.2.14): `pick_folder() -> path`, `attach_workspace({ sessionId, path }) -> name`, `detach_workspace({ sessionId })`, `workspace_path({ sessionId }) -> path | null`;
    - plugin views (§7.2.15): `plugin_view({ pluginId })`, `plugin_view_url({ pluginId })`, `plugin_view_call({ pluginId, function, args })`, `view_state({ sessionId, artifactId, summary })`, and the shell's `pluginview` URI scheme that serves the view document (§7.2.17);
    - plugins and registries (§7.2.16, §7.2.18, §7.5.1): `plugins()`, `set_plugin_enabled({ id, enabled })`, `install_plugin({ registry, id, version })`, `add_folder_plugin({ path })`, `remove_plugin({ id })`, `missing_locked()`, `registries()`, `add_registry({ name, url })`, `remove_registry({ url })`, `refresh_registries()`, `registry_catalog()`, `install_candidate({ id })`;
-   - sync (§7.1, §7.5.2): `sync_status()`, `set_sync({ remote, token, branch })`, `set_webdav({ url, username, password })`, `sync_now()`, `acknowledge_conflicts()`, `sync_if_changed()`, shapes in `docs/sync-build.md`.
+   - sync (§7.1, §7.5.2): `sync_status()`, `set_sync({ remote, token, branch })`, `set_webdav({ url, username, password })`, `sync_now()`, `acknowledge_conflicts()`, `sync_if_changed()`, shapes in `docs/sync-build.md`;
+   - the Map's graph edits (§7.6, built 2026-11-12): `graph_splits() -> [{ topic, groups: [{ title, nodeIds, why? }] }]` (recomputes `graph/splits.proposed.json`), `decide_splits({ accept: topic[], dismiss: topic[], titles?: { topic: name[] } }) -> { accepted, dismissed, remaining }`, `place_node({ nodeId, home }) -> { nodeId, from, to }` (one learner `place` op) and `node_provenance({ nodeId }) -> { nodeId, title, aliases, events: [{ at, kind: created | updated | placed | split | merged, nodeId, provenance?, home?, by?, group?, other?, otherTitle?, sessionTitle? }] }`;
+   - the debrief list (§7.7.4): the `debrief` op `{ op: "debrief", opId, at, huntId, claims }` in the op log and the `op` event — no command.
 
    Nothing else in Rust changes for the UI.
    - **Events:** subscribe once via `subscribe_events({ onEvent: channel })`. The event kinds are `session`, `turnStart`, `text`, `thinking`, `op` and `turnEnd(error?)`.

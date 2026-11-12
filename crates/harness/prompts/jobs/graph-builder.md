@@ -59,7 +59,7 @@ A proposition is one self-contained claim the learner could hold, stated so some
 
 A session that only measured, or taught nothing general, gets the empty submission `{}`.
 
-For each proposition give: `nodeId` (a lowercase slug), `statement` (math in LaTeX), `kind`, `home`, and `title` when the statement is long.
+For each proposition give: `nodeId` (a lowercase slug), `statement` (math in LaTeX), `kind`, `home`, and `title` when the statement is long. Add `"provenance": { "type": "session", "quote": "…" }` with the one sentence of the tutor's teaching the claim rests on, copied verbatim, when one sentence carries it: the learner sees the quote on the map and judges the claim by it. The app fills in the session and time.
 
 `kind` is `mechanism`, `fact`, `procedure`, `perceptual`, `argument` or `heuristic`.
 - A `heuristic` is a practitioner's rule of thumb — useful and true enough, not a law — and is never a `fact`. It **must** carry `attribution` (whose practice it is) and `scope` (when it applies, and when it doesn't). Example: "Place a 100 nF ceramic capacitor next to each IC's power pin" — attribution "electronics design-guide practice", scope "digital and mixed-signal boards; not a substitute for decoupling analysis at high frequency".

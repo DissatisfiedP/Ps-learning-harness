@@ -602,11 +602,12 @@ new evidence.
    code checks that the topic is the right one — and the learner cannot edit or remove a venue in
    the UI yet (a correction means a later builder run restating the row, or a hand edit of
    `graph/ops.jsonl`).
-4. **"The same controls are available on the plan sheet during teaching" (§4) is half built.** The
-   sheet shows each section's aim, known and refuted status and offers the sheet's existing free-text
-   "Change plan", which goes through the planner job; the structured "⋯" controls exist only on the
-   plan card while the plan awaits approval. `docs/ui-design.md` §7.7.1 records the sheet's reduced
-   scope as shipped; the structured controls there are still owed.
+4. **"The same controls are available on the plan sheet during teaching" (§4) is built (2026-11-12).**
+   While teaching, the sheet's topic boxes carry the card's "⋯" and side drawer, its Sections drawer
+   carries the plan options and an "Options" per section, and pending edits go out as one
+   `edit_plan` through the same planner job (`docs/ui-design.md` §7.2.9). What differs from the
+   card: a finished section offers no edits ("Change plan" can still ask to revisit it), and there
+   are no install chips mid-lesson.
 5. **The Map's session-derived lines still come from one session.** The confidence line and the
    frontier list are read from the newest Learn session because the Map has no plan grouping. That
    no longer applies to the guide: venues are per topic and render with no session at all. Two

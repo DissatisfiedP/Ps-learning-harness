@@ -194,9 +194,147 @@
     },
   };
 
+  // The learning fixture (`?fixture=learn`) for the `map` and `session`
+  // cases: a small knowledge graph with one topic-split proposal, and one
+  // Learn session in Teach whose hunt came back and was debriefed. The graph
+  // commands change it the way the backend would (`decide_splits` adds the
+  // child topics and moves the ideas, `place_node` moves one), so the Map's
+  // reload shows the result.
+  const learnFixture = new URLSearchParams(location.search).get('fixture') === 'learn';
+  const at = '2026-11-03T10:00:00.000Z';
+  const graph = {
+    topics: [
+      { id: 'math', title: 'Mathematics', parent: null },
+      { id: 'calc', title: 'Calculus', parent: 'math' },
+      { id: 'alg', title: 'Algebra', parent: 'math' },
+    ],
+    nodes: [
+      ['limit', 'Limit of a function', 'fact', 'calc'],
+      ['continuity', 'Continuity at a point', 'mechanism', 'calc'],
+      ['derivative', 'Derivative as a limit', 'mechanism', 'calc'],
+      ['chain', 'Chain rule', 'procedure', 'calc'],
+      ['quadratic', 'Quadratic formula', 'procedure', 'alg'],
+      ['factor', 'Factoring a trinomial', 'procedure', 'alg'],
+    ].map(([id, title, kind, home]) => ({ id, title, statement: `${title}: the claim.`, kind, home, correct: 0, missed: 0 })),
+    edges: [
+      { from: 'limit', to: 'continuity', relation: 'requires', weight: 'load-bearing' },
+      { from: 'limit', to: 'derivative', relation: 'requires', weight: 'load-bearing' },
+      { from: 'derivative', to: 'chain', relation: 'requires', weight: 'load-bearing' },
+      { from: 'factor', to: 'quadratic', relation: 'requires', weight: 'load-bearing' },
+    ],
+    chains: [], splitsProposed: [], venues: [], topicVenues: {}, topicChecks: {},
+  };
+  let splitProposals = [{
+    topic: 'calc',
+    groups: [
+      { title: 'Limit of a function (1)', nodeIds: ['limit', 'continuity'], why: '2 ideas linked by prerequisites' },
+      { title: 'Derivative as a limit (2)', nodeIds: ['derivative', 'chain'], why: '2 ideas linked by prerequisites' },
+    ],
+  }];
+  const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const placed = []; // learner moves, for the provenance record
+  const plan = {
+    version: 1, goal: 'Understand derivatives', approach: 'From limits to the chain rule.', depth: 'solid', explore: 'suggest',
+    minutesPerSitting: null, style: 'socratic',
+    nodes: [
+      { id: 'limit', title: 'Limit of a function', kind: 'fact', requires: [] },
+      { id: 'derivative', title: 'Derivative as a limit', kind: 'mechanism', requires: ['limit'] },
+      { id: 'chain', title: 'Chain rule', kind: 'procedure', requires: ['derivative'] },
+    ],
+    sections: [
+      { id: 's1', title: 'Limits', nodeIds: ['limit'], mode: 'guided', style: 'socratic', plugins: [], notes: '', exit: 'Explains a limit in words.',
+        targetLevel: 'explain', hunt: { available: true, enabled: true, reason: 'People argue about what a limit is.' } },
+      { id: 's2', title: 'Derivatives', nodeIds: ['derivative', 'chain'], mode: 'guided', style: 'socratic', plugins: [], notes: 'Start from secants.',
+        exit: 'Differentiates a composite function.', targetLevel: 'use' },
+    ],
+    tracks: [],
+  };
+  const claims = [
+    { claim: 'A limit is the value the function reaches.', verdict: 'partial', note: 'It is the value approached; the function need not reach it.', source: 'a forum thread' },
+    { claim: 'Limits only exist for continuous functions.', verdict: 'wrong', note: 'A removable gap still has a limit.' },
+    { claim: 'The epsilon-delta definition makes "approaches" precise.', verdict: 'correct', note: 'Exactly what it is for.', source: 'lecture notes' },
+    { claim: 'Sketch the graph before computing a limit.', verdict: 'tip', note: 'A good habit, not a rule.', attribution: 'calculus teachers', scope: 'single-variable functions you can sketch' },
+    { claim: 'Limits in topology use neighbourhoods.', verdict: 'offroute', note: 'Saved for later.' },
+  ];
+  const session = { id: 'L1', mode: 'learn', title: 'Derivatives', createdAt: at, updatedAt: at };
+  const hunt = {
+    huntId: 'h1', sectionId: 's1', question: 'Find out what people mean by a limit, and where they disagree.',
+    lookAt: [{ kind: 'forum', why: 'see the arguments' }], bringBack: ['claims'], state: 'returned',
+    returned: { notes: 'Some say a limit is reached, some say approached.', links: [], files: [] }, debriefed: true,
+  };
+  const sessionOps = [
+    { op: 'message', opId: 'o1', at, role: 'user', content: 'Teach me derivatives.' },
+    { op: 'plan', opId: 'o2', at, payload: plan },
+    { op: 'phase', opId: 'o3', at, phase: 'teach', sectionId: 's1' },
+    { op: 'tool', opId: 'o4', at, agent: 'tutor', callId: 'h1', name: 'hunt_send', args: { sectionId: 's1', question: hunt.question, lookAt: hunt.lookAt, bringBack: hunt.bringBack } },
+    { op: 'tool', opId: 'o5', at, agent: 'tutor', callId: 'h1', result: { content: 'Hunt sent.', isError: false } },
+    { op: 'message', opId: 'o6', at, role: 'user', content: '[hunt return] Some say reached, some say approached.' },
+    { op: 'message', opId: 'o7', at, role: 'assistant', content: 'Good finds. Let me sort what you brought back before we start.' },
+    { op: 'tool', opId: 'o8', at, agent: 'tutor', callId: 'd1', name: 'debrief_record', args: { huntId: 'h1', claims } },
+    { op: 'debrief', opId: 'o9', at, huntId: 'h1', claims },
+    { op: 'tool', opId: 'o10', at, agent: 'tutor', callId: 'd1', result: { content: 'Debrief recorded (5 claims).', isError: false } },
+  ];
+  const sessionState = {
+    phase: 'teach', ended: false, plan, planVersion: 1, approvedVersion: 1, currentSection: 's1', completedSections: [], checks: {},
+    activePlugins: [], lastNodeId: null, knownRefuted: [], nodeLevels: {}, hunt, hunts: [hunt], pendingPlanQuestion: null,
+    openJobs: [], queuedJobs: [], grants: [], fileGrants: [], workspace: null, calibration: null, branch: null,
+  };
+  const learnHandlers = {
+    list_sessions: () => [structuredClone(session)],
+    load_session: ({ id }) => {
+      if (id !== 'L1') throw new Error(`no session ${id}`);
+      return { ...structuredClone(session), ops: structuredClone(sessionOps) };
+    },
+    session_state: () => structuredClone(sessionState),
+    vision_capabilities: () => ({}),
+    edit_plan: () => null,
+    set_hunt: () => null,
+    knowledge_map: () => structuredClone(graph),
+    edge_proposals: () => ({ proposals: [], titles: {} }),
+    graph_splits: () => structuredClone(splitProposals),
+    decide_splits: ({ accept = [], dismiss = [], titles = {} }) => {
+      for (const topic of accept) {
+        const p = splitProposals.find((s) => s.topic === topic);
+        if (!p) throw new Error(`no split is proposed for: ${topic}`);
+        p.groups.forEach((g, i) => {
+          const title = titles[topic]?.[i]?.trim() || g.title;
+          const id = slug(title);
+          graph.topics.push({ id, title, parent: topic });
+          for (const n of graph.nodes) if (g.nodeIds.includes(n.id) && n.home === topic) n.home = id;
+        });
+      }
+      splitProposals = splitProposals.filter((p) => !accept.includes(p.topic) && !dismiss.includes(p.topic));
+      return { accepted: accept, dismissed: dismiss, remaining: splitProposals.length };
+    },
+    place_node: ({ nodeId, home }) => {
+      const n = graph.nodes.find((x) => x.id === nodeId);
+      if (!n) throw new Error(`there is no idea \`${nodeId}\` on the map`);
+      if (n.home === home) throw new Error(`\`${n.title}\` is already in that topic`);
+      const from = n.home;
+      n.home = home;
+      placed.push({ nodeId, home, at: new Date().toISOString() });
+      return { nodeId, from, to: home };
+    },
+    node_provenance: ({ nodeId }) => {
+      const n = graph.nodes.find((x) => x.id === nodeId);
+      if (!n) throw new Error(`there is no idea \`${nodeId}\` on the map`);
+      const events = [
+        nodeId === 'quadratic'
+          ? { at, kind: 'created', nodeId, provenance: { type: 'import', at } }
+          : { at, kind: 'created', nodeId, provenance: { type: 'builder', sessionId: 'L1', at, quote: `${n.title} is what the lesson rests on.` }, sessionTitle: 'Derivatives', home: 'calc' },
+      ];
+      if (nodeId === 'chain') {
+        events.push({ at, kind: 'merged', nodeId, other: 'chain-2', otherTitle: 'Differentiating a composition' });
+      }
+      for (const p of placed) if (p.nodeId === nodeId) events.push({ at: p.at, kind: 'placed', nodeId, home: p.home, by: 'learner', provenance: { type: 'learner', at: p.at } });
+      return { nodeId, title: n.title, aliases: nodeId === 'chain' ? ['chain-2'] : [], events };
+    },
+  };
+
   const handlers = {
     ...syncHandlers,
     ...appHandlers,
+    ...(learnFixture ? learnHandlers : {}),
     plugins: () => plugins,
     plugin_view: ({ pluginId }) => {
       if (!views[pluginId]) throw new Error(`plugin \`${pluginId}\` has no view`);
