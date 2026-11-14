@@ -394,6 +394,90 @@ async fn a_planner_question_pauses_the_plan_and_the_answer_resumes_it() {
     );
 }
 
+/// An answer to the planner's question is refused while another planner run
+/// is open, as `edit_plan` is: two runs would write competing plans. Once
+/// the run ends the same answer is taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_answer_waits_for_an_open_planner_run() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("plan-ask-open-job");
+    let h = harness(&repo, &config, &base).await;
+
+    let id = session_awaiting_approval(
+        &h,
+        &script,
+        &release,
+        vec![Reply::Calls(
+            "",
+            vec![(
+                "w1",
+                "plan_write",
+                plan_with(json!({ "targetLevel": "use" })),
+            )],
+        )],
+    )
+    .await;
+    script.push("tutor", Reply::Text("Let's start."));
+    approve_now(&h, &id).await;
+    script.push(
+        "planner",
+        Reply::Calls(
+            "",
+            vec![(
+                "a1",
+                "plan_ask",
+                json!({ "question": "Which part do you already know?",
+                    "options": ["The series current", "The load effect"] }),
+            )],
+        ),
+    );
+    h.edit_plan(&id, plan_edits(), None).await.unwrap();
+    h.wait_background(&id).await;
+    assert!(h
+        .session_state(&id)
+        .unwrap()
+        .pending_plan_question
+        .is_some());
+
+    // A second edit starts a planner run that is held mid-call.
+    let gate = Arc::new(Semaphore::new(0));
+    script.push(
+        "planner",
+        Reply::Wait(
+            Arc::clone(&gate),
+            Box::new(Reply::Calls(
+                "",
+                vec![("k1", "plan_keep", json!({ "reason": "Already fits." }))],
+            )),
+        ),
+    );
+    script.push("tutor", Reply::Text("Plan kept."));
+    h.edit_plan(&id, plan_edits(), None).await.unwrap();
+    let err = h
+        .answer_plan_question(&id, "The series current")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("planner is already working"), "{err}");
+    let answered = ops(&h, &id).iter().any(|o| matches!(o, Op::PlanAnswer(_)));
+    assert!(!answered, "a refused answer writes nothing");
+
+    gate.add_permits(1);
+    h.wait_background(&id).await;
+    script.push(
+        "planner",
+        Reply::Calls("", vec![("k2", "plan_keep", json!({ "reason": "Noted." }))]),
+    );
+    script.push("tutor", Reply::Text("Noted."));
+    h.answer_plan_question(&id, "The series current")
+        .await
+        .unwrap();
+    h.wait_background(&id).await;
+    assert_eq!(h.session_state(&id).unwrap().pending_plan_question, None);
+}
+
 // ---------------------------------------------------------------------------
 // Known sections
 // ---------------------------------------------------------------------------

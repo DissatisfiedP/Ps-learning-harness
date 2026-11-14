@@ -288,7 +288,13 @@
       if (id !== 'L1') throw new Error(`no session ${id}`);
       return { ...structuredClone(session), ops: structuredClone(sessionOps) };
     },
-    session_state: () => structuredClone(sessionState),
+    // `&turnError=…` makes the backend report a failed last turn.
+    session_state: () => ({
+      ...structuredClone(sessionState),
+      ...(new URLSearchParams(location.search).get('turnError')
+        ? { lastTurnError: new URLSearchParams(location.search).get('turnError') }
+        : {}),
+    }),
     vision_capabilities: () => ({}),
     edit_plan: () => null,
     set_hunt: () => null,

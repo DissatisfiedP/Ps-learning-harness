@@ -284,7 +284,8 @@ pub fn plan_args(plugins: &[&str]) -> Value {
         "goal": "Dividers", "approach": "One section.",
         "nodes": [{"id": NODE, "title": "The divider rule", "kind": "mechanism", "requires": []}],
         "sections": [{"id": "s1", "title": "Dividers", "nodeIds": [NODE], "mode": "mechanism",
-            "style": "mixed", "plugins": plugins, "notes": "", "exit": "Solves a divider."}]
+            "style": "mixed", "plugins": plugins, "notes": "", "exit": "Solves a divider.",
+            "targetLevel": "explain"}]
     })
 }
 

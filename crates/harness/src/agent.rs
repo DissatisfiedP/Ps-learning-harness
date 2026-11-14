@@ -20,7 +20,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use providers::{
-    ChatRequest, Completion, Message, ProviderId, Role, StopReason, StreamEvent, ToolCall, ToolSpec,
+    ChatRequest, Completion, ContentBlock, Message, ProviderId, Role, StopReason, StreamEvent,
+    ToolCall, ToolSpec,
 };
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
@@ -151,14 +152,14 @@ impl Harness {
 
     /// Ops of a writable Learn session: one the agent runtime wrote and, on
     /// mobile, not locked for a desktop-only plugin (`mobile.rs`).
-    pub(crate) fn learn_ops(&self, session_id: &str) -> Result<Vec<Op>, Error> {
+    pub(crate) fn learn_ops(&self, session_id: &str) -> Result<Arc<Vec<Op>>, Error> {
         let ops = self.runtime_learn_ops(session_id)?;
         self.check_mobile_lock(&ops)?;
         Ok(ops)
     }
 
     /// Ops of a Learn session the agent runtime wrote (the legacy rule only).
-    pub(crate) fn runtime_learn_ops(&self, session_id: &str) -> Result<Vec<Op>, Error> {
+    pub(crate) fn runtime_learn_ops(&self, session_id: &str) -> Result<Arc<Vec<Op>>, Error> {
         let parsed = self.store.parsed_ops(session_id)?;
         let mode = parsed.ops.iter().find_map(|o| match o {
             Op::Session(h) => Some(h.mode),
@@ -182,6 +183,10 @@ impl Harness {
         if let Some(b) = state.branch.as_mut().filter(|b| b.origin.is_empty()) {
             b.origin = session_id.to_owned();
         }
+        if let Some(turn) = lock(&self.turns).get(session_id) {
+            state.turn_running = turn.running;
+            state.last_turn_error.clone_from(&turn.error);
+        }
         Ok(state)
     }
 
@@ -203,34 +208,26 @@ impl Harness {
         Ok(())
     }
 
-    /// Remove every saved credential string from text that will be persisted
-    /// or shown (error messages can echo request details).
+    /// Remove every saved credential secret (API keys, access and refresh
+    /// tokens, configured or from the environment) from text that will be
+    /// persisted or shown (error messages can echo request details). The rule
+    /// is [`redact_secrets`]'s.
     pub(crate) fn redact(&self, text: &str) -> String {
+        let env: Vec<providers::Credential> = ProviderId::ALL
+            .iter()
+            .filter_map(|p| p.credential_from_env())
+            .collect();
         let secrets: Vec<String> = {
             let config = lock(&self.config);
             config
                 .credentials
                 .values()
-                .filter_map(|c| serde_json::to_value(c).ok())
-                .flat_map(|v| strings_in(&v))
-                .chain(
-                    ProviderId::ALL
-                        .iter()
-                        .filter_map(|p| match p.credential_from_env() {
-                            Some(providers::Credential::ApiKey { key }) => Some(key),
-                            Some(providers::Credential::ClaudeCode(s)) => Some(s.access_token),
-                            Some(providers::Credential::Codex(s)) => Some(s.access_token),
-                            _ => None,
-                        }),
-                )
-                .filter(|s| s.len() >= 12)
+                .chain(&env)
+                .flat_map(credential_secrets)
+                .map(str::to_owned)
                 .collect()
         };
-        let mut out = text.to_owned();
-        for s in secrets {
-            out = out.replace(&s, "[redacted]");
-        }
-        out
+        redact_secrets(text, &secrets)
     }
 
     // ---- model calls -------------------------------------------------------
@@ -619,7 +616,16 @@ impl Harness {
             },
         );
         let started = std::time::Instant::now();
+        *lock(&self.turns).entry(session_id.to_owned()).or_default() = crate::TurnStatus {
+            running: true,
+            error: None,
+        };
         let result = self.tutor_loop(session_id).await;
+        let error = result.as_ref().err().map(|e| self.redact(&e.to_string()));
+        *lock(&self.turns).entry(session_id.to_owned()).or_default() = crate::TurnStatus {
+            running: false,
+            error: error.clone(),
+        };
         // Sessions run over days and practice happens between sittings, so
         // the graph keeps up during the session, not only at its end.
         self.spawn_graph_after(session_id, Trigger::Turn);
@@ -633,7 +639,7 @@ impl Harness {
             session_id,
             AgentEvent::TurnEnd {
                 agent: AgentName::Tutor,
-                error: result.as_ref().err().map(|e| self.redact(&e.to_string())),
+                error,
             },
         );
         result
@@ -680,6 +686,9 @@ impl Harness {
                     continue;
                 }
             }
+            // Appends below must not copy the shared log for a snapshot this
+            // loop no longer reads (sessions.rs, `Store::ops`).
+            drop(ops);
 
             let (stop_tx, stop_rx) = oneshot::channel();
             lock(&self.running).insert(session_id.to_owned(), stop_tx);
@@ -697,6 +706,14 @@ impl Harness {
                 .await;
             lock(&self.running).remove(session_id);
             let reply = reply?;
+            // A plugin call records the plugin and where it runs, so a device
+            // without it can apply the mobile rule (mobile.rs).
+            let stamps: Vec<_> = {
+                let ops = self.store.ops(session_id)?;
+                (reply.completion.tool_calls.iter())
+                    .map(|c| self.plugin_stamp(&ops, &c.name))
+                    .collect()
+            };
             self.persist_reply(session_id, &reply)?;
             if reply.interrupted {
                 break;
@@ -716,11 +733,8 @@ impl Harness {
             }
             let mobile = self.is_mobile();
             let mut paused = false;
-            for call in &calls {
-                // A plugin call records the plugin and where it runs, so a
-                // device without it can apply the mobile rule (mobile.rs).
+            for (call, stamp) in calls.iter().zip(stamps) {
                 let mut op = tool_op(call, None);
-                let stamp = self.plugin_stamp(&ops, &call.name);
                 // On mobile: the desktop-only plugin this call goes to.
                 let desktop_only = stamp
                     .as_ref()
@@ -783,7 +797,7 @@ impl Harness {
         }
         let mut m = sessions::new_message(Role::Assistant, reply.text.clone());
         m.thinking.clone_from(&reply.thinking);
-        m.native.clone_from(&reply.completion.native);
+        m.native = capped_native(&reply.completion.native, session_id);
         m.model = Some(reply.model.clone());
         m.ending = if reply.interrupted {
             Some(Ending::Interrupted)
@@ -2439,6 +2453,14 @@ impl Harness {
                 "the planner isn't waiting for an answer".into(),
             ));
         };
+        // As in `edit_plan`: a second planner run would race the open one.
+        if state.open_jobs.iter().any(|j| j.kind == "plan") {
+            return Err(Error::Invalid(
+                "the planner is already working; wait for its answer".into(),
+            ));
+        }
+        let request = plan_answer_request(&question, answer, latest_plan_edit(&ops).as_ref());
+        drop(ops);
         self.append(
             session_id,
             Op::PlanAnswer(PlanAnswerOp {
@@ -2448,7 +2470,6 @@ impl Harness {
                 answer: answer.to_owned(),
             }),
         )?;
-        let request = plan_answer_request(&question, answer, latest_plan_edit(&ops).as_ref());
         self.spawn_job(
             session_id,
             "plan",
@@ -3178,13 +3199,92 @@ fn days_until(date: &str) -> Option<i64> {
     Some((d - chrono::Utc::now().date_naive()).num_days())
 }
 
-fn strings_in(v: &Value) -> Vec<String> {
-    match v {
-        Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a.iter().flat_map(strings_in).collect(),
-        Value::Object(o) => o.values().flat_map(strings_in).collect(),
-        _ => Vec::new(),
+/// The secret strings of one credential: the key, or the access and refresh
+/// tokens. Not the type tag, account, domain or expiry, which are ordinary
+/// text and are shown in Settings anyway.
+fn credential_secrets(c: &providers::Credential) -> Vec<&str> {
+    match c {
+        providers::Credential::ApiKey { key } => vec![key.as_str()],
+        providers::Credential::Workbuddy(s) => vec![&s.access_token, &s.refresh_token],
+        providers::Credential::ClaudeCode(s) => vec![&s.access_token, &s.refresh_token],
+        providers::Credential::Codex(s) => vec![&s.access_token, &s.refresh_token],
     }
+}
+
+/// Largest total size (serialized JSON) of one assistant message's native
+/// blocks that is persisted: 1 MiB, several times a full 64k-token reasoning
+/// block with its signature, so a real reply is never touched; it stops a
+/// runaway or malformed block from bloating the synced op log.
+const MAX_NATIVE_BYTES: usize = 1024 * 1024;
+
+/// The native blocks to persist: all of them, or none when together they pass
+/// [`MAX_NATIVE_BYTES`]. All or none, because a wire that replays reasoning
+/// accepts it only complete and unmodified (consecutive signed thinking
+/// blocks). The readable `thinking` text is stored separately and kept, and
+/// replay then sends the message without native blocks, as it does when a
+/// session continues on another wire.
+pub(crate) fn capped_native(native: &[ContentBlock], session_id: &str) -> Vec<ContentBlock> {
+    let size: usize = native
+        .iter()
+        .map(|b| serde_json::to_vec(b).map_or(0, |v| v.len()))
+        .sum();
+    if size <= MAX_NATIVE_BYTES {
+        return native.to_vec();
+    }
+    tracing::warn!(
+        session = session_id,
+        bytes = size,
+        blocks = native.len(),
+        "native reasoning blocks over the persistence cap were dropped"
+    );
+    Vec::new()
+}
+
+/// From this length on a secret is replaced wherever it occurs.
+const REDACT_ANYWHERE: usize = 8;
+
+/// Replace each non-empty secret in `text` with `[redacted]`, whatever its
+/// length. A secret of [`REDACT_ANYWHERE`] or more characters is replaced
+/// wherever it occurs (inside a URL, a header, a longer token). A shorter one
+/// would match inside ordinary words (a key `abc` in "abcde"), so it is
+/// replaced only where it stands alone: no letter, digit, `-` or `_` directly
+/// before or after it. A very short secret that is also a word ("a") is still
+/// redacted where that word stands alone — the price of never echoing it.
+/// Matches are found on the original text, so one secret's replacement can't
+/// be matched by another.
+fn redact_secrets(text: &str, secrets: &[String]) -> String {
+    let token = |c: char| c.is_alphanumeric() || c == '-' || c == '_';
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    for s in secrets.iter().filter(|s| !s.is_empty()) {
+        let anywhere = s.chars().count() >= REDACT_ANYWHERE;
+        for (at, _) in text.match_indices(s.as_str()) {
+            let end = at + s.len();
+            let alone = !text[..at].chars().next_back().is_some_and(token)
+                && !text[end..].chars().next().is_some_and(token);
+            if anywhere || alone {
+                hits.push((at, end));
+            }
+        }
+    }
+    if hits.is_empty() {
+        return text.to_owned();
+    }
+    hits.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    for (at, end) in hits {
+        if end <= done {
+            continue;
+        }
+        if at >= done {
+            out.push_str(&text[done..at]);
+            out.push_str("[redacted]");
+        }
+        // An overlapping hit extends the redacted span.
+        done = end;
+    }
+    out.push_str(&text[done..]);
+    out
 }
 
 pub(crate) fn clip(s: &str, max: usize) -> String {
@@ -3197,6 +3297,49 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_blocks_over_the_cap_are_dropped_whole() {
+        let block = |bytes: usize| ContentBlock::Native {
+            wire: providers::Wire::AnthropicMessages,
+            raw: json!({ "type": "thinking", "thinking": "t".repeat(bytes), "signature": "s" }),
+        };
+        let small = vec![block(1000), block(2000)];
+        assert_eq!(capped_native(&small, "s1"), small);
+        // Each block alone fits; together they pass the cap: none is kept.
+        let big = vec![block(MAX_NATIVE_BYTES / 2), block(MAX_NATIVE_BYTES / 2)];
+        assert!(capped_native(&big, "s1").is_empty());
+        assert!(capped_native(&[], "s1").is_empty());
+    }
+
+    #[test]
+    fn every_secret_is_redacted_and_short_ones_only_where_they_stand_alone() {
+        let secrets: Vec<String> = ["sk-live-0123456789abcdef", "tok12", "ab", "x", ""]
+            .map(str::to_owned)
+            .to_vec();
+        let r = |t: &str| redact_secrets(t, &secrets);
+        // Long: everywhere, also inside a URL or a longer token.
+        assert_eq!(
+            r("GET /v1?key=sk-live-0123456789abcdef&x=1 (Bearer sk-live-0123456789abcdefZZ)"),
+            "GET /v1?key=[redacted]&[redacted]=1 (Bearer [redacted]ZZ)"
+        );
+        // Short (under 8): a standalone occurrence goes, even 1–2 characters...
+        assert_eq!(
+            r("401: invalid key 'tok12'; header=ab"),
+            "401: invalid key '[redacted]'; header=[redacted]"
+        );
+        assert_eq!(r("key=x."), "key=[redacted].");
+        // ...but never a piece of an ordinary word or identifier.
+        let plain = "about tabs: tok123 and xylophone, max_ab ab-c";
+        assert_eq!(r(plain), plain);
+        // Overlapping secrets collapse into one span; non-ASCII text is safe.
+        let overlap = vec!["abcdefgh12".to_owned(), "gh12345678".to_owned()];
+        assert_eq!(
+            redact_secrets("é abcdefgh12345678 é", &overlap),
+            "é [redacted] é"
+        );
+        assert_eq!(redact_secrets("nothing here", &[]), "nothing here");
+    }
 
     #[test]
     fn choice_answers_are_graded_by_code_and_dont_know_is_never_wrong() {

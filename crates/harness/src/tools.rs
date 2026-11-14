@@ -832,12 +832,38 @@ pub fn check_plan(
             .cloned()
             .collect();
     }
-    let problems = validate_plan(&plan, state, manifests, installable);
+    let mut problems = missing_target_levels(&plan, state);
+    problems.extend(validate_plan(&plan, state, manifests, installable));
     if problems.is_empty() {
         Ok(plan)
     } else {
         Err(problems)
     }
+}
+
+/// Sections that must carry a `targetLevel` and don't: every section the
+/// plan adds, and every one whose earlier version had a level. A section of a
+/// plan written before levels existed (same id, no level before) may stay
+/// without one, so revising such a plan stays possible; app-written
+/// revision sections are set by code and exempt.
+fn missing_target_levels(plan: &Plan, state: &SessionState) -> Vec<String> {
+    plan.sections
+        .iter()
+        .filter(|s| s.target_level.is_none() && !s.revision)
+        .filter(|s| {
+            let before = state
+                .plan
+                .as_ref()
+                .and_then(|p| p.sections.iter().find(|b| b.id == s.id));
+            before.is_none_or(|b| b.target_level.is_some())
+        })
+        .map(|s| {
+            format!(
+                "section `{}` has no targetLevel (explain, use, analyze or design): every new section needs one, and its `exit` written at that level",
+                s.id
+            )
+        })
+        .collect()
 }
 
 /// Sections whose `targetLevel` isn't one of the four levels. `Level`'s
@@ -1463,14 +1489,52 @@ mod tests {
                 .contains("section `s2` has targetLevel `mastery`"),
             "{problems:?}"
         );
-        // A level the model left out is fine: older plans have none.
-        let mut v = base();
-        v["sections"][1]
-            .as_object_mut()
-            .unwrap()
-            .remove("targetLevel");
-        let checked = check_plan(&v, &state(), &[], &installable()).unwrap();
+    }
+
+    #[test]
+    fn a_new_section_needs_a_level_but_a_section_of_an_older_plan_may_stay_without_one() {
+        let without_level = |mut v: Value| {
+            v["sections"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("targetLevel");
+            v
+        };
+        // A first plan, or a section the revision adds: refused by name.
+        let problems = check_plan(&without_level(base()), &state(), &[], &installable())
+            .unwrap_err()
+            .join("\n");
+        assert!(
+            problems.contains("section `s2` has no targetLevel"),
+            "{problems}"
+        );
+
+        // A plan written before levels existed: its s2 had none, so a
+        // revision that keeps s2 as it was stays valid.
+        let mut older = plan(base());
+        older.sections[1].target_level = None;
+        let st = SessionState {
+            plan: Some(older),
+            ..state()
+        };
+        let checked = check_plan(&without_level(base()), &st, &[], &installable()).unwrap();
         assert_eq!(checked.sections[1].target_level, None);
+
+        // But a section that had a level can't lose it, and a section the
+        // revision adds needs one whatever the older plan did.
+        let mut leveled = plan(base());
+        leveled.sections[0].target_level = Some(Level::Use);
+        let st = SessionState {
+            plan: Some(leveled),
+            ..state()
+        };
+        let problems = check_plan(&without_level(base()), &st, &[], &installable())
+            .unwrap_err()
+            .join("\n");
+        assert!(
+            problems.contains("section `s2` has no targetLevel"),
+            "{problems}"
+        );
     }
 
     #[test]

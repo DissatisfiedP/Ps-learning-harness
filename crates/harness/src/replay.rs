@@ -124,7 +124,7 @@ pub fn replay_state(ops: &[Op]) -> SessionState {
                                     if let Some(correct) =
                                         record_verdict(&mut s, &calls, &t.call_id, verdict)
                                     {
-                                        graded.entry(t.call_id.clone()).or_insert(correct);
+                                        graded.insert(t.call_id.clone(), correct);
                                     }
                                 }
                             }
@@ -135,7 +135,7 @@ pub fn replay_state(ops: &[Op]) -> SessionState {
                             if let (Some(qid), Some(verdict)) = (qid, verdict) {
                                 if let Some(correct) = record_verdict(&mut s, &calls, qid, verdict)
                                 {
-                                    graded.entry(qid.to_owned()).or_insert(correct);
+                                    graded.insert(qid.to_owned(), correct);
                                 }
                             }
                         }
@@ -453,23 +453,33 @@ fn record_verdict(
             .get("level")
             .and_then(Value::as_str)
             .and_then(Level::parse);
-        s.checks
-            .entry(node_id.to_owned())
-            .or_default()
-            .push(CheckVerdict {
-                node_id: node_id.to_owned(),
-                question_id: question_id.to_owned(),
-                verdict: verdict.to_owned(),
-                level,
-            });
+        let verdicts = s.checks.entry(node_id.to_owned()).or_default();
+        let check = CheckVerdict {
+            node_id: node_id.to_owned(),
+            question_id: question_id.to_owned(),
+            verdict: verdict.to_owned(),
+            level,
+        };
+        // A later verdict on the same question replaces the earlier one: a
+        // regraded answer must not leave its old `correct` behind.
+        match verdicts.iter_mut().find(|c| c.question_id == question_id) {
+            Some(earlier) => *earlier = check,
+            None => verdicts.push(check),
+        }
         // The learner model reports the highest level passed per node; never
-        // stored (§2).
-        if correct {
-            if let Some(level) = level {
-                let best = s.node_levels.entry(node_id.to_owned()).or_insert(level);
-                if level > *best {
-                    *best = level;
-                }
+        // stored (§2). Recomputed from the node's checks, so a replaced
+        // verdict takes its level with it.
+        let best = verdicts
+            .iter()
+            .filter(|c| c.verdict == "correct")
+            .filter_map(|c| c.level)
+            .max();
+        match best {
+            Some(level) => {
+                s.node_levels.insert(node_id.to_owned(), level);
+            }
+            None => {
+                s.node_levels.remove(node_id);
             }
         }
     }
@@ -504,8 +514,8 @@ fn calibration(
     graded: &HashMap<String, bool>,
     confidences: &HashMap<String, u32>,
 ) -> Option<Calibration> {
-    // A question graded twice counts once: the first verdict stands, which
-    // the map's keys already do.
+    // A question graded twice counts once, with its latest verdict (the same
+    // rule `checks` follows in `record_verdict`).
     let mut answers: Vec<(bool, u32)> = graded
         .iter()
         .filter_map(|(question_id, correct)| {
@@ -1246,6 +1256,51 @@ mod tests {
         assert_eq!(s.node_level("n2"), None, "a partial pass is not a pass");
         assert_eq!(s.checks["n1"].len(), 4);
         assert_eq!(s.checks["n1"][1].level, Some(Level::Explain));
+    }
+
+    /// A second `verdict_record` for the same question is a regrade: it
+    /// replaces the first in `checks`, the node's level and calibration.
+    #[test]
+    fn a_later_verdict_on_the_same_question_replaces_the_earlier_one() {
+        let regrade = |n: u32, verdict: &str| {
+            let id = format!("v{n}-q1");
+            [
+                call(
+                    &id,
+                    "verdict_record",
+                    serde_json::json!({ "questionId": "q1", "verdict": verdict }),
+                ),
+                result(&id, "verdict_record", "ok", false),
+            ]
+        };
+        let mut ops = graded("q1", "n1", Some("analyze"), 90, "correct");
+        ops.extend(graded("q2", "n1", Some("use"), 90, "wrong"));
+        assert!(replay_state(&ops).node_passed("n1"));
+
+        ops.extend(regrade(2, "wrong"));
+        let s = replay_state(&ops);
+        assert!(!s.node_passed("n1"), "the stale `correct` is gone");
+        assert_eq!(s.node_level("n1"), None);
+        let q1: Vec<&str> = (s.checks["n1"].iter())
+            .filter(|c| c.question_id == "q1")
+            .map(|c| c.verdict.as_str())
+            .collect();
+        assert_eq!(q1, ["wrong"]);
+        assert_eq!(s.checks["n1"].len(), 2);
+
+        ops.extend(regrade(3, "correct"));
+        let s = replay_state(&ops);
+        assert!(s.node_passed("n1"));
+        assert_eq!(s.node_level("n1"), Some(Level::Analyze));
+
+        // Calibration counts the question once, with the latest verdict.
+        for i in 0..18 {
+            ops.extend(graded(&format!("c{i}"), "n2", Some("use"), 90, "correct"));
+        }
+        ops.extend(regrade(4, "wrong"));
+        let c = replay_state(&ops).calibration.unwrap();
+        assert_eq!(c.graded, 20);
+        assert_eq!(c.buckets[0].correct, 18);
     }
 
     fn plan_ask(call_id: &str, question: &str) -> Op {

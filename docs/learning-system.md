@@ -589,9 +589,10 @@ new evidence.
 1. **No real-model run.** Level tagging consistency, hunt eligibility judgement, the known-section
    split, the planner honouring explicit section settings, and the debrief's sorting are proven only
    against the scripted provider and the prompts; they are model behaviour.
-2. **`targetLevel` is prompt-required but schema-optional.** `plan_write` accepts a section without
-   it (revisions of plans written before levels must stay valid), and such a section has no level
-   gate. Requiring it on new sections would close this.
+2. **`targetLevel` is required on new sections (built 2026-11-13).** `plan_write` refuses a section
+   without one, except a section that an older plan (written before levels) already held without a
+   level: revising such a plan stays possible, and that section keeps having no level gate. A
+   section that had a level can't lose it. App-written revision sections are exempt.
 3. **The graph-dependent parts are partly built; the rest still waits** (§2, §5, §6): the graph
    exists and its builder job runs, but the `heuristic` node kind with `attribution`/`scope`,
    `hunt` provenance on nodes (and its `unverified` state until the debrief) and calibration per

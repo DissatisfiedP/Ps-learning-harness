@@ -495,6 +495,16 @@ pub struct SessionState {
     /// The calibration block (§7), present only when the thresholds are met.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibration: Option<Calibration>,
+    /// A tutor turn is running right now in this process. Not derived from
+    /// the ops: set by `Harness::session_state` from the live turn table, so
+    /// a UI that reconnects (or reopens the session) needn't guess it from a
+    /// trailing learner message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turn_running: bool,
+    /// Why the last tutor turn of this session failed, in this process, until
+    /// the next turn starts. Absent after a restart, when nothing ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_error: Option<String>,
     /// The planner's open question on the plan card (§4): a `planAsk` with no
     /// `planAnswer` yet. `answer_plan_question` refuses when it is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

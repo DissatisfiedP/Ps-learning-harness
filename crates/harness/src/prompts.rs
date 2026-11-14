@@ -249,10 +249,14 @@ impl Composer {
             (None, Some(point)) => {
                 out.push_str(&format!("(none yet) · saved starting point: {point}"))
             }
-            _ => out.push_str(&compact_value(state.goal.as_ref())),
+            // The goal and brief are rendered whole: a constraint, venue or
+            // preference cut off here is one the model never reads again.
+            // The record is printed as stored (same keys, same order), so the
+            // text (and the cached prompt prefix) only changes when it does.
+            _ => out.push_str(&full_value(state.goal.as_ref())),
         }
         out.push_str("\n\n## Field brief\n");
-        out.push_str(&compact_value(state.brief.as_ref()));
+        out.push_str(&full_value(state.brief.as_ref()));
         out.push_str("\n\n## Probe map\n");
         if state.probe.is_empty() {
             out.push_str("(none yet)");
@@ -479,6 +483,10 @@ pub fn render(
     Ok(out)
 }
 
+fn full_value(v: Option<&serde_json::Value>) -> String {
+    v.map_or_else(|| "(none yet)".to_owned(), serde_json::Value::to_string)
+}
+
 fn compact_value(v: Option<&serde_json::Value>) -> String {
     match v {
         None => "(none yet)".to_owned(),
@@ -601,6 +609,38 @@ mod tests {
         assert!(text.contains("▶ s1"));
         assert!(text.contains("no graph yet"));
         assert!(text.len() < 8000);
+    }
+
+    /// A long goal or brief reaches the model whole: the constraint and the
+    /// venue at the end of each used to fall past a 600-character cut.
+    #[test]
+    fn session_state_keeps_a_long_goal_and_brief_whole() {
+        let filler = "Some context about why this matters to me. ".repeat(20);
+        let goal = serde_json::json!({
+            "goal": "Pass the circuits exam",
+            "context": filler,
+            "constraints": ["no calculator in the exam"],
+            "venues": ["Tuesday study group"],
+        });
+        let brief = serde_json::json!({
+            "summary": filler,
+            "strands": [{ "name": "the loaded divider, last of all" }],
+        });
+        let state = SessionState {
+            goal: Some(goal.clone()),
+            brief: Some(brief.clone()),
+            ..Default::default()
+        };
+        let text = Composer::session_state(&state);
+        assert!(text.contains(&format!("## Goal\n{goal}\n")), "{text}");
+        assert!(
+            text.contains(&format!("## Field brief\n{brief}\n")),
+            "{text}"
+        );
+        assert!(text.contains("no calculator in the exam") && text.contains("Tuesday study group"));
+        assert!(text.contains("the loaded divider, last of all"));
+        // The same state renders the same text (the prompt prefix caches).
+        assert_eq!(Composer::session_state(&state.clone()), text);
     }
 
     fn representative_state() -> SessionState {

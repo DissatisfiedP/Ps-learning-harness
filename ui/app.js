@@ -1073,13 +1073,21 @@ function offerBranchStart(s) {
   return true;
 }
 
-/** After a crash or a failed turn, the last learner message may have no reply. */
+/**
+ * After a crash or a failed turn, the tutor may owe a reply. The backend says
+ * whether a turn runs (`turnRunning`) and why the last one failed
+ * (`lastTurnError`, this process only); a trailing learner message with
+ * neither is what a restart leaves behind, and still means "no reply yet".
+ */
 function offerReplyIfUnanswered(s) {
   const st = s.st;
-  if (running(s.id, 'tutor') || running(s.id, 'planner') || st.ended || st.pendingCall) return;
+  if (st.turnRunning || running(s.id, 'tutor') || running(s.id, 'planner') || st.ended || st.pendingCall) return;
   if (st.phase !== 'measure' && st.phase !== 'teach') return;
   if (offerBranchStart(s)) return;
-  if (s.tl.items.at(-1)?.kind === 'user' && !s.errorEl) {
+  if (s.errorEl) return;
+  if (st.lastTurnError) {
+    showError({ title: `The last reply failed: ${st.lastTurnError}`, action: 'Try again', onRetry: () => resumeTurn(s), role: 'status' });
+  } else if (s.tl.items.at(-1)?.kind === 'user') {
     showError({ title: 'The tutor hasn’t answered this yet.', action: 'Get a reply', onRetry: () => resumeTurn(s), role: 'status' });
   }
 }

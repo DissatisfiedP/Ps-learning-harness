@@ -1000,6 +1000,10 @@ pub fn run() {
                     .refresh_stale_registries(Duration::from_secs(24 * 60 * 60))
                     .await;
             });
+            // Jobs a previous run left open restart now, not when their
+            // session is next opened (desktop and mobile alike).
+            let recovery = Arc::clone(&harness);
+            tauri::async_runtime::spawn_blocking(move || recovery.recover_interrupted_jobs());
             app.manage(harness);
             app.manage(events);
             app.manage(focus);

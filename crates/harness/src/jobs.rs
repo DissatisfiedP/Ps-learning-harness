@@ -523,7 +523,7 @@ impl Harness {
                 }
             }
             "page_fetch" => match req_str(args, "url") {
-                Ok(url) => match crate::web::page_fetch(&self.client, url).await {
+                Ok(url) => match crate::web::page_fetch(&self.web, url).await {
                     Ok(text) => ResearchStep::Result(text, false),
                     Err(e) => fail(e),
                 },
@@ -603,7 +603,7 @@ impl Harness {
                     Err(e) => return fail(e.to_string()),
                 }
             }
-            (None, Some(url)) => match crate::web::fetch_pdf(&self.client, url).await {
+            (None, Some(url)) => match crate::web::fetch_pdf(&self.web, url).await {
                 Ok(bytes) => bytes,
                 Err(e) => return fail(e),
             },
@@ -1291,6 +1291,38 @@ impl Harness {
             self.spawn_tracked(sid, fut);
         }
         Ok(())
+    }
+
+    /// At app start: [`Harness::recover_jobs`] for every writable Learn
+    /// session with a job left open or a result left undelivered, so an
+    /// interrupted job resumes without its session being opened. Opening a
+    /// session afterwards starts nothing again (`recovered` holds it).
+    /// Sessions locked on this device (mobile) are left for their unlock.
+    /// Reads each file once, outside the op cache. Blocking file IO; call
+    /// from a blocking task inside the runtime.
+    pub fn recover_interrupted_jobs(self: &Arc<Self>) {
+        let sessions = match self.list_sessions() {
+            Ok(list) => list,
+            Err(e) => {
+                tracing::warn!(error = %e, "job recovery: sessions not listed");
+                return;
+            }
+        };
+        for s in sessions {
+            if s.mode != crate::sessions::Mode::Learn || s.read_only {
+                continue;
+            }
+            let Ok(ops) = self.store.read_uncached(&s.id) else {
+                continue;
+            };
+            let state = replay_state(&ops);
+            if state.open_jobs.is_empty() && state.queued_jobs.is_empty() {
+                continue;
+            }
+            if let Err(e) = self.recover_jobs(&s.id) {
+                tracing::warn!(session = %s.id, error = %e, "job recovery failed");
+            }
+        }
     }
 }
 

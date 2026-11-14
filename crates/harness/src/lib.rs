@@ -153,6 +153,14 @@ pub struct RoleTestResult {
     pub model: String,
 }
 
+/// What this process knows about a session's tutor turns (`Harness::turns`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TurnStatus {
+    pub running: bool,
+    /// The error of the last turn that failed, cleared when a turn starts.
+    pub error: Option<String>,
+}
+
 /// Static role metadata for the Settings UI (architecture §4.22).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,10 +177,16 @@ pub struct RoleInfo {
 pub struct Harness {
     pub(crate) repo: PathBuf,
     pub(crate) client: Client,
+    /// Model-steered fetches (`page_fetch`, PDFs, plugin web tools): refuses
+    /// local, LAN and metadata addresses (`web.rs`).
+    pub(crate) web: web::GuardedClient,
     pub(crate) store: sessions::Store,
     pub(crate) config: Mutex<config::Config>,
     /// Stop handles of running tutor/practice turns, by session.
     pub(crate) running: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    /// Per session: whether a tutor turn runs now, and why the last one
+    /// failed (`TurnStatus`). In memory: after a restart nothing is running.
+    pub(crate) turns: Mutex<HashMap<String, TurnStatus>>,
     pub(crate) login_cancelled: AtomicBool,
     /// PKCE verifier/state between the two Claude subscription login steps.
     pub(crate) pending_claude_login: Mutex<Option<PendingLogin>>,
@@ -258,9 +272,11 @@ impl Harness {
         Ok(Self {
             repo: repo.to_owned(),
             client,
+            web: web::GuardedClient::new().map_err(Error::Invalid)?,
             store: sessions::Store::new(repo, config_dir),
             config: Mutex::new(config::Config::load(config_dir, Arc::clone(&secrets))?),
             running: Mutex::new(HashMap::new()),
+            turns: Mutex::new(HashMap::new()),
             login_cancelled: AtomicBool::new(false),
             pending_claude_login: Mutex::new(None),
             pending_codex_login: Mutex::new(None),

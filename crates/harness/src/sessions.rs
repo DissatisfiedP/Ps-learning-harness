@@ -21,7 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Datelike, Utc};
 use providers::{ContentBlock, Role};
@@ -700,8 +700,10 @@ pub struct Store {
 /// What one read of a session file produced.
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedOps {
-    /// Ops in replay order (`at`, then `opId`).
-    pub(crate) ops: Vec<Op>,
+    /// Ops in replay order (`at`, then `opId`). Shared with the cache: a read
+    /// hands out the same allocation, and an append copies it only while a
+    /// reader still holds an older snapshot.
+    pub(crate) ops: Arc<Vec<Op>>,
     /// Lines that did not parse and were skipped; blank lines don't count.
     pub(crate) skipped: usize,
     /// The read-only rule for this file, see [`second_line_is_phase`].
@@ -832,7 +834,7 @@ impl Store {
             match (&mut cache[pos], before, after) {
                 ((_, cached, parsed), Some(before), Some(after)) if *cached == before => {
                     let at = parsed.ops.partition_point(|o| o.key() <= op.key());
-                    parsed.ops.insert(at, op.clone());
+                    Arc::make_mut(&mut parsed.ops).insert(at, op.clone());
                     *cached = after;
                 }
                 _ => {
@@ -857,8 +859,9 @@ impl Store {
     }
 
     /// All ops for a session, sorted by `at` (ties by `opId`). Served from the
-    /// LRU after the first read.
-    pub fn ops(&self, id: &str) -> Result<Vec<Op>, Error> {
+    /// LRU after the first read; the snapshot is shared, not copied, so drop it
+    /// before appending to keep the append from copying the log.
+    pub fn ops(&self, id: &str) -> Result<Arc<Vec<Op>>, Error> {
         Ok(self.parsed_ops(id)?.ops)
     }
 
@@ -934,7 +937,9 @@ impl Store {
     /// A session's ops read from its file, leaving the LRU alone: a scan
     /// over every session must not evict the ones in use.
     pub(crate) fn read_uncached(&self, id: &str) -> Result<Vec<Op>, Error> {
-        Ok(read_file(&self.existing_path(id)?)?.ops)
+        Ok(Arc::unwrap_or_clone(
+            read_file(&self.existing_path(id)?)?.ops,
+        ))
     }
 
     /// Newest activity first. Reads only the first two lines + mtime (M7).
@@ -1290,7 +1295,7 @@ fn read_file(path: &Path) -> Result<ParsedOps, Error> {
     // Lines from merged devices may interleave; `at` is the order of record.
     ops.sort_by(|a, b| a.key().cmp(&b.key()));
     Ok(ParsedOps {
-        ops,
+        ops: Arc::new(ops),
         skipped,
         runtime,
     })
@@ -1342,7 +1347,7 @@ fn session_from_ops(path: &Path, parsed: ParsedOps) -> Result<Session, Error> {
             lineage,
         },
         messages,
-        ops,
+        ops: Arc::unwrap_or_clone(ops),
         skipped_ops: skipped,
     })
 }

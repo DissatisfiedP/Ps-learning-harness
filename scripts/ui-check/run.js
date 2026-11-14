@@ -1018,7 +1018,24 @@ async function session() {
   console.log('session: debrief list (five verdict groups, notes, sources, tip attribution/scope, after the reply), plan sheet controls (box ⋯ → drawer, level + known parts, Escape, plan options, list Options, Send → one edit_plan)');
 }
 
-const cases = { ipc, placement, sync, library, map, session };
+const cases = { ipc, placement, sync, library, map, session, turn };
+// The backend's turn status decides the "reply owed" offer; the page doesn't
+// guess it from the last message.
+async function turn() {
+  const page = await openApp('none', { query: '&fixture=learn&turnError=DeepSeek%20is%20not%20connected' });
+  await until('the session list', () => page.evaluate(`Boolean(document.querySelector('#session-list .session-open'))`));
+  await page.evaluate(`document.querySelector('#session-list .session-open').click()`);
+  await until('the offer', () => page.evaluate(`/The last reply failed: DeepSeek is not connected/.test(document.body.textContent)`));
+  const offer = await page.evaluate(`Boolean([...document.querySelectorAll('button')].find((x) => x.textContent === 'Try again'))`);
+  expect(offer, 'the retry button names the backend error');
+  await page.evaluate(`[...document.querySelectorAll('.turn-error button')].find((x) => x.textContent === 'Try again').click()`);
+  await sleep(400);
+  const cmds = await page.evaluate(`window.__bridge.log.map((c) => c.cmd).slice(-12)`);
+  expect(cmds.includes('resume_turn'), `resume_turn after the click; last commands: ${JSON.stringify(cmds)}`);
+  await page.close();
+  console.log('turn: a failed last turn is offered with the backend reason and retries through resume_turn');
+}
+
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases);
 try {
   for (const name of wanted) {

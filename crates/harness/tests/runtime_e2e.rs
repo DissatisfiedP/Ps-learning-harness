@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use common::*;
 use harness::plugins::{Plugin, PluginContext, ToolFuture, ToolOutcome};
-use harness::providers::ToolSpec;
+use harness::providers::{ProviderId, ToolSpec};
 use harness::state::Phase;
 use harness::{AgentEvent, Harness, Mode, Op, PluginManifest};
 use serde_json::{json, Value};
@@ -214,9 +214,9 @@ async fn scripted_session_runs_end_to_end() {
     cyclic[0]["requires"] = json!(["divider-rule"]);
     let sections = json!([
         {"id": "s1", "title": "Series current", "nodeIds": ["series-current"], "mode": "mechanism",
-         "style": "socratic", "plugins": ["echo", "echo2", "echo3"], "notes": "Root first.", "exit": "Explains one current."},
+         "style": "socratic", "plugins": ["echo", "echo2", "echo3"], "notes": "Root first.", "exit": "Explains one current.", "targetLevel": "explain"},
         {"id": "s2", "title": "Dividers", "nodeIds": ["divider-rule"], "mode": "mechanism",
-         "style": "mixed", "plugins": [], "notes": "", "exit": "Solves for R1."}
+         "style": "mixed", "plugins": [], "notes": "", "exit": "Solves for R1.", "targetLevel": "use"}
     ]);
     s.push("planner", Reply::Calls("", vec![("w1", "plan_write", json!({"goal": "Dividers", "approach": "Bottom up.", "nodes": cyclic, "sections": sections}))]));
     s.push("planner", Reply::Calls("", vec![("w2", "plan_write", json!({"goal": "Dividers", "approach": "Bottom up.", "nodes": nodes, "sections": sections}))]));
@@ -468,6 +468,56 @@ async fn scripted_session_runs_end_to_end() {
     assert!(events.iter().any(|e| matches!(e, AgentEvent::Text { .. })));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_state_says_whether_a_turn_runs_and_why_the_last_one_failed() {
+    let script = Arc::new(Script::default());
+    let base = serve(Arc::clone(&script), Arc::new(Semaphore::new(0))).await;
+    let (repo, config) = temp_dirs("turn-status");
+    let h = harness(&repo, &config, &base).await;
+    let created: Arc<Mutex<Option<String>>> = Arc::default();
+    let sink = Arc::clone(&created);
+    h.set_event_sink(Some(Arc::new(move |sid, ev| {
+        if matches!(ev, AgentEvent::TurnStart { .. }) {
+            *sink.lock().unwrap() = Some(sid.to_owned());
+        }
+    })));
+
+    // A turn held mid-call is reported as running, without any guessing.
+    let gate = Arc::new(Semaphore::new(0));
+    script.push(
+        "tutor",
+        Reply::Wait(Arc::clone(&gate), Box::new(Reply::Text("Hello."))),
+    );
+    script.push("title", Reply::Text("\"Dividers.\""));
+    let starter = Arc::clone(&h);
+    let first = tokio::spawn(async move { starter.start_teaching("voltage dividers").await });
+    let id = loop {
+        if let Some(id) = created.lock().unwrap().clone() {
+            break id;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    let state = h.session_state(&id).unwrap();
+    assert!(state.turn_running && state.last_turn_error.is_none());
+    gate.add_permits(1);
+    first.await.unwrap().unwrap();
+    let state = h.session_state(&id).unwrap();
+    assert!(!state.turn_running && state.last_turn_error.is_none());
+
+    // A failed turn says why, and the next turn clears it.
+    h.set_base_url(ProviderId::Deepseek, Some("http://127.0.0.1:1"))
+        .unwrap();
+    assert!(h.send_learner_message(&id, "and now?").await.is_err());
+    let state = h.session_state(&id).unwrap();
+    assert!(!state.turn_running);
+    assert!(state.last_turn_error.is_some_and(|e| !e.is_empty()));
+    h.set_base_url(ProviderId::Deepseek, Some(&base)).unwrap();
+    script.push("tutor", Reply::Text("Back."));
+    h.resume_turn(&id).await.unwrap();
+    let state = h.session_state(&id).unwrap();
+    assert!(!state.turn_running && state.last_turn_error.is_none());
+}
+
 // ---------------------------------------------------------------------------
 // Restart with a question pending
 // ---------------------------------------------------------------------------
@@ -511,6 +561,65 @@ async fn a_pending_question_survives_restart_and_resumes() {
         .as_str()
         .unwrap()
         .contains("DC circuits"));
+}
+
+/// A job the previous run left open restarts at app start, without its
+/// session being opened; opening it afterwards starts nothing a second time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_interrupted_job_restarts_at_startup_and_only_once() {
+    // The first run's researcher call never gets an answer: the app "closes"
+    // with the scope job open.
+    let first = Arc::new(Script::default());
+    let base = serve(Arc::clone(&first), Arc::new(Semaphore::new(0))).await;
+    let (repo, config) = temp_dirs("recover-at-start");
+    let secrets = Arc::new(harness::secrets::SecretStore::memory());
+    let id = {
+        let h = harness_with_secrets(&repo, &config, &base, Arc::clone(&secrets)).await;
+        session_with_scope_job(&h, &first).await
+    };
+
+    // A new process, pointed at a provider that answers.
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(3));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let h = Arc::new(Harness::open_with_secrets(&repo, &config, secrets).unwrap());
+    h.set_base_url(ProviderId::Deepseek, Some(&base)).unwrap();
+    for _ in 0..3 {
+        script.push("researcher", Reply::Text(PROSE_BRIEF));
+    }
+    script.push("tutor", Reply::Text("The brief is in."));
+    let start = Arc::clone(&h);
+    tokio::task::spawn_blocking(move || start.recover_interrupted_jobs())
+        .await
+        .unwrap();
+    h.wait_background(&id).await;
+
+    let jobs = |h: &Harness| -> Vec<(String, Option<String>)> {
+        ops(h, &id)
+            .into_iter()
+            .filter_map(|o| match o {
+                Op::Job(j) if j.kind == "research" => Some((j.state, j.error)),
+                _ => None,
+            })
+            .collect()
+    };
+    let after_start = jobs(&h);
+    let aborted: Vec<_> = after_start.iter().filter(|(s, _)| s == "aborted").collect();
+    assert_eq!(aborted.len(), 1, "{after_start:?}");
+    assert_eq!(
+        aborted[0].1.as_deref(),
+        Some("interrupted when the app closed")
+    );
+    let (state, error, _) = research_job(&h, &id);
+    assert_eq!(state, "done", "the restarted job ran: {error:?}");
+    assert!(h.session_state(&id).unwrap().brief.is_some());
+    assert_eq!(script.requests_of("researcher").len(), 3);
+
+    // Opening the session (the app's `load_session` runs this) adds nothing.
+    h.recover_jobs(&id).unwrap();
+    h.wait_background(&id).await;
+    assert_eq!(jobs(&h), after_start);
+    assert_eq!(script.requests_of("researcher").len(), 3);
 }
 
 // ---------------------------------------------------------------------------

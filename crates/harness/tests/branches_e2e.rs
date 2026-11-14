@@ -26,11 +26,11 @@ fn branching_plan() -> Value {
         ],
         "sections": [
             {"id": "s-dc", "title": "DC", "nodeIds": ["ohm"], "mode": "mechanism",
-             "style": "mixed", "plugins": [], "notes": "", "exit": "Uses Ohm's law."},
+             "style": "mixed", "plugins": [], "notes": "", "exit": "Uses Ohm's law.", "targetLevel": "use"},
             {"id": "s-ac", "title": "AC", "nodeIds": ["sine"], "mode": "mechanism",
-             "style": "mixed", "plugins": [], "notes": "", "exit": "Reads a sine."},
+             "style": "mixed", "plugins": [], "notes": "", "exit": "Reads a sine.", "targetLevel": "use"},
             {"id": "s-rc", "title": "Filters", "nodeIds": ["rc"], "mode": "mechanism",
-             "style": "mixed", "plugins": [], "notes": "", "exit": "Designs an RC filter."}
+             "style": "mixed", "plugins": [], "notes": "", "exit": "Designs an RC filter.", "targetLevel": "use"}
         ],
         "tracks": [
             {"id": "dc", "title": "DC circuits", "sectionIds": ["s-dc"], "after": []},
@@ -233,7 +233,7 @@ async fn a_branching_plan_forks_at_approval_and_merges_once_when_both_branches_e
         "the branch block is composed"
     );
     assert!(
-        system.contains("- s-dc [mechanism] nodes: ohm · other session\n"),
+        system.contains("- s-dc [mechanism] nodes: ohm · aim: use · other session\n"),
         "{system}"
     );
     assert!(
