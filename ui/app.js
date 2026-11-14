@@ -20,6 +20,8 @@ import { initSync } from './sync.js';
 import { LiveReply, assistantEl, userEl } from './reply.js';
 import { affectsState, applyHuntStates, applyOp, createTimeline, isPending } from './timeline.js';
 import { createSessionList } from './sessions.js';
+import { createPractice, formatChooser, practiceFormat, practicePlace } from './practice.js';
+import { createExamPanel } from './exam.js';
 import { createMap } from './map.js';
 import { installCandidate, loadCatalog, pluginLabel } from './pluginui.js';
 import { getPlugin, loadPlugins, pluginIds } from './pluginstore.js';
@@ -50,8 +52,6 @@ const els = {
   start: $('#start'),
   unavailable: $('#unavailable'),
   liveError: $('#live-error'),
-  hero: $('#hero'),
-  modes: $('#mode-toggle'),
   notice: $('#setup-notice'),
   sessionList: $('#session-list'),
   sessionsError: $('#sessions-error'),
@@ -89,6 +89,8 @@ const els = {
   commentInput: $('#desk-comment-input'),
   commentStatus: $('#desk-comment-status'),
   planPanel: $('#plan-panel'),
+  examToggle: $('#exam-toggle'),
+  examPanel: $('#exam-panel'),
   composer: $('#composer'),
   prompt: $('#prompt'),
   send: $('#send'),
@@ -105,21 +107,20 @@ const els = {
   mapClear: $('#map-clear'),
   mapPractise: $('#map-practise'),
   mapError: $('#map-error'),
+  practice: $('#practice'),
+  practiceFullscreen: $('#practice-fullscreen'),
+  promptLabel: $('#prompt-label'),
+  mapFormat: $('#map-format'),
+  reviewCue: $('#review-cue'),
+  reviewCueText: $('#review-cue-text'),
+  reviewCueFormat: $('#review-cue-format'),
+  reviewCueError: $('#review-cue-error'),
+  practiseDue: $('#practise-due'),
 };
 
-const COPY = {
-  learn: {
-    hero: 'What do you want to learn?',
-    placeholder: 'A topic or goal…',
-  },
-  practice: {
-    hero: 'What do you want to practise?',
-    placeholder: 'A topic or problem set…',
-  },
-};
+const HOME_PLACEHOLDER = 'A topic or goal…';
 
 const READ_ONLY_NOTE = 'Made with an older tutor. Read-only.';
-const GUARD = 'Wait for the reply to finish, or stop it.';
 
 /** Items mounted when a session opens; older ones are prepended on scroll. */
 const PAGE = 40;
@@ -127,9 +128,9 @@ const PAGE = 40;
 const ALIGN_GAP = 32;
 
 const state = {
-  mode: 'learn',
   current: null, // open session view, see newView()
-  practiceBusy: false,
+  startingPractice: null, // { id, onStarted } while start_practice waits for its `session` event
+  cueAsk: null, // the latest review-queue read for Home's cue (stale answers are dropped)
   starting: false, // start_teaching is waiting for its `session` event
   loading: null, // { id, events, wasRunning } while load_session runs
   turns: new Map(), // sessionId -> Set of running agents ("tutor" | "planner")
@@ -149,8 +150,6 @@ function newView(summary) {
     readOnlyReason: summary.readOnlyReason ?? null, // 'legacy' | 'desktop-plugin'
     desktopOnlyPlugins: summary.desktopOnlyPlugins ?? [],
     lockCheck: false, // a desktop-only plugin was used this turn (mobile lock)
-    learn: summary.mode === 'learn',
-    messages: [], // practice history (send_message path)
     tl: createTimeline(),
     start: 0, // index of the oldest mounted item
     live: null, // LiveReply while the tutor streams
@@ -275,24 +274,25 @@ function setPromptError(text) {
 
 const running = (id, agent) => Boolean(id && state.turns.get(id)?.has(agent));
 
-/** A tutor reply is being written into the open view. */
+/** A reply is being written into the open view (a tutor reply, or the coach's turn in Practice). */
 function isStreaming() {
+  if (practice.isOpen()) return practice.isRunning();
   const s = state.current;
   if (!s) return false;
-  if (!s.learn) return state.practiceBusy;
   return running(s.id, 'tutor') || (state.starting && !s.id);
 }
 
 function syncBusy() {
-  const s = state.current;
   const busy = isStreaming();
-  els.send.textContent = !s ? 'Start' : busy ? 'Stop' : 'Send';
-  if (els.send.classList.contains('secondary') !== busy) {
+  els.send.textContent = !(state.current || practice.isOpen()) ? 'Start' : busy ? 'Stop' : 'Send';
+  // Stop is the quiet button; so is Send beside the Practice screen's own primary (Next).
+  const quiet = busy || practice.sendQuiet();
+  if (els.send.classList.contains('secondary') !== quiet) {
     // The Send/Stop swap is a state change, not a hover: never fade it, even
     // when the pointer still rests on the button (§8).
     els.send.style.transition = 'none';
-    els.send.classList.toggle('primary', !busy);
-    els.send.classList.toggle('secondary', busy);
+    els.send.classList.toggle('primary', !quiet);
+    els.send.classList.toggle('secondary', quiet);
     getComputedStyle(els.send).backgroundColor; // commit the new colour untransitioned
     els.send.style.transition = '';
   }
@@ -303,7 +303,7 @@ function syncBusy() {
 }
 
 function updateSendState() {
-  els.send.disabled = isStreaming() ? !state.current?.id : !els.prompt.value.trim();
+  els.send.disabled = isStreaming() ? !(state.current?.id ?? practice.id()) : !els.prompt.value.trim();
 }
 
 function headStatus(text) {
@@ -326,15 +326,6 @@ function applyConfig(config) {
 
 // ---------- Home ----------
 
-function setMode(mode) {
-  state.mode = mode;
-  for (const r of els.modes.querySelectorAll('input')) r.checked = r.value === mode;
-  const copy = COPY[mode];
-  els.hero.textContent = copy.hero;
-  if (!state.current) els.prompt.placeholder = copy.placeholder;
-  composer?.setMode(mode);
-}
-
 async function loadSessions() {
   els.sessionsError.hidden = true;
   try {
@@ -356,8 +347,10 @@ async function renderResume() {
   const ask = (state.resumeAsk = {});
   let place = null;
   if (latest && !latest.readOnly) {
-    if (latest.mode === 'practice') place = 'Practice';
-    else {
+    if (latest.mode === 'practice') {
+      const view = await call('practice_state', { sessionId: latest.id }).catch(() => null);
+      place = practicePlace(view);
+    } else {
       const st = await call('session_state', { sessionId: latest.id }).catch(() => null);
       if (st && !st.ended) place = placeText(st);
     }
@@ -384,6 +377,8 @@ async function deleteSession(id) {
 
 /** Drops the open session's live state before another one replaces it. */
 function closeCurrent() {
+  practice.close();
+  exam.close();
   const s = state.current;
   if (!s) return;
   s.live?.dispose();
@@ -396,17 +391,16 @@ function setComposerContext(home) {
   if (home) {
     els.homeSlot.append(els.composer);
     els.prompt.setAttribute('aria-labelledby', 'hero');
-    els.prompt.placeholder = COPY[state.mode].placeholder;
+    els.prompt.placeholder = HOME_PLACEHOLDER;
     composer?.setSession(null);
-    composer?.setMode(state.mode);
   } else {
     els.dockSlot.append(els.composer);
+    els.promptLabel.textContent = 'Reply to the tutor';
     els.prompt.setAttribute('aria-labelledby', 'prompt-label');
     els.prompt.placeholder = 'Reply to the tutor';
     composer?.setSession(state.current?.id ?? null);
-    // Practice sessions take images only (ui-design §7.3).
-    composer?.setMode(state.current && !state.current.learn ? 'practice' : 'learn');
   }
+  composer?.setMode('learn');
   els.composer.hidden = false;
   setPromptError('');
 }
@@ -420,11 +414,11 @@ function showHome({ focusId = null, focus = null } = {}) {
   els.mapView.hidden = true;
   els.home.hidden = false;
   setComposerContext(true);
-  setMode(state.mode);
   syncBusy();
   els.home.scrollTop = state.homeScroll;
   focusQuiet(focus ?? ((focusId && sessions.openButton(focusId)) || els.prompt));
   renderResume();
+  renderReviewCue();
 }
 
 function showConversation() {
@@ -435,11 +429,11 @@ function showConversation() {
   els.conversation.hidden = false;
   enterSession();
   els.title.textContent = s.title;
-  const learnLive = s.learn && !s.readOnly;
+  const learnLive = !s.readOnly;
   els.phase.hidden = !learnLive;
   els.phase.textContent = '';
   els.headWord.hidden = learnLive;
-  els.headWord.textContent = s.readOnly ? 'Read-only' : 'Practice';
+  els.headWord.textContent = 'Read-only';
   els.planToggle.hidden = true;
   headStatus('');
   workspaceStatus('');
@@ -466,7 +460,7 @@ function renderItem(item) {
     case 'user':
       return userEl(item.msg.content, item.msg.attachments);
     case 'assistant':
-      return assistantEl(item.msg, { showThinking: !s.learn, artifacts: item.artifacts ?? [], ctx });
+      return assistantEl(item.msg, { artifacts: item.artifacts ?? [], ctx });
     case 'artifacts':
       return artifactsEl(item.ops, ctx);
     case 'notice':
@@ -645,7 +639,6 @@ function beginLive(s, { align = false } = {}) {
   const atEnd = align && (s.atEnd || nearBottom());
   s.atEnd = false;
   s.live = new LiveReply({
-    showThinking: !s.learn,
     ctx: () => ({ artifacts: s.tl.artifacts, sessionId: s.id }),
   });
   els.timeline.append(s.live.el);
@@ -761,20 +754,29 @@ function onRuntimeEvent(ev) {
     const agents = state.turns.get(id);
     agents?.delete(ev.agent);
     if (agents?.size === 0) state.turns.delete(id);
-    if (ev.agent === 'tutor') sessions.bump(id);
+    if (ev.agent === 'tutor' || ev.agent === 'coach') sessions.bump(id);
   }
   if (state.loading?.id === id) {
     state.loading.events.push(ev);
     return;
   }
   const s = state.current;
-  if (s?.learn && s.id === id) sessionEvent(s, ev);
+  if (s && s.id === id) sessionEvent(s, ev);
+  else if (practice.isOpen(id)) practice.event(ev);
 }
 
 function onSessionSummary(summary) {
   const known = sessions.has(summary.id);
   const s = state.current;
-  if (state.starting && s?.learn && !s.id && !known && summary.mode === 'learn') {
+  const starting = state.startingPractice;
+  if (starting && !starting.id && !known && summary.mode === 'practice') {
+    starting.id = summary.id;
+    sessions.upsert(summary);
+    openNewPractice(summary);
+    starting.onStarted?.();
+    return;
+  }
+  if (state.starting && s && !s.id && !known && summary.mode === 'learn') {
     s.id = summary.id;
     sessions.upsert(summary);
     setTitle(s, summary.title);
@@ -784,6 +786,7 @@ function onSessionSummary(summary) {
   }
   sessions.upsert(summary);
   if (s?.id === summary.id && summary.title) setTitle(s, summary.title);
+  if (summary.title) practice.setTitle(summary.title, summary.id);
 }
 
 /**
@@ -794,8 +797,14 @@ function onSessionSummary(summary) {
  */
 async function onRepoChanged() {
   const s = state.current;
-  const before = s?.id ? sessions.get(s.id)?.updatedAt : null;
+  const pid = practice.id();
+  const before = (s?.id ?? pid) ? sessions.get(s?.id ?? pid)?.updatedAt : null;
   await loadSessions();
+  if (pid) {
+    const changed = sessions.get(pid)?.updatedAt;
+    if (practice.isOpen(pid) && !state.loading && changed && changed !== before && !practice.isRunning()) practice.refresh();
+    return;
+  }
   if (!s?.id || state.current !== s || state.loading) return;
   const after = sessions.get(s.id)?.updatedAt;
   if (!after || after === before) return;
@@ -961,7 +970,7 @@ async function fetchState(s) {
 }
 
 async function refreshState(s) {
-  if (!s.learn || s.readOnly || !s.id) return;
+  if (s.readOnly || !s.id) return;
   await fetchState(s);
   if (state.current !== s) return;
   applyState(s);
@@ -973,6 +982,7 @@ function applyState(s, { initial = false } = {}) {
   renderPhase();
   renderPlanCard({ free, initial });
   renderPanel();
+  exam.sync(s, s.st);
   renderDesk({ quiet: initial, free });
   if (!s.st) return;
   // Every hunt card's lifecycle (out / returned / skipped / debriefed) is
@@ -1094,7 +1104,7 @@ function offerReplyIfUnanswered(s) {
 
 function renderPhase() {
   const s = state.current;
-  if (!s?.learn || s.readOnly) return;
+  if (!s || s.readOnly) return;
   renderPhaseNav(els.phase, s.st ?? { phase: 'measure' }, {
     planning: running(s.id, 'planner'),
     planFailed: s.planFailed,
@@ -1147,7 +1157,7 @@ async function onPluginsChanged() {
   await loadPlugins(true);
   await loadCatalog(true);
   const s = state.current;
-  if (s?.learn) {
+  if (s) {
     renderPlanCard({ free: false });
   }
 }
@@ -1166,7 +1176,7 @@ function workspaceStatus(text, error = false) {
 }
 
 function renderWorkspace(s) {
-  const availableHere = Boolean(s?.learn && !s.readOnly);
+  const availableHere = Boolean(s && !s.readOnly);
   // More is in every session view (full screen); workspace items only where a workspace can attach.
   els.sessionMenuWrap.hidden = false;
   els.workspaceAttach.hidden = !availableHere;
@@ -1401,7 +1411,7 @@ function renderPlanCard({ free = false, initial = false } = {}) {
  */
 function panelAvailable(s) {
   const st = s?.st;
-  if (!s?.learn || s.readOnly || !st?.plan) return false;
+  if (!s || s.readOnly || !st?.plan) return false;
   if (st.phase === 'awaitApproval') return Boolean(s.panelFromCard);
   return st.phase === 'teach' || st.phase === 'close' || st.ended;
 }
@@ -1409,7 +1419,7 @@ function panelAvailable(s) {
 /** The head's "Plan" button only exists once the plan is approved. */
 function planButtonShown(s) {
   const st = s?.st;
-  return Boolean(s?.learn && !s.readOnly && st?.plan && (st.phase === 'teach' || st.phase === 'close' || st.ended));
+  return Boolean(s && !s.readOnly && st?.plan && (st.phase === 'teach' || st.phase === 'close' || st.ended));
 }
 
 function planButtonName(st) {
@@ -1525,11 +1535,10 @@ function deskState(s) {
     };
   }
   if (s.readOnly) return { note: READ_ONLY_NOTE, button: 'Start a new session', act: 'new', primary: true };
-  if (!s.learn) return { composer: true };
   if (pendingItem(s)) return { note: 'Question waiting.', button: 'Go to question', act: 'question' };
   // Ended: the next step is retrieval practice on what was just taught (§7.9).
   if (s.st?.ended) {
-    return planIdeas(s).length
+    return planTargets(s).length
       ? { note: 'Session complete.', button: 'Practise these ideas', act: 'practise', primary: true }
       : { note: 'Session complete.', button: 'Start a new session', act: 'new', primary: true };
   }
@@ -1543,15 +1552,9 @@ function deskState(s) {
   return { composer: true };
 }
 
-/** The ended session's plan nodes, in the Map selection's shape. */
-function planIdeas(s) {
-  const plan = s.st?.plan;
-  const sections = plan?.sections ?? [];
-  const topicOf = (id) => sections.find((sec) => (sec.nodeIds ?? []).includes(id))?.title ?? null;
-  return (plan?.nodes ?? []).map((n) => ({
-    title: n.title ?? n.id,
-    topic: topicOf(n.id) ?? plan?.goal ?? 'this plan',
-  }));
+/** The ended session's plan ideas that are on the knowledge map, as graph node ids. */
+function planTargets(s) {
+  return [...new Set((s.st?.plan?.nodes ?? []).map((n) => n.graphNode).filter(Boolean))];
 }
 
 /** "A", "A and B", "A, B and C". */
@@ -1585,15 +1588,13 @@ async function recheckLock(s) {
   openSession(s.id);
 }
 
+/** The ended session's practice: its plan ideas that are on the knowledge map. */
 function practiseEnded(s) {
-  if (!modelReady()) {
-    els.deskNoteText.textContent = 'Choose a model first.';
-    openSettings({ to: 'model' });
-    return;
-  }
-  const text = practiseText(planIdeas(s));
-  closeCurrent();
-  runPractice(text);
+  startPractice({
+    targets: planTargets(s),
+    report: (text) => (els.deskNoteText.textContent = text),
+    button: els.deskNoteButton,
+  });
 }
 
 function renderDesk({ quiet = false, free = notEngaged() } = {}) {
@@ -1626,7 +1627,7 @@ function renderDesk({ quiet = false, free = notEngaged() } = {}) {
  * (then the comment goes to the planner). Not while the planner drafts.
  */
 function commentOffered(s) {
-  if (!s?.learn || !s.id || s.readOnly || s.st?.ended) return false;
+  if (!s || !s.id || s.readOnly || s.st?.ended) return false;
   const phase = s.st?.phase;
   if (phase === 'plan') return false;
   return Boolean(pendingItem(s)) || phase === 'awaitApproval' || running(s.id, 'tutor');
@@ -1685,7 +1686,6 @@ function onDeskNoteButton() {
   const s = state.current;
   const act = els.deskNoteButton.dataset.act;
   if (act === 'new') {
-    state.mode = 'learn';
     showHome();
     return;
   }
@@ -1708,10 +1708,14 @@ function onDeskNoteButton() {
 // ---------- opening sessions ----------
 
 async function openSession(id, { reload = false } = {}) {
-  if (state.current?.id === id && !reload) return;
+  if ((state.current?.id === id || practice.isOpen(id)) && !reload) return;
   const loading = { id, events: [], wasRunning: running(id, 'tutor') };
   state.loading = loading;
   const summary = sessions.get(id);
+  if (summary?.mode === 'practice') {
+    await openPractice(id, loading);
+    return;
+  }
   const wantsState = summary?.mode === 'learn' && !summary.readOnly;
   let data;
   let st = null;
@@ -1729,19 +1733,14 @@ async function openSession(id, { reload = false } = {}) {
   if (state.loading !== loading) return; // another session was opened meanwhile
   closeCurrent();
   const s = newView(data);
-  if (s.learn) {
-    for (const op of data.ops ?? []) applyOp(s.tl, op);
-    s.userCount = s.tl.items.filter((i) => i.kind === 'user').length;
-  } else {
-    s.messages = data.messages;
-    s.tl.items = data.messages.map((msg, i) => ({ kind: msg.role === 'user' ? 'user' : 'assistant', key: `m${i}`, msg }));
-  }
+  for (const op of data.ops ?? []) applyOp(s.tl, op);
+  s.userCount = s.tl.items.filter((i) => i.kind === 'user').length;
   if (st?.error) s.stError = st.error;
   else if (st) s.st = st;
   state.current = s;
   showConversation();
   mountTimeline();
-  if (s.learn && !s.readOnly) {
+  if (!s.readOnly) {
     if (loading.wasRunning) ensureLive().midway = true;
     if (!s.st && !s.stError) await fetchState(s);
     if (state.current !== s) return;
@@ -1750,10 +1749,6 @@ async function openSession(id, { reload = false } = {}) {
     for (const ev of loading.events) sessionEvent(s, ev);
   } else {
     state.loading = null;
-    const last = s.messages.at(-1);
-    if (!s.learn && last?.role === 'user') {
-      showError({ title: 'The tutor hasn’t answered this yet.', action: 'Get a reply', onRetry: () => runPractice(null), role: 'status' });
-    }
   }
   fillViewport();
   resume(s);
@@ -1844,85 +1839,11 @@ async function sendLearner(text, attachments = []) {
   }
 }
 
-/**
- * Practice: runs one tutor turn over the per-call channel. `text` is the
- * learner's new message, or null to retry the last unanswered one.
- */
-async function runPractice(text, attachments = []) {
-  const isNew = !state.current;
-  if (isNew) {
-    state.current = newView({ id: null, mode: 'practice', title: text });
-    showConversation();
-    mountTimeline();
-    focusQuiet(els.prompt);
-    ensureKatex().catch(() => {});
-  }
-  const s = state.current;
-  if (text !== null) {
-    s.messages.push({ role: 'user', content: text, attachments });
-    const item = { kind: 'user', key: `m${s.messages.length - 1}`, msg: { role: 'user', content: text, attachments } };
-    s.tl.items.push(item);
-    s.atEnd = !isNew && nearBottom();
-    appendItem(item);
-    if (!isNew) item.el.scrollIntoView({ block: 'nearest', behavior: 'instant' });
-  }
-  const live = beginLive(s, { align: !isNew });
-  state.practiceBusy = true;
-  syncBusy();
-
-  const onEvent = channel((ev) => {
-    if (ev.kind === 'session') {
-      if (!s.id) {
-        s.id = ev.session.id;
-        composer?.setSession(s.id);
-      }
-      sessions.upsert(ev.session);
-      setTitle(s, ev.session.title);
-      updateSendState();
-      return;
-    }
-    if (ev.kind === 'text') live.addText(ev.delta);
-    else if (ev.kind === 'thinking') live.addThinking(ev.delta);
-  });
-
-  let ok = false;
-  try {
-    const stored = text === null
-      ? await call('retry_reply', { sessionId: s.id, onEvent })
-      : await call('send_message', { sessionId: isNew ? null : s.id, mode: 'practice', text, attachments, onEvent });
-    s.messages.push(stored);
-    const item = { kind: 'assistant', key: `m${s.messages.length - 1}`, msg: stored };
-    item.el = live.finalize(stored);
-    if (s.live === live) s.live = null;
-    s.tl.items.push(item);
-    appendItem(item);
-    ok = true;
-  } catch (e) {
-    if (s.live === live) dropLive(s);
-    else live.dispose();
-    if (isNew && !s.id) {
-      state.practiceBusy = false;
-      showHome();
-      els.prompt.value = text;
-      composer?.restore(attachments);
-      autoGrow();
-      setPromptError(message(e));
-    } else if (state.current === s) {
-      showError({ text: message(e), onRetry: () => runPractice(null) });
-    }
-  } finally {
-    state.practiceBusy = false;
-    if (state.current === s) headStatus('');
-    syncBusy();
-    if (s.id) sessions.bump(s.id);
-  }
-  if (ok && state.current === s) {
-    announce('Reply finished.');
-    maybeNudge(s);
-  }
-}
-
 function stop() {
+  if (practice.isOpen()) {
+    practice.stop();
+    return;
+  }
   const s = state.current;
   if (s?.id) call('cancel_reply', { sessionId: s.id }).catch((e) => setPromptError(message(e)));
 }
@@ -1947,20 +1868,173 @@ async function submit(event) {
   autoGrow();
   setPromptError('');
   updateSendState();
-  const s = state.current;
-  if (!s) {
-    if (state.mode === 'learn') startLearn(text, attachments);
-    else runPractice(text, attachments);
-  } else if (s.learn) sendLearner(text, attachments);
-  else runPractice(text, attachments);
+  if (practice.isOpen()) practice.send(text, attachments);
+  else if (!state.current) startLearn(text, attachments);
+  else sendLearner(text, attachments);
 }
 
 function goHome() {
-  if (state.practiceBusy) {
-    headStatus(GUARD);
+  showHome({ focusId: practice.id() ?? state.current?.id });
+}
+
+// ---------- Practice ----------
+
+/** The shared composer, lent to the Practice screen's answer card (images only). */
+const composerHost = {
+  mount(slot, { sessionId, label, placeholder, focus = false }) {
+    slot.append(els.composer);
+    els.composer.hidden = false;
+    els.promptLabel.textContent = label;
+    els.prompt.setAttribute('aria-labelledby', 'prompt-label');
+    els.prompt.placeholder = placeholder;
+    composer?.setSession(sessionId);
+    composer?.setMode('practice');
+    setPromptError('');
+    syncBusy();
+    if (focus) focusQuiet(els.prompt);
+  },
+  unmount() {
+    els.composer.hidden = true;
+    els.dockSlot.append(els.composer);
+  },
+  reset() {
+    els.prompt.value = '';
+    autoGrow();
+    updateSendState();
+  },
+  restore(text, attachments, error) {
+    els.prompt.value = text;
+    composer?.restore(attachments);
+    autoGrow();
+    updateSendState();
+    setPromptError(error);
+    focusQuiet(els.prompt);
+  },
+};
+
+const practice = createPractice({
+  root: els.practice,
+  cmd,
+  announce,
+  composerHost,
+  onBusy: syncBusy,
+  onBack: goHome,
+  openSettings,
+  start: ({ targets, format }) => startPractice({ targets, format, report: (text) => practice.say(text) }),
+});
+
+const exam = createExamPanel({ toggle: els.examToggle, dialog: els.examPanel, cmd, start: startExam });
+
+/** "Sit a timed paper" on the exam dashboard; true once the paper's screen is open. */
+async function startExam({ goalSessionId, budgetMin, report }) {
+  let opened = false;
+  await startPractice({
+    report,
+    run: () => cmd('start_exam', { goalSessionId, budgetMin }),
+    onStarted: () => (opened = true),
+  });
+  return opened;
+}
+
+/** The Practice screen replaces whatever was showing. */
+function showPracticeScreen() {
+  if (!els.home.hidden) state.homeScroll = els.home.scrollTop;
+  els.home.hidden = true;
+  els.mapView.hidden = true;
+  els.conversation.hidden = true;
+  enterSession();
+  refreshFullscreen();
+}
+
+/** A Practice session the learner just started (its `session` event arrived). */
+function openNewPractice(summary) {
+  closeCurrent();
+  showPracticeScreen();
+  practice.open({ summary });
+  syncBusy();
+}
+
+/**
+ * Starts a Practice session. The screen opens on the `session` event (before
+ * the coach has written anything); a refusal before it (no model, an empty map)
+ * is reported where the learner is, through `report`. `run` replaces the
+ * `start_practice` call (an exam paper starts with `start_exam`).
+ */
+async function startPractice({ targets = [], format = practiceFormat(), report, button = null, onStarted = null, run = null }) {
+  if (state.startingPractice) return;
+  if (!modelReady()) {
+    report('Choose a model first.');
+    openSettings({ to: 'model' });
     return;
   }
-  showHome({ focusId: state.current?.id });
+  report('');
+  const starting = { id: null, onStarted };
+  state.startingPractice = starting;
+  if (button) button.disabled = true;
+  ensureKatex().catch(() => {});
+  try {
+    const summary = await (run ? run() : cmd('start_practice', { targets, format }));
+    if (starting.id !== summary.id) {
+      sessions.upsert(summary);
+      starting.id = summary.id;
+      openNewPractice(summary);
+      starting.onStarted?.();
+    } else {
+      practice.refresh();
+    }
+  } catch (e) {
+    // Past the `session` event the turn's own error is on the screen.
+    if (!starting.id) report(e);
+  } finally {
+    state.startingPractice = null;
+    if (button) button.disabled = false;
+  }
+}
+
+/** Opens a Practice session from the list: its state, its op log (figures, a set's answers) and KaTeX. */
+async function openPractice(id, loading) {
+  let data;
+  let view;
+  try {
+    [data, view] = await Promise.all([
+      call('load_session', { id }),
+      call('practice_state', { sessionId: id }),
+      ensureKatex().catch(() => {}),
+    ]);
+  } catch (e) {
+    if (state.loading === loading) state.loading = null;
+    sessions.setRowStatus(id, `Couldn’t open this session: ${message(e)}`);
+    return;
+  }
+  if (state.loading !== loading) return; // another session was opened meanwhile
+  closeCurrent();
+  showPracticeScreen();
+  practice.open({ summary: sessions.get(id) ?? data, data, view });
+  state.loading = null;
+  for (const ev of loading.events) practice.event(ev);
+  syncBusy();
+}
+
+/** Home: due ideas in the review queue, one click from a practice session. */
+async function renderReviewCue() {
+  const ask = (state.cueAsk = {});
+  const queue = await call('review_queue').catch(() => []);
+  if (state.cueAsk !== ask) return;
+  els.reviewCue.hidden = !queue.length;
+  if (!queue.length) return;
+  const names = queue.slice(0, 3).map((item) => item.title);
+  const more = queue.length - names.length;
+  const lead = queue.length === 1 ? '1 idea is due' : `${queue.length} ideas are due`;
+  els.reviewCueText.textContent = `${lead}: ${names.join(', ')}${more > 0 ? `, and ${more} more` : ''}.`;
+}
+
+/** The Home cue's Practise: the scheduler picks what is due. */
+function practiseDue() {
+  startPractice({
+    targets: [],
+    report: (text) => (els.reviewCueError.textContent = text),
+    button: els.practiseDue,
+  });
 }
 
 // ---------- Map ----------
@@ -2039,33 +2113,16 @@ function renderMapDesk(count) {
   if (count) els.mapError.textContent = '';
 }
 
-/** Starts a Practice session on the selected ideas, mixed rather than blocked. */
+/** Starts a Practice session on the selected ideas, in the chosen format. */
 function practiseSelection() {
   const picked = map.selection();
   if (!picked.length) return;
-  if (!modelReady()) {
-    els.mapError.textContent = 'Choose a model first.';
-    openSettings({ to: 'model' });
-    return;
-  }
-  const text = practiseText(picked);
-  map.clear();
-  runPractice(text);
-}
-
-/**
- * First message of a mixed Practice session on `picked` ([{ title, topic }],
- * both from the knowledge map). The first line doubles as the session title
- * until the generated one arrives.
- */
-function practiseText(picked) {
-  const lines = picked.map(({ title, topic }) => `- ${title} (in “${topic}”)`);
-  return [
-    `Practise: ${picked.map((p) => p.title).join(', ')}`,
-    '',
-    'Mix them together rather than one at a time.',
-    ...lines,
-  ].join('\n');
+  startPractice({
+    targets: picked.map((p) => p.id),
+    report: (text) => (els.mapError.textContent = text),
+    button: els.mapPractise,
+    onStarted: () => map.clear(),
+  });
 }
 
 // ---------- wiring ----------
@@ -2088,9 +2145,6 @@ function wire() {
       e.preventDefault();
       if (!isStreaming()) els.composer.requestSubmit();
     }
-  });
-  els.modes.addEventListener('change', (e) => {
-    if (e.target.name === 'mode') setMode(e.target.value);
   });
   els.back.addEventListener('click', goHome);
   els.deskNoteButton.addEventListener('click', onDeskNoteButton);
@@ -2149,9 +2203,21 @@ function wire() {
     focusQuiet(els.mapPractise.disabled ? els.mapHeading : els.mapPractise);
   });
   els.mapPractise.addEventListener('click', practiseSelection);
+  els.practiseDue.addEventListener('click', practiseDue);
+  els.practiceFullscreen.addEventListener('click', () => {
+    toggleFullscreen();
+  });
+  formatChooser(els.mapFormat);
+  formatChooser(els.reviewCueFormat);
   initSettings({ changed: applyConfig, pluginsChanged: onPluginsChanged });
   initSync({ openSettings });
-  initFocus({ onFullscreen: (on) => (els.fullscreenToggle.textContent = on ? 'Exit full screen' : 'Full screen') });
+  initFocus({
+    onFullscreen: (on) => {
+      const label = on ? 'Exit full screen' : 'Full screen';
+      els.fullscreenToggle.textContent = label;
+      els.practiceFullscreen.textContent = label;
+    },
+  });
 }
 
 async function start() {

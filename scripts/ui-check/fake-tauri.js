@@ -389,10 +389,471 @@
     },
   };
 
+  // The coach's Practice commands and events (docs/ui-design.md §11b) for the
+  // `practice` and `practice-set` cases (`?practice=1`, with `&fixture=learn`
+  // for the graph). One in-memory session per `start_practice`; a coach turn
+  // is a turnStart, ops and text deltas, then a turnEnd, with short pauses so
+  // the page can be seen mid-turn. `&practiceSeed=failed,owed,cut,legacy`
+  // adds sessions a restart or a failed turn leaves behind.
+  const practiceParams = new URLSearchParams(location.search);
+  const practiceFixture = practiceParams.get('practice') === '1';
+  const practiceSeed = (practiceParams.get('practiceSeed') ?? '').split(',').filter(Boolean);
+  const channels = [];
+  const emit = (ev) => channels.forEach((ch) => ch.onmessage?.(ev));
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  const practices = new Map();
+  let opSeq = 0;
+  const stamp = () => new Date().toISOString();
+  const bank = [
+    { target: 'chain', title: 'Chain rule', home: 'calc', statement: 'Differentiate $f(x)=\\sin(3x^2)$.', retest: 'Differentiate $g(x)=\\cos(5x^3)$.',
+      solution: [{ move: 'Name the outer function $\\sin u$ and the inner $u=3x^2$.', decisionPoint: true }, { move: 'Multiply $\\cos u$ by $u\'=6x$.', decisionPoint: false }],
+      finalAnswer: '$f\'(x)=6x\\cos(3x^2)$' },
+    { target: 'limit', title: 'Limit of a function', home: 'calc', statement: 'What does $\\lim_{x\\to 2}\\frac{x^2-4}{x-2}$ equal?', retest: 'What does $\\lim_{x\\to 3}\\frac{x^2-9}{x-3}$ equal?',
+      solution: [{ move: 'Factor the numerator: $(x-2)(x+2)$.', decisionPoint: true }, { move: 'Cancel $x-2$ and substitute $x=2$.', decisionPoint: false }],
+      finalAnswer: '$4$' },
+    { target: 'derivative', title: 'Derivative as a limit', home: 'calc', statement: 'Use the definition to find the slope of $g(x)=x^2$ at $x=1$.', retest: 'Use the definition to find the slope of $h(x)=x^2$ at $x=2$.',
+      solution: [{ move: 'Write $\\frac{g(1+h)-g(1)}{h}$.', decisionPoint: false }, { move: 'Simplify to $2+h$ and let $h\\to 0$.', decisionPoint: true }],
+      finalAnswer: '$2$' },
+  ];
+  const summaryOf = (S) => ({
+    id: S.id, mode: 'practice', title: S.title, createdAt: S.createdAt, updatedAt: S.updatedAt, readOnly: false,
+    readOnlyReason: null, desktopOnlyPlugins: [], lineage: null,
+  });
+  const entryOf = (S, p) => bank.find((b) => b.target === p.target) ?? bank[0];
+  const refOf = (b) => ({ id: b.target, title: b.title, home: b.home });
+
+  function newPractice({ id, format = 'stream', picked = [], size = 3, title = 'Practice' }) {
+    const S = {
+      id, format, size, title, picked, problems: [], feed: [], ops: [], answers: [], submitted: false, wrapUp: false, ended: false,
+      running: false, lastError: null, legacy: false, messages: [], createdAt: stamp(), updatedAt: stamp(),
+    };
+    practices.set(id, S);
+    return S;
+  }
+  function emitOp(S, op) {
+    S.updatedAt = stamp();
+    emit({ kind: 'op', sessionId: S.id, op: { opId: `o${++opSeq}`, at: stamp(), ...op } });
+  }
+  function addProblem(S, retestOf = null) {
+    const index = S.problems.length;
+    const want = S.picked.length ? S.picked[index % S.picked.length] : null;
+    const source = retestOf ? S.problems.find((p) => p.id === retestOf) : null;
+    const entry = source ? entryOf(S, source) : (bank.find((b) => b.target === want) ?? bank[index % bank.length]);
+    const p = { id: `p${index + 1}`, index, target: entry.target, status: 'writing', hints: 0, retestOf, statement: null, result: null };
+    S.problems.push(p);
+    emitOp(S, { op: 'practice', event: 'next', problemId: p.id, index });
+    return p;
+  }
+  function pose(S, p) {
+    const entry = entryOf(S, p);
+    p.status = 'open';
+    p.statement = p.retestOf ? entry.retest : entry.statement;
+    p.posedAt = stamp();
+    S.feed.push({ kind: 'problem', problemId: p.id, at: stamp() });
+    emitOp(S, { op: 'practice', event: 'pose', problemId: p.id });
+  }
+  function conclude(S, p, verdict) {
+    const entry = entryOf(S, p);
+    p.status = 'concluded';
+    p.result = {
+      verdict, hintRung: p.hints ? 1 : null,
+      ...(verdict === 'wrong' ? { missClass: 'execution', misconception: 'Differentiated only the outer function.' } : {}),
+      rating: verdict === 'correct' ? (p.hints ? 'good' : 'easy') : 'again', durationSec: 95,
+      targets: [refOf(entry)], hosts: [], layer: 'recall', level: 'use', cueDistance: 1, isDistractor: false,
+      ...(p.retestOf ? { retestOf: p.retestOf } : {}),
+      reveal: { solution: entry.solution, finalAnswer: entry.finalAnswer, acceptableVariants: [], rubric: [] },
+    };
+    S.feed.push({ kind: 'concluded', problemId: p.id, verdict, at: stamp() });
+    emitOp(S, { op: 'practice', event: 'conclude', problemId: p.id, conclusion: { verdict } });
+  }
+  /** One coach message: text deltas, then the persisted message (the feed gets it). */
+  async function say(S, text) {
+    for (let i = 0; i < text.length; i += 14) {
+      emit({ kind: 'text', sessionId: S.id, agent: 'coach', delta: text.slice(i, i + 14) });
+      await pause(12);
+    }
+    const opId = `o${++opSeq}`;
+    S.feed.push({ kind: 'coach', text, thinking: '', opId, at: stamp() });
+    S.updatedAt = stamp();
+    emit({ kind: 'op', sessionId: S.id, op: { op: 'message', opId, at: stamp(), role: 'assistant', content: text } });
+  }
+  async function turn(S, body) {
+    if (S.running) throw new Error('a coach turn is already running');
+    S.running = true;
+    S.lastError = null;
+    emit({ kind: 'turnStart', sessionId: S.id, agent: 'coach' });
+    let err = null;
+    try {
+      if (practiceParams.get('practiceFail') === 'start' && !S.failedOnce) {
+        S.failedOnce = true;
+        throw new Error('DeepSeek is not connected');
+      }
+      await body();
+    } catch (e) {
+      err = String(e.message ?? e);
+      S.lastError = err;
+    }
+    S.running = false;
+    emit({ kind: 'turnEnd', sessionId: S.id, agent: 'coach', ...(err ? { error: err } : {}) });
+    if (err) throw new Error(err);
+  }
+  const retestsDue = (S) =>
+    S.problems.filter((p) => !p.retestOf && p.status === 'concluded' && ['wrong', 'dontknow', 'dismissed'].includes(p.result.verdict)
+      && !S.problems.some((q) => q.retestOf === p.id));
+  const retestsLeft = (S) => retestsDue(S).length + S.problems.filter((p) => p.retestOf && p.status !== 'concluded').length;
+  function pview(S) {
+    if (S.legacy) {
+      return { sessionId: S.id, legacy: true, format: 'stream', status: 'writing', wrapUp: false, setSize: null, retestsLeft: 0, turnRunning: false,
+        lastTurnError: null, picked: [], problems: [], feed: [], can: { submit: false, hint: false, dismiss: false, next: false, end: false, submitSet: false }, calibration: null };
+    }
+    const set = S.format === 'set' || S.format === 'exam';
+    const open = S.problems.find((p) => p.status === 'open');
+    const writing = S.problems.some((p) => p.status === 'writing');
+    let status;
+    if (S.ended) status = 'ended';
+    else if (set) status = writing || !S.problems.length ? 'set-writing' : !S.submitted ? 'set-open' : 'set-review';
+    else status = open ? 'open' : writing || !S.problems.length ? 'writing' : 'concluded';
+    const live = !S.ended && !S.running;
+    const can = {
+      submit: live && ['open', 'concluded', 'set-review'].includes(status),
+      hint: live && !set && status === 'open',
+      dismiss: live && !set && status === 'open',
+      next: live && !set && status === 'concluded' && (!S.wrapUp || retestsLeft(S) > 0),
+      end: live && status !== 'open' && !status.endsWith('writing') && !(S.exam && status === 'set-open'),
+      submitSet: live && status === 'set-open' && !(S.exam && examView(S).closed),
+    };
+    return {
+      sessionId: S.id, legacy: false, format: S.format, status, wrapUp: S.wrapUp, setSize: set ? S.size : null, retestsLeft: retestsLeft(S),
+      turnRunning: S.running, lastTurnError: S.lastError, picked: S.picked.map((id) => refOf(bank.find((b) => b.target === id) ?? bank[0])),
+      problems: S.problems.map((p) => ({
+        problemId: p.id, index: p.index, status: p.status, hints: p.hints,
+        ...(S.exam && p.marks ? { marks: p.marks } : {}),
+        ...(p.statement ? { statement: p.statement, type: 'standard', answerCheck: 'passed', posedAt: p.posedAt } : {}),
+        ...(p.result ? { result: p.result } : {}),
+      })),
+      feed: structuredClone(S.feed), can,
+      ...(S.exam ? { exam: examView(S) } : {}),
+      calibration: S.ended ? { graded: 2, buckets: [], notes: ['Confidence matches results.'] } : null,
+    };
+  }
+  const need = (id) => {
+    const S = practices.get(id);
+    if (!S) throw new Error(`no practice session ${id}`);
+    return S;
+  };
+  const ready = (S) => {
+    if (S.running) throw new Error('a coach turn is already running');
+    if (S.ended) throw new Error('this practice session has ended');
+  };
+
+  if (practiceFixture) settings.roles.tutor = { provider: 'anthropic', model: 'anthropic-model' };
+  if (practiceFixture) {
+    // Left behind by a failed turn, a restart that cut a turn short, and the old single-prompt Practice.
+    if (practiceSeed.includes('failed')) {
+      const S = newPractice({ id: 'PF', title: 'Practice: failed turn' });
+      pose(S, addProblem(S));
+      S.lastError = 'DeepSeek is not connected';
+    }
+    if (practiceSeed.includes('owed')) {
+      const S = newPractice({ id: 'PO', title: 'Practice: reply owed' });
+      pose(S, addProblem(S));
+      S.feed.push({ kind: 'learner', intent: 'submission', text: 'I think it is 6x', confidence: 50, at: stamp() });
+    }
+    if (practiceSeed.includes('cut')) {
+      const S = newPractice({ id: 'PC', title: 'Practice: problem not written' });
+      addProblem(S);
+    }
+    if (practiceSeed.includes('legacy')) {
+      const S = newPractice({ id: 'PL', title: 'Practice: older session' });
+      S.legacy = true;
+      S.messages = [
+        { role: 'user', content: 'Practise the chain rule.', attachments: [] },
+        { role: 'assistant', content: 'Differentiate $\\sin(3x^2)$ and tell me how you did it.' },
+      ];
+    }
+  }
+
+  const practiceHandlers = {
+    subscribe_events: ({ onEvent }) => {
+      channels.push(onEvent);
+      return null;
+    },
+    list_sessions: () => [...(learnFixture ? [session] : []), ...[...practices.values()].map(summaryOf)],
+    review_queue: () => [
+      { id: 'chain', title: 'Chain rule', home: 'calc', retrievability: 0.62, dependents: 1 },
+      { id: 'limit', title: 'Limit of a function', home: 'calc', retrievability: 0.7, dependents: 2 },
+    ],
+    load_session: ({ id }) => {
+      if (id === 'L1' && learnFixture) return { ...structuredClone(session), ops: structuredClone(sessionOps) };
+      const S = need(id);
+      const ops = S.submitted ? [{ op: 'practice', opId: 'set', at: stamp(), event: 'setSubmit', answers: S.answers }] : [];
+      return { ...summaryOf(S), messages: structuredClone(S.messages), ops };
+    },
+    start_practice: async ({ targets = [], format = 'stream', size }) => {
+      if (format === 'exam') throw new Error('exam mode isn\'t built yet');
+      for (const t of targets) if (!bank.some((b) => b.target === t) && !graph.nodes.some((n) => n.id === t)) throw new Error(`there is no idea \`${t}\` on the map`);
+      const S = newPractice({ id: `P${practices.size + 1}`, format, picked: targets, size: size ?? 3 });
+      emit({ kind: 'session', session: summaryOf(S) });
+      // The scheduler plans first (a `next` op per problem); the coach then writes them.
+      const planned = format === 'set' ? Array.from({ length: S.size }, () => addProblem(S)) : [addProblem(S)];
+      await turn(S, async () => {
+        await pause(400);
+        for (const p of planned) pose(S, p);
+      });
+      return summaryOf(S);
+    },
+    practice_state: ({ sessionId }) => pview(need(sessionId)),
+    practice_submit: async ({ sessionId, text, confidence }) => {
+      const S = need(sessionId);
+      ready(S);
+      if (!text.trim()) throw new Error('the submission is empty');
+      if (S.format === 'set' && !S.submitted) throw new Error('hand in the whole set first (practice_submit_set)');
+      const open = S.problems.find((p) => p.status === 'open');
+      S.feed.push({ kind: 'learner', intent: 'submission', text, ...(confidence != null ? { confidence } : {}), at: stamp() });
+      emitOp(S, { op: 'practice', event: 'attempt', problemId: open?.id ?? '', text });
+      await turn(S, async () => {
+        await pause(60);
+        if (open) {
+          const wrong = /wrong/i.test(text);
+          conclude(S, open, wrong ? 'wrong' : 'correct');
+          await say(S, wrong ? 'Not quite. Check the inner function before you multiply.' : 'Yes. That is the answer, and your confidence fits.');
+        } else {
+          await say(S, 'Good question. The outer function is applied to the inner one first.');
+        }
+      });
+    },
+    practice_hint: async ({ sessionId }) => {
+      const S = need(sessionId);
+      ready(S);
+      const open = S.problems.find((p) => p.status === 'open');
+      if (!open || S.format === 'set') throw new Error('there is no open problem to give a hint on (a set has no hints)');
+      open.hints += 1;
+      S.feed.push({ kind: 'learner', intent: 'hint', text: '', at: stamp() });
+      emitOp(S, { op: 'practice', event: 'hint', problemId: open.id });
+      await turn(S, async () => {
+        await pause(60);
+        await say(S, 'Look at what sits inside the function. Which part is applied first?');
+      });
+    },
+    practice_dismiss: async ({ sessionId }) => {
+      const S = need(sessionId);
+      ready(S);
+      const open = S.problems.find((p) => p.status === 'open');
+      if (!open || S.format === 'set') throw new Error('there is no open problem to skip');
+      S.feed.push({ kind: 'learner', intent: 'dismiss', text: '', at: stamp() });
+      emitOp(S, { op: 'practice', event: 'dismiss', problemId: open.id });
+      conclude(S, open, 'dismissed');
+      await turn(S, () => say(S, 'Skipped. We will come back to it at the end.'));
+    },
+    practice_next: async ({ sessionId }) => {
+      const S = need(sessionId);
+      ready(S);
+      if (S.problems.some((p) => p.status !== 'concluded')) throw new Error('finish the current problem first');
+      await turn(S, async () => {
+        const p = addProblem(S, S.wrapUp ? retestsDue(S)[0]?.id ?? null : null);
+        await pause(200);
+        pose(S, p);
+      });
+    },
+    practice_submit_set: async ({ sessionId, answers }) => {
+      const S = need(sessionId);
+      ready(S);
+      if (S.format !== 'set' || S.submitted) throw new Error('this set was already handed in');
+      S.submitted = true;
+      S.answers = structuredClone(answers);
+      S.feed.push({ kind: 'learner', intent: 'set', text: `Handed in ${answers.length} answer(s).`, at: stamp() });
+      emitOp(S, { op: 'practice', event: 'setSubmit', answers });
+      await turn(S, async () => {
+        for (const p of S.problems) {
+          await pause(120);
+          const a = answers.find((x) => x.problemId === p.id);
+          conclude(S, p, !a?.text?.trim() ? 'dontknow' : /wrong/i.test(a.text) ? 'wrong' : 'correct');
+        }
+        await say(S, 'Review: problem 1 is right. Problem 2 breaks at the inner derivative (an execution slip). Problem 3 was left empty.');
+      });
+    },
+    practice_end: async ({ sessionId, skipRetests }) => {
+      const S = need(sessionId);
+      ready(S);
+      if (S.problems.some((p) => p.status === 'open')) throw new Error('finish or skip the open problem before ending');
+      if (S.format === 'stream' && !S.wrapUp && !skipRetests && retestsDue(S).length) {
+        S.wrapUp = true;
+        emitOp(S, { op: 'practice', event: 'wrap' });
+        return;
+      }
+      S.ended = true;
+      emitOp(S, { op: 'practice', event: 'end', skippedRetests: Boolean(skipRetests) || retestsLeft(S) > 0 });
+    },
+    practice_resume: async ({ sessionId }) => {
+      const S = need(sessionId);
+      ready(S);
+      await turn(S, async () => {
+        const writing = S.problems.filter((p) => p.status === 'writing');
+        if (writing.length) {
+          await pause(120);
+          for (const p of writing) pose(S, p);
+        } else {
+          await say(S, 'Sorry about that. Your last answer was close; check the inner derivative.');
+        }
+      });
+    },
+    cancel_reply: () => null,
+  };
+
+  // The exam fixture (`&exam=1`, with `fixture=learn&practice=1`): L1 is an
+  // exam goal whose plan `exam_plan` ranks (docs/ui-design.md §11c);
+  // `start_exam` writes a timed paper (`&examShortMs=3000` ends its clock after
+  // three seconds instead of the budget), `practice_exam_save` keeps the
+  // draft, and at the deadline (plus two seconds) the paper is handed in from
+  // the draft, as the backend's timer does.
+  const examFixture = practiceParams.get('exam') === '1';
+  const examShortMs = Number(practiceParams.get('examShortMs') ?? 0);
+  const MARKS = [5, 4, 6];
+  const GRACE_MS = 2000;
+  const scheme = [
+    { id: 'm1', criterion: 'Names the outer and the inner function (method mark)', essential: true },
+    { id: 'a1', criterion: 'States the derivative with its factors', essential: false },
+  ];
+  function examView(S) {
+    const e = S.exam;
+    const now = Date.now();
+    const d = e.deadlineAt ?? null;
+    const done = S.problems.length > 0 && S.problems.every((p) => p.status === 'concluded');
+    return {
+      name: e.name, goalSessionId: e.goalSessionId, budgetSec: e.budgetSec,
+      openedAt: e.openedAt ? new Date(e.openedAt).toISOString() : null, deadline: d ? new Date(d).toISOString() : null,
+      now: new Date(now).toISOString(), remainingSec: d ? Math.max(0, Math.round((d - now) / 1000)) : null,
+      expired: d != null && now >= d, closed: d != null && now > d + GRACE_MS,
+      submitted: S.submitted, autoSubmitted: Boolean(e.auto), elapsedSec: e.elapsedSec ?? null, draft: structuredClone(e.draft),
+      score: done ? { awarded: S.problems.reduce((n, p) => n + (p.result.marksAwarded ?? 0), 0), outOf: S.problems.reduce((n, p) => n + (p.marks ?? 0), 0) } : null,
+    };
+  }
+  async function examSubmit(S, answers, auto) {
+    S.submitted = true;
+    S.answers = structuredClone(answers);
+    S.exam.auto = auto;
+    S.exam.elapsedSec = auto ? S.exam.budgetSec : Math.max(1, Math.round((Date.now() - S.exam.openedAt) / 1000));
+    S.feed.push({ kind: 'learner', intent: 'set', text: auto ? `Time was up: handed in ${answers.length} saved answer(s).` : `Handed in ${answers.length} answer(s).`, at: stamp() });
+    emitOp(S, { op: 'practice', event: 'setSubmit', answers, ...(auto ? { auto: true } : {}) });
+    await turn(S, async () => {
+      for (const p of S.problems) {
+        await pause(120);
+        const a = answers.find((x) => x.problemId === p.id);
+        const verdict = !a?.text?.trim() ? 'dontknow' : /wrong/i.test(a.text) ? 'partial' : 'correct';
+        conclude(S, p, verdict);
+        p.result.marksAwarded = verdict === 'correct' ? p.marks : verdict === 'partial' ? Math.floor(p.marks / 2) : 0;
+        if (verdict === 'partial') p.result.missClass = 'execution';
+        p.result.reveal.rubric = scheme;
+      }
+      const got = S.problems.reduce((n, p) => n + p.result.marksAwarded, 0);
+      await say(S, `${got} of ${S.problems.reduce((n, p) => n + p.marks, 0)} marks. Problem 1 earned full marks; problem 2 kept only its method mark; problem 3 was left empty.`);
+    });
+  }
+  const autoSubmit = (S) => {
+    if (S.submitted || S.running) return Promise.resolve();
+    return examSubmit(S, S.exam.draft, true).catch(() => {});
+  };
+  const needExam = (id) => {
+    const S = need(id);
+    if (!S.exam) throw new Error('this is not an exam paper');
+    return S;
+  };
+  const examNodes = [
+    { id: 'derivative', title: 'Derivative as a limit', home: 'calc', homeTitle: 'Calculus', planNode: 'derivative', weight: 0.8, weightSource: 'plan', retrievability: 0.5, layerGap: 3, mode: 'teach',
+      reason: 'an open misconception: differentiates the outer function only', evidence: true, practiceOnly: false, structuralMisses: 2, misconception: 'differentiates the outer function only' },
+    { id: 'quadratic', title: 'Quadratic formula', home: 'alg', homeTitle: 'Algebra', planNode: 'quadratic', weight: 0.3, weightSource: 'default', retrievability: 0, layerGap: 3, mode: 'practice',
+      reason: 'no answers yet: the first problems show what is there', evidence: false, practiceOnly: false, structuralMisses: 0 },
+    { id: 'chain', title: 'Chain rule', home: 'calc', homeTitle: 'Calculus', planNode: 'chain', weight: 0.9, weightSource: 'plan', retrievability: 0.62, layerGap: 2, mode: 'practice',
+      reason: 'recall has faded (R 0.62): a fresh problem brings it back', evidence: true, practiceOnly: true, structuralMisses: 0 },
+    { id: 'limit', title: 'Limit of a function', home: 'calc', homeTitle: 'Calculus', planNode: 'limit', weight: 0.6, weightSource: 'goal', retrievability: 0.97, layerGap: 1, mode: 'practice',
+      reason: 'held: keep it fresh', evidence: true, practiceOnly: false, structuralMisses: 0 },
+  ].map((n) => ({ ...n, priority: n.weight * (1 - n.retrievability) * (n.layerGap + 1) })).sort((a, b) => b.priority - a.priority);
+  const examGoal = () => ({
+    goal: 'Pass MATH101', purpose: 'exam', successLooksLike: ['pass the final'],
+    exam: { name: 'MATH101 final', date: new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10), syllabus: 'Limits, derivatives, the chain rule' },
+  });
+  const examHandlers = {
+    session_state: (a) => ({ ...learnHandlers.session_state(a), goal: examGoal() }),
+    exam_plan: ({ sessionId }) => {
+      if (sessionId !== 'L1') throw new Error('the exam plan belongs to the Learn session of an exam goal');
+      const g = examGoal();
+      return {
+        sessionId, exam: { name: g.exam.name, date: g.exam.date, syllabus: g.exam.syllabus }, now: stamp(), daysLeft: 10,
+        nodes: structuredClone(examNodes), unmapped: [{ planNode: 'ghost', title: 'Series' }],
+        today: { kind: 'teach', nodeIds: ['derivative'], reason: 'Derivative as a limit ranks near the top and needs teaching: an open misconception: differentiates the outer function only' },
+        mix: { teachShare: 0.34, teachNodes: 1, practiceNodes: 3, sittings: 10, teachSittings: 3, practiceSittings: 7, papers: 2 },
+        simulation: {
+          label: 'estimate', note: 'An estimate, not a prediction. It reads each idea’s recall probability from FSRS, whose parameters were fit on flashcards, not exam answers [inference]; it counts an idea with no answers as 0 and an exam answer needs more than recall.',
+          horizonDays: 10, expectedNow: 0.46, expectedExam: 0.33, unseen: 1,
+          topics: [
+            { home: 'calc', title: 'Calculus', nodes: 3, weight: 2.3, expectedNow: 0.6, expectedExam: 0.43 },
+            { home: 'alg', title: 'Algebra', nodes: 1, weight: 0.3, expectedNow: 0, expectedExam: 0 },
+          ],
+          raise: [
+            { id: 'derivative', title: 'Derivative as a limit', mode: 'teach', gain: 0.071 },
+            { id: 'chain', title: 'Chain rule', mode: 'practice', gain: 0.043 },
+          ],
+        },
+        papers: [{ library: 'maths', path: 'maths/2023-paper1.pdf', title: '2023 paper 1', pages: 12, markScheme: 'maths/2023-paper1-mark-scheme.pdf' }],
+        paper: { defaultBudgetMin: 45, minBudgetMin: 5, maxBudgetMin: 360, minutesPerProblem: 15, defaultProblems: 3, targets: 3 },
+      };
+    },
+    start_exam: async ({ goalSessionId, budgetMin }) => {
+      if (!Number.isInteger(budgetMin) || budgetMin < 5 || budgetMin > 360) throw new Error('a paper’s time budget is 5 to 360 minutes');
+      const size = Math.max(2, Math.min(10, Math.ceil(budgetMin / 15)));
+      const S = newPractice({ id: `X${practices.size + 1}`, format: 'exam', size, title: 'Exam paper: MATH101 final' });
+      S.exam = { goalSessionId, name: 'MATH101 final', budgetSec: budgetMin * 60, openedAt: null, deadlineAt: null, draft: [] };
+      emit({ kind: 'session', session: summaryOf(S) });
+      const planned = Array.from({ length: size }, () => addProblem(S));
+      planned.forEach((p, i) => (p.marks = MARKS[i % MARKS.length]));
+      await turn(S, async () => {
+        await pause(300);
+        for (const p of planned) pose(S, p);
+        // The clock starts when the last problem is posed.
+        S.exam.openedAt = Date.now();
+        S.exam.deadlineAt = S.exam.openedAt + (examShortMs || S.exam.budgetSec * 1000);
+        emitOp(S, { op: 'practice', event: 'examOpen', openedAt: new Date(S.exam.openedAt).toISOString(), deadline: new Date(S.exam.deadlineAt).toISOString() });
+        setTimeout(() => autoSubmit(S), S.exam.deadlineAt + GRACE_MS - Date.now());
+      });
+      return summaryOf(S);
+    },
+    practice_exam_save: ({ sessionId, answers }) => {
+      const S = needExam(sessionId);
+      if (S.submitted) throw new Error('this paper was already handed in');
+      if (!S.exam.deadlineAt) throw new Error('the paper isn’t open yet');
+      if (examView(S).closed) throw new Error('time is up: answers saved after the deadline are not accepted');
+      S.exam.draft = structuredClone(answers);
+      return null;
+    },
+    practice_submit_set: async (a) => {
+      const S = need(a.sessionId);
+      if (!S.exam) return practiceHandlers.practice_submit_set(a);
+      ready(S);
+      if (S.submitted) throw new Error('this set was already handed in');
+      if (examView(S).closed) {
+        await autoSubmit(S);
+        throw new Error('time is up: the paper was handed in at the deadline with your last saved answers; answers sent after it are not accepted');
+      }
+      await examSubmit(S, a.answers, false);
+      return null;
+    },
+    practice_hint: (a) => {
+      if (need(a.sessionId).exam) throw new Error('an exam paper has no hints');
+      return practiceHandlers.practice_hint(a);
+    },
+    practice_resume: async (a) => {
+      const S = need(a.sessionId);
+      if (S.exam && !S.submitted && examView(S).expired) return autoSubmit(S);
+      return practiceHandlers.practice_resume(a);
+    },
+  };
+
   const handlers = {
     ...syncHandlers,
     ...appHandlers,
     ...(learnFixture ? learnHandlers : {}),
+    ...(practiceFixture ? practiceHandlers : {}),
+    ...(examFixture ? examHandlers : {}),
     plugins: () => structuredClone(plugins),
     // The core's rules (plugins/load.rs): a built-in with permissions is
     // only turned on by consent, and none can be removed.

@@ -146,6 +146,15 @@ async function until(what, fn, ms = 15_000) {
     await sleep(50);
   }
 }
+/** `until`, but a timeout reports what the page looked like. */
+async function untilDump(what, fn, page) {
+  try {
+    return await until(what, fn);
+  } catch (err) {
+    const snap = await page.evaluate(`({ confirmOpen: document.getElementById('confirm')?.open, clock: document.querySelector('.exam-clock')?.textContent, paper: Boolean(document.querySelector('.exam-paper')), boxes: document.querySelectorAll('.exam-paper textarea').length, buttons: [...document.querySelectorAll('#practice button')].map((b) => b.textContent.trim() + (b.disabled ? ' (disabled)' : '') + (b.hidden ? ' (hidden)' : '')), status: document.querySelector('#practice .form-status')?.textContent, errs: window.__errors, tail: window.__bridge.log.slice(-6).map((c) => c.cmd) })`);
+    throw new Error(`${err.message}: ${JSON.stringify(snap)}`);
+  }
+}
 
 const pages = [];
 const frames = new Map(); // targetId → sessionId of attached iframe targets
@@ -1047,7 +1056,6 @@ async function session() {
   console.log('session: debrief list (five verdict groups, notes, sources, tip attribution/scope, after the reply), plan sheet controls (box ⋯ → drawer, level + known parts, Escape, plan options, list Options, Send → one edit_plan)');
 }
 
-const cases = { ipc, placement, sync, library, map, session, turn, plugins: pluginsCase };
 // The backend's turn status decides the "reply owed" offer; the page doesn't
 // guess it from the last message.
 async function turn() {
@@ -1131,6 +1139,462 @@ async function pluginsCase() {
   console.log('plugins: built-ins have no Remove and read "built in"; one with permissions starts off, Enable shows the consent screen naming them (Cancel changes nothing), Disable needs none');
 }
 
+// --- practice ----------------------------------------------------------------
+
+const PRACTICE = { query: '&fixture=learn&practice=1', reducedMotion: true };
+const q = (sel) => `document.querySelector(${JSON.stringify(sel)})`;
+const qa = (sel) => `[...document.querySelectorAll(${JSON.stringify(sel)})]`;
+const textOf = (sel) => `(${q(sel)}?.textContent ?? '')`;
+const shown = (sel) => `(() => { const e = ${q(sel)}; return Boolean(e && !e.hidden && e.getClientRects().length > 0); })()`;
+const press = (label, scope = 'body') => `(() => { const b = ${qa(`${scope} button`)}.find((x) => x.textContent.trim() === ${JSON.stringify(label)} && !x.hidden); if (!b) throw new Error('no button ${label}'); b.click(); return true; })()`;
+/** Chooses a format in a chooser by its label. */
+const choose = (host, label) => `(() => { const l = ${qa(`#${host} label.mode`)}.find((x) => x.textContent.trim() === ${JSON.stringify(label)}); l.querySelector('input').click(); return l.querySelector('input').value; })()`;
+const type = (value) => `(() => { const p = document.getElementById('prompt'); p.value = ${JSON.stringify(value)}; p.dispatchEvent(new Event('input')); return true; })()`;
+const note = () => textOf('#practice-note');
+
+async function practice() {
+  const page = await openApp('none', PRACTICE);
+  await until('Home', () => page.evaluate(shown('#start')));
+
+  // Home: the review queue is one click away; the old Practice mode toggle is gone.
+  await until('the review cue', () => page.evaluate(shown('#review-cue')));
+  const home = await page.evaluate(`({ cue: ${textOf('#review-cue-text')}, toggle: Boolean(document.getElementById('mode-toggle')),
+    hero: ${textOf('#hero')}, formats: ${qa('#review-cue-format input')}.map((r) => r.value), mapFormats: ${qa('#map-format input')}.map((r) => r.value) })`);
+  expect(home.cue === '2 ideas are due: Chain rule, Limit of a function.' && !home.toggle && home.hero === 'What do you want to learn?'
+    && home.formats.join() === 'stream,set' && home.mapFormats.join() === 'stream,set', `Home: ${JSON.stringify(home)}`);
+
+  // Map: pick an idea, choose the format, Practise → start_practice with the idea's id.
+  await page.evaluate(choose('review-cue-format', 'One at a time'));
+  await page.evaluate(click('open-map'));
+  await until('the map', () => page.evaluate(`Boolean(${q('#map-page .map-a11y input[data-key="chain"]')})`));
+  await page.evaluate(`${q('#map-page .map-a11y input[data-key="chain"]')}.click()`);
+  const desk = await page.evaluate(`({ count: ${textOf('#map-count')}, button: ${textOf('#map-practise')}, off: document.getElementById('map-practise').disabled,
+    chosen: ${qa('#map-format input')}.find((r) => r.checked)?.value })`);
+  expect(desk.count === '1 selected' && desk.button === 'Practise 1 idea' && !desk.off && desk.chosen === 'stream', `Map desk: ${JSON.stringify(desk)}`);
+  await page.evaluate(click('map-practise'));
+  await until('the Practice screen', () => page.evaluate(`${shown('#practice')} && document.getElementById('map').hidden`));
+  expect(JSON.stringify(await page.evaluate(argsOf('start_practice'))) === JSON.stringify([{ targets: ['chain'], format: 'stream' }]), 'start_practice carries the picked idea and the format');
+  const writing = await page.evaluate(`({ line: ${textOf('#practice-live .writing')}, stop: ${shown('#practice-stop')}, picked: ${textOf('#practice-picked')}, answer: ${shown('#composer')} })`);
+  expect(writing.line === 'Writing a problem…' && writing.stop && writing.picked === 'On: Chain rule' && !writing.answer, `while the coach writes: ${JSON.stringify(writing)}`);
+
+  // The problem: Markdown + KaTeX, the idea not named; the answer card with the confidence scale, Hint and Give up.
+  await until('the problem', () => page.evaluate(shown('#practice-flow .problem')));
+  await page.shot('practice-problem');
+  const open = await page.evaluate(`(() => { const card = ${q('#practice-flow .problem')};
+    return { kicker: card.querySelector('.kicker').textContent, math: card.querySelectorAll('.katex').length, named: card.textContent.includes('Chain rule') || ${textOf('#practice-flow')}.includes('Chain rule'),
+      confidence: ${qa('#practice-answer .confidence input')}.map((r) => r.value), composerIn: Boolean(${q('#practice-answer #composer')}), focus: document.activeElement?.id,
+      label: document.getElementById('prompt-label').textContent, buttons: ${qa('#practice-answer .actions button')}.map((b) => b.textContent), note: ${note()},
+      primary: ${shown('#practice-primary')}, stop: ${shown('#practice-stop')}, send: document.getElementById('send').className }; })()`);
+  expect(open.kicker === 'Problem 1' && open.math > 0 && !open.named && open.confidence.join() === '10,30,50,70,90' && open.composerIn && open.focus === 'prompt'
+    && open.label === 'Your working or answer' && open.buttons.join('|') === 'Hint|I give up — show me' && open.note === 'Problem 1' && !open.primary && !open.stop
+    && /primary/.test(open.send), `open problem: ${JSON.stringify(open)}`);
+
+  // A hint: the count is shown, never a rung; the coach's reply arrives once (the streamed copy gives way to the feed).
+  await page.evaluate(press('Hint', '#practice-answer'));
+  await until('the hint reply', () => page.evaluate(`/Look at what sits inside/.test(${textOf('#practice-flow')})`));
+  await until('the turn to end', () => page.evaluate(`!${shown('#practice-stop')} && !${q('#practice-live .entry')}`));
+  const hint = await page.evaluate(`({ coach: document.querySelectorAll('#practice-flow .entry.tutor, #practice-live .entry.tutor').length, button: ${qa('#practice-answer .actions button')}[0].textContent,
+      note: ${note()}, you: ${qa('#practice-flow .entry.user .you-text')}.map((e) => e.textContent), calls: ${argsOf('practice_hint')}.length })`);
+  expect(hint.coach === 1 && hint.button === 'Hint (1 used)' && hint.note === 'Problem 1 · 1 hint used' && hint.you.join() === 'Asked for a hint.' && hint.calls === 1, `after a hint: ${JSON.stringify(hint)}`);
+
+  // An answer with its confidence → feedback, the verdict, the revealed solution; Next is the one primary.
+  await page.evaluate(type('The derivative is 6x cos(3x^2)'));
+  await page.evaluate(`${q('#practice-answer .confidence input[value="70"]')}.click()`);
+  await page.evaluate(click('send'));
+  await until('the verdict', () => page.evaluate(shown('#practice-flow .concluded')));
+  await until('the coach reply', () => page.evaluate(`/Yes\\. That is the answer/.test(${textOf('#practice-flow')})`));
+  const sent = (await page.evaluate(argsOf('practice_submit')))[0];
+  expect(sent.sessionId === 'P1' && sent.text === 'The derivative is 6x cos(3x^2)' && sent.confidence === 70 && Array.isArray(sent.attachments), `practice_submit: ${JSON.stringify(sent)}`);
+  await page.shot('practice-concluded');
+  const done = await page.evaluate(`(() => { const c = ${q('#practice-flow .concluded')};
+    return { verdict: c.querySelector('.verdict').textContent, meta: c.querySelector('.result-meta').textContent, open: c.querySelector('details.reveal').open,
+      moves: c.querySelectorAll('.reveal-moves li').length, key: c.querySelectorAll('.reveal-key').length, answer: c.querySelector('.reveal-body').textContent.includes('6x'),
+      math: c.querySelectorAll('.katex').length, conf: ${qa('#practice-flow .entry.user .you-meta')}.map((e) => e.textContent), kicker: ${textOf('#practice-answer .kicker')},
+      scale: Boolean(${q('#practice-answer .confidence')}), focus: document.activeElement?.className, note: ${note()}, primary: ${textOf('#practice-primary')},
+      secondary: ${textOf('#practice-secondary')}, send: document.getElementById('send').className }; })()`);
+  expect(done.verdict === '✓ Correct.' && done.meta === 'Tested: Chain rule · 1 hint used · Rated good · 2 min' && done.open && done.moves === 2 && done.key === 1 && done.answer && done.math > 0
+    && done.conf.join() === 'Fairly sure (≈70%)' && done.kicker === 'Ask about this problem' && !done.scale && /verdict/.test(done.focus)
+    && done.note === 'Problem 1 done.' && done.primary === 'Next problem' && done.secondary === 'End practice' && /secondary/.test(done.send) && !/primary/.test(done.send),
+    `concluded: ${JSON.stringify(done)}`);
+
+  // A question after the verdict goes through the same composer.
+  await page.evaluate(type('Why the inner derivative?'));
+  await page.evaluate(click('send'));
+  await until('the answer to the question', () => page.evaluate(`/Good question/.test(${textOf('#practice-flow')})`));
+  const asked = (await page.evaluate(argsOf('practice_submit'))).at(-1);
+  expect(asked.text === 'Why the inner derivative?' && asked.confidence === undefined, `a question carries no confidence: ${JSON.stringify(asked)}`);
+
+  // Next → problem 2; Skip needs a second click and records a dismissal.
+  await until('Next enabled', () => page.evaluate(`!document.getElementById('practice-primary').disabled`));
+  await page.evaluate(click('practice-primary'));
+  await until('problem 2', () => page.evaluate(`${qa('#practice-flow .problem')}.length === 2 && ${shown('#practice-answer .confidence')}`));
+  expect((await page.evaluate(argsOf('practice_next'))).length === 1, 'practice_next once');
+  await page.evaluate(press('I give up — show me', '#practice-answer'));
+  const armed = await page.evaluate(`({ label: ${qa('#practice-answer .actions button')}[1].textContent, calls: ${argsOf('practice_dismiss')}.length })`);
+  expect(armed.label === 'Sure? It counts as missed' && armed.calls === 0, `give up asks first: ${JSON.stringify(armed)}`);
+  await page.evaluate(press('Sure? It counts as missed', '#practice-answer'));
+  await until('the skipped problem', () => page.evaluate(`${qa('#practice-flow .concluded .verdict')}.map((v) => v.textContent.replace(/^\\S+ /, '')).join() === 'Correct.,Skipped.'`));
+  await until('Next enabled', () => page.evaluate(`!document.getElementById('practice-primary').disabled`));
+
+  // End: what was missed is retested first (wrap-up), then End finishes with a short summary.
+  await page.evaluate(press('End practice', '.practice-desk'));
+  await until('the retest offer', () => page.evaluate(`${note()} === 'Retesting what you missed: 1 left.'`));
+  const wrap = await page.evaluate(`({ primary: ${textOf('#practice-primary')}, secondary: ${textOf('#practice-secondary')}, ends: ${argsOf('practice_end')} })`);
+  expect(wrap.primary === 'Next retest' && wrap.secondary === 'Skip retests and end' && wrap.ends.length === 1 && wrap.ends[0].skipRetests === undefined, `wrap-up: ${JSON.stringify(wrap)}`);
+  await page.evaluate(click('practice-primary'));
+  await until('the retest', () => page.evaluate(`${qa('#practice-flow .problem')}.length === 3 && ${shown('#practice-answer .confidence')}`));
+  await page.evaluate(type('The answer is 4'));
+  await page.evaluate(click('send'));
+  await until('the retest verdict', () => page.evaluate(`${qa('#practice-flow .concluded')}.length === 3`));
+  await until('End offered', () => page.evaluate(`${note()} === 'Retests done.' && ${textOf('#practice-primary')} === 'End practice' && !document.getElementById('practice-primary').disabled`));
+  const kickers = await page.evaluate(`${qa('#practice-flow .problem .kicker')}.map((k) => k.textContent)`);
+  expect(kickers.join('|') === 'Problem 1|Problem 2|Problem 3 · Retest', `kickers: ${JSON.stringify(kickers)}`);
+  await page.evaluate(click('practice-primary'));
+  await until('the summary', () => page.evaluate(shown('#practice-flow .practice-summary')));
+  await page.shot('practice-summary');
+  const end = await page.evaluate(`({ title: ${textOf('.practice-summary .summary-title')}, line: ${textOf('.practice-summary .summary-line')}, ideas: ${textOf('.practice-summary .summary-ideas')},
+      confidence: ${textOf('.practice-summary .calibration summary')}, note: ${note()}, primary: ${textOf('#practice-primary')}, secondary: ${textOf('#practice-secondary')},
+      composer: document.getElementById('composer').hidden, answers: document.getElementById('practice-answer').childElementCount, word: ${textOf('#practice-word')}, ends: ${argsOf('practice_end')}.length })`);
+  expect(end.title === 'Practice finished' && end.line === '3 problems: 2 correct, 1 skipped.' && end.ideas === 'Ideas: Chain rule' && end.confidence === 'Your confidence'
+    && end.note === 'Practice ended.' && end.primary === 'Practise again' && end.secondary === 'Back to sessions' && end.composer && end.answers === 0
+    && end.word === 'Practice · ended' && end.ends === 2, `ended: ${JSON.stringify(end)}`);
+
+  // The session is in Home's list with its mode; opened again it is read-only.
+  await page.evaluate(click('practice-back'));
+  await until('Home', () => page.evaluate(shown('#start')));
+  const row = await page.evaluate(`${qa('#session-list .session-open')}.map((b) => b.textContent)`);
+  expect(row.some((t) => /Practice/.test(t)), `the session list: ${JSON.stringify(row)}`);
+  await page.evaluate(`${qa('#session-list .session-open')}.find((b) => /Practice/.test(b.textContent)).click()`);
+  await until('the ended session', () => page.evaluate(shown('#practice-flow .practice-summary')));
+  const again = await page.evaluate(`({ composer: document.getElementById('composer').hidden, scale: Boolean(${q('#practice-answer .confidence')}), problems: ${qa('#practice-flow .problem')}.length,
+      concluded: ${qa('#practice-flow .concluded')}.length, read: ${shown('#practice-primary')} })`);
+  expect(again.composer && !again.scale && again.problems === 3 && again.concluded === 3 && again.read, `reopened: ${JSON.stringify(again)}`);
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+
+  // A phone: nothing overflows and the controls are touch-sized.
+  const phone = await openApp('none', { ...PRACTICE, mobile: true, width: 390, height: 844 });
+  await until('the review cue', () => phone.evaluate(shown('#review-cue')));
+  await phone.evaluate(choose('review-cue-format', 'One at a time'));
+  await phone.evaluate(click('practise-due'));
+  await until('the problem', () => phone.evaluate(shown('#practice-flow .problem') + ` && ${shown('#practice-answer .confidence')}`));
+  const small = await phone.evaluate(`(() => { const s = document.getElementById('practice-scroll'); const box = (sel) => ${q('#practice')}.querySelector(sel).getBoundingClientRect();
+    return { overflow: s.scrollWidth > s.clientWidth, doc: document.documentElement.scrollWidth > innerWidth, send: box('#send').height, hint: ${qa('#practice-answer .actions button')}[0].getBoundingClientRect().height,
+      seg: ${qa('#practice-answer .seg')}[0].getBoundingClientRect().height, back: box('#practice-back').height }; })()`);
+  expect(!small.overflow && !small.doc && small.send >= 44 && small.hint >= 44 && small.seg >= 44 && small.back >= 44, `phone layout: ${JSON.stringify(small)}`);
+  await phone.shot('practice-phone');
+  await phone.close();
+  console.log('practice: Home cue + format chooser (no mode toggle), Map → start_practice, problem without the idea named, hint count, answer + confidence → verdict + revealed solution, question after it, give up (asks twice), End → retest → summary, session list, read-only reopen, phone layout');
+}
+
+async function practiceSet() {
+  const page = await openApp('none', PRACTICE);
+  await until('the review cue', () => page.evaluate(shown('#review-cue')));
+  await page.evaluate(choose('review-cue-format', 'A set of problems'));
+  await page.evaluate(click('practise-due'));
+  await until('the set screen', () => page.evaluate(shown('#practice')));
+  expect(JSON.stringify(await page.evaluate(argsOf('start_practice'))) === JSON.stringify([{ targets: [], format: 'set' }]), 'start_practice carries the set format');
+  await until('the writing line', () => page.evaluate(`${textOf('#practice-live .writing')} === 'Writing the set…'`));
+  await until('every problem', () => page.evaluate(`${qa('#practice-flow .problem')}.length === 3`));
+
+  // Open set: all statements, one answer box and confidence each; nothing else to act on.
+  const listed = await page.evaluate(`({ kickers: ${qa('#practice-flow .problem .kicker')}.map((k) => k.textContent), boxes: ${qa('#practice-flow textarea')}.length,
+      scales: ${qa('#practice-flow .confidence')}.length, composer: ${shown('#composer')}, hint: Boolean(${qa('button')}.find((b) => /^Hint/.test(b.textContent))),
+      note: ${note()}, primary: ${textOf('#practice-primary')}, secondary: ${shown('#practice-secondary')}, focus: document.activeElement?.tagName,
+      labels: ${qa('#practice-flow textarea')}.map((t) => document.querySelector('label[for="' + t.id + '"]')?.textContent) })`);
+  expect(listed.kickers.join('|') === 'Problem 1 of 3|Problem 2 of 3|Problem 3 of 3' && listed.boxes === 3 && listed.scales === 3 && !listed.composer && !listed.hint
+    && listed.note === '0 of 3 answered. Unanswered ones count as “don’t know”.' && listed.primary === 'Hand in the set' && !listed.secondary && listed.focus === 'TEXTAREA'
+    && listed.labels.join('|') === 'Your answer to problem 1|Your answer to problem 2|Your answer to problem 3', `set listed: ${JSON.stringify(listed)}`);
+  await page.shot('practice-set-open');
+
+  // Answers are held locally: no command, no feedback, and they survive leaving the screen.
+  const fillSet = (i, value) => `(() => { const t = ${qa('#practice-flow textarea')}[${i}]; t.value = ${JSON.stringify(value)}; t.dispatchEvent(new Event('input')); return true; })()`;
+  await page.evaluate(fillSet(0, 'It is 6x cos(3x^2)'));
+  await page.evaluate(`${qa('#practice-flow .exercise')}[0].querySelector('.confidence input[value="70"]').click()`);
+  await page.evaluate(fillSet(1, 'wrong: I got 6x'));
+  const held = await page.evaluate(`({ note: ${note()}, submitted: ${argsOf('practice_submit_set')}.length, other: ${argsOf('practice_submit')}.length + ${argsOf('practice_hint')}.length,
+      feedback: document.querySelectorAll('#practice-flow .verdict, #practice-flow .entry.tutor, #practice-flow .reveal').length })`);
+  expect(held.note === '2 of 3 answered. Unanswered ones count as “don’t know”.' && held.submitted === 0 && held.other === 0 && held.feedback === 0, `answers held: ${JSON.stringify(held)}`);
+  await page.evaluate(click('practice-back'));
+  await until('Home', () => page.evaluate(shown('#start')));
+  await page.evaluate(`${qa('#session-list .session-open')}.find((b) => /Practice/.test(b.textContent)).click()`);
+  await until('the set again', () => page.evaluate(`${qa('#practice-flow textarea')}.length === 3`));
+  const back = await page.evaluate(`({ boxes: ${qa('#practice-flow textarea')}.map((t) => t.value), conf: ${qa('#practice-flow .confidence')}.map((f) => f.querySelector('input:checked')?.value ?? null), note: ${note()} })`);
+  expect(back.boxes.join('|') === 'It is 6x cos(3x^2)|wrong: I got 6x|' && back.conf.join() === '70,,' && back.note === '2 of 3 answered. Unanswered ones count as “don’t know”.', `answers after reopening: ${JSON.stringify(back)}`);
+
+  // Hand in: one command with the answers given; then the review, problem by problem.
+  await page.evaluate(click('practice-primary'));
+  await until('the review', () => page.evaluate(`${qa('#practice-flow .result')}.length === 3 && /Review: problem 1 is right/.test(${textOf('#practice-flow')})`));
+  const handed = await page.evaluate(argsOf('practice_submit_set'));
+  expect(handed.length === 1 && JSON.stringify(handed[0].answers) === JSON.stringify([
+    { problemId: 'p1', text: 'It is 6x cos(3x^2)', confidence: 70 }, { problemId: 'p2', text: 'wrong: I got 6x' },
+  ]), `practice_submit_set: ${JSON.stringify(handed)}`);
+  await page.shot('practice-set-review');
+  const review = await page.evaluate(`(() => { const cards = ${qa('#practice-flow .problem')};
+    return { verdicts: cards.map((c) => c.querySelector('.verdict')?.textContent.replace(/^\\S+ /, '')), you: cards.map((c) => c.querySelector('.you .you-text')?.textContent), conf: cards.map((c) => c.querySelector('.you .you-meta')?.textContent ?? null),
+      miss: cards.map((c) => c.querySelector('.result-miss')?.textContent ?? null), reveals: cards.map((c) => Boolean(c.querySelector('details.reveal'))),
+      boxes: ${qa('#practice-flow textarea')}.length, coach: ${qa('#practice-flow .entry.tutor')}.length, composer: ${shown('#composer')}, kicker: ${textOf('#practice-answer .kicker')},
+      note: ${note()}, primary: ${textOf('#practice-primary')}, send: document.getElementById('send').className, status: document.getElementById('practice-word').textContent }; })()`);
+  expect(review.verdicts.join('|') === 'Correct.|Not quite.|Don’t know.' && review.you.join('|') === 'It is 6x cos(3x^2)|wrong: I got 6x|No answer.'
+    && review.conf[0] === 'Fairly sure (≈70%)' && review.miss[1] === 'What went wrong: Right idea, slip in the working.' && review.miss[0] === null && review.reveals.every(Boolean)
+    && review.boxes === 0 && review.coach === 1 && review.composer && review.kicker === 'Ask about this review' && review.note === 'Review.' && review.primary === 'End practice'
+    && /secondary/.test(review.send) && review.status === 'Practice · set', `set review: ${JSON.stringify(review)}`);
+
+  // The review survives a reopen (the answers come from the op log), then End closes it.
+  await page.evaluate(click('practice-back'));
+  await until('Home', () => page.evaluate(shown('#start')));
+  await page.evaluate(`${qa('#session-list .session-open')}.find((b) => /Practice/.test(b.textContent)).click()`);
+  await until('the review again', () => page.evaluate(`${qa('#practice-flow .result')}.length === 3`));
+  const kept = await page.evaluate(`${qa('#practice-flow .problem .you .you-text')}.map((e) => e.textContent).join('|')`);
+  expect(kept === 'It is 6x cos(3x^2)|wrong: I got 6x|No answer.', `answers read back from the log: ${kept}`);
+  await page.evaluate(click('practice-primary'));
+  await until('the summary', () => page.evaluate(shown('#practice-flow .practice-summary')));
+  const line = await page.evaluate(textOf('.practice-summary .summary-line'));
+  expect(line === '3 problems: 1 correct, 1 not quite, 1 don’t know.', `set summary: ${line}`);
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+  console.log('practice-set: start from Home, every problem listed with its own answer box + confidence, answers held locally (no command, no feedback, survive leaving), one practice_submit_set, per-problem review (verdict, miss class, answer, solution), review survives a reopen, summary');
+}
+
+// The backend's turn status and the session's own state decide what the screen offers.
+async function practiceResume() {
+  const page = await openApp('none', { query: '&fixture=learn&practice=1&practiceSeed=failed,owed,cut,legacy', reducedMotion: true });
+  await until('the session list', () => page.evaluate(`${qa('#session-list .session-open')}.length === 5`));
+  const openRow = (title) => `${qa('#session-list .session-open')}.find((b) => b.textContent.includes(${JSON.stringify(title)})).click()`;
+  const back = async () => {
+    await page.evaluate(click('practice-back'));
+    await until('Home', () => page.evaluate(shown('#start')));
+  };
+
+  // A failed last turn: the backend reason, and Try again → practice_resume.
+  await page.evaluate(openRow('failed turn'));
+  await until('the failure', () => page.evaluate(`/DeepSeek is not connected/.test(${textOf('#practice-live .turn-error')})`));
+  const failed = await page.evaluate(`({ title: ${textOf('#practice-live .turn-error-title')}, buttons: ${qa('#practice-live .turn-error button')}.map((b) => b.textContent), role: ${q('#practice-live .turn-error')}.getAttribute('role') })`);
+  expect(failed.title === 'The last reply failed.' && failed.buttons.join() === 'Try again,Settings' && failed.role === 'alert', `failed turn: ${JSON.stringify(failed)}`);
+  await page.evaluate(press('Try again', '#practice-live'));
+  await until('the retried reply', () => page.evaluate(`/Sorry about that/.test(${textOf('#practice-flow')}) && !${q('#practice-live .turn-error')}`));
+  expect((await page.evaluate(argsOf('practice_resume'))).length === 1, 'practice_resume after Try again');
+  await back();
+
+  // A learner message with no reply (a restart cut the turn): offered, not guessed from the page.
+  await page.evaluate(openRow('reply owed'));
+  await until('the offer', () => page.evaluate(`${textOf('#practice-live .turn-error-title')} === 'The coach hasn’t answered this yet.'`));
+  expect(await page.evaluate(`${q('#practice-live .turn-error')}.getAttribute('role') === 'status' && ${textOf('#practice-live .turn-error button')} === 'Get a reply'`), 'the offer is a status with "Get a reply"');
+  await back();
+
+  // A problem that was never written: the same offer; it writes the problem.
+  await page.evaluate(openRow('problem not written'));
+  await until('the offer', () => page.evaluate(`${textOf('#practice-live .turn-error button')} === 'Get a reply'`));
+  expect(await page.evaluate(`${q('#practice-flow .problem')} === null`), 'nothing is readable before the coach has posed the problem');
+  await page.evaluate(press('Get a reply', '#practice-live'));
+  await until('the problem', () => page.evaluate(shown('#practice-flow .problem') + ` && !${q('#practice-live .turn-error')}`));
+  await back();
+
+  // The old single-prompt Practice: read-only, with "Start a new practice session".
+  await page.evaluate(openRow('older session'));
+  await until('the transcript', () => page.evaluate(`${qa('#practice-flow .entry')}.length === 2`));
+  const old = await page.evaluate(`({ word: ${textOf('#practice-word')}, note: ${note()}, primary: ${textOf('#practice-primary')}, composer: document.getElementById('composer').hidden,
+      answer: document.getElementById('practice-answer').childElementCount, math: ${qa('#practice-flow .katex')}.length > 0 })`);
+  expect(old.word === 'Read-only' && old.note === 'Made with an older tutor. Read-only.' && old.primary === 'Start a new practice session' && old.composer && old.answer === 0 && old.math, `legacy: ${JSON.stringify(old)}`);
+  await page.evaluate(click('practice-primary'));
+  await until('a new session', () => page.evaluate(`${shown('#practice-flow .problem')}`));
+  const started = await page.evaluate(argsOf('start_practice'));
+  expect(started.length === 1 && started[0].targets.length === 0 && ['stream', 'set'].includes(started[0].format), `start_practice from a legacy session: ${JSON.stringify(started)}`);
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+
+  // A start whose first turn fails after the session exists: the screen is open with the error and a way on.
+  const failing = await openApp('none', { query: '&fixture=learn&practice=1&practiceFail=start', reducedMotion: true });
+  await until('the review cue', () => failing.evaluate(shown('#review-cue')));
+  await failing.evaluate(choose('review-cue-format', 'One at a time'));
+  await failing.evaluate(click('practise-due'));
+  await until('the failure', () => failing.evaluate(`/DeepSeek is not connected/.test(${textOf('#practice-live .turn-error')})`));
+  expect(await failing.evaluate(shown('#practice')), 'the session screen stays open on a failed first turn');
+  await failing.evaluate(press('Try again', '#practice-live'));
+  await until('the problem', () => failing.evaluate(shown('#practice-flow .problem')));
+  await failing.close();
+  console.log('practice-resume: a failed turn offers Try again with the backend reason, an unanswered message and an unwritten problem offer "Get a reply" (practice_resume), an older session opens read-only with "Start a new practice session", a failed first turn keeps the screen open');
+}
+
+// --- exam mode ------------------------------------------------------------------
+
+const EXAM = { query: '&fixture=learn&practice=1&exam=1', reducedMotion: true };
+const noOverflow = `document.documentElement.scrollWidth <= innerWidth`;
+
+/** Opens the exam goal's Learn session (L1) and its dashboard. */
+async function openDashboard(page) {
+  await until('the session list', () => page.evaluate(`Boolean(document.querySelector('#session-list .session-open'))`));
+  await page.evaluate(`document.querySelector('#session-list .session-open').click()`);
+  await until('the Exam button', () => page.evaluate(shown('#exam-toggle')));
+  await page.evaluate(click('exam-toggle'));
+  await until('the dashboard', () => page.evaluate(`document.getElementById('exam-panel').open && ${qa('#exam-panel .exam-section')}.length === 7`));
+}
+
+async function exam() {
+  const page = await openApp('none', EXAM);
+  await openDashboard(page);
+
+  // The dashboard: days left, today's sitting, the estimate (labelled), coverage, ideas in priority order.
+  const dash = await page.evaluate(`(() => ({
+    title: ${textOf('#exam-heading')}, days: ${textOf('.exam-days')}, focus: document.activeElement?.id, calls: window.__bridge.log.filter((c) => c.cmd === 'exam_plan').map((c) => c.args),
+    today: ${textOf('.exam-today-lead')}, sections: ${qa('#exam-panel .exam-section > h2')}.map((x) => x.textContent),
+    label: ${textOf('.exam-label')}, figures: ${qa('.exam-figure')}.map((x) => x.textContent), note: ${textOf('.exam-estimate .help')},
+    raise: ${qa('.exam-estimate .exam-list li')}.map((x) => x.textContent),
+    bars: ${qa('.exam-meter')}.map((m) => m.getAttribute('aria-label')), shares: ${qa('.exam-bar-label')}.map((x) => x.textContent),
+    ideas: ${qa('.exam-idea-row .exam-idea')}.map((x) => x.textContent), chips: ${qa('.exam-chip')}.map((x) => x.textContent),
+    terms: ${qa('.exam-idea-row .you-meta')}[0].textContent, unmapped: ${qa('.exam-ideas ~ .help')}[0].textContent,
+    papers: ${qa('.exam-section')}[5].textContent, budget: document.querySelector('.exam-start input').value,
+    help: ${textOf('.exam-start .help')}, go: ${q('.exam-start button[type=submit]')}.disabled, overflow: !(${noOverflow}),
+  }))()`);
+  expect(dash.title === 'MATH101 final' && /^10 days left$/.test(dash.days) && dash.focus === 'exam-heading' && JSON.stringify(dash.calls) === JSON.stringify([{ sessionId: 'L1' }]),
+    `dashboard head: ${JSON.stringify(dash)}`);
+  expect(dash.sections.join('|') === 'Today|Expected score|Coverage by topic|Ideas in priority order|Teaching and practice|Past papers|Sit a timed paper', `sections: ${dash.sections}`);
+  expect(dash.today === 'Teach Derivative as a limit.' && dash.label === 'Estimate' && dash.figures.join('|') === '≈ 46%|≈ 33%' && /\[inference\]/.test(dash.note)
+    && dash.raise[0].startsWith('Derivative as a limit · Teach · about +7.1 points'), `today and estimate: ${JSON.stringify(dash)}`);
+  expect(dash.bars.length === 2 && /^Calculus: expected 60% now, 43% on the exam day, 88% of the exam$/.test(dash.bars[0]) && /^Algebra: expected 0% now/.test(dash.bars[1]), `coverage bars: ${JSON.stringify(dash.bars)}`);
+  expect(dash.ideas.join('|') === 'Derivative as a limit|Quadratic formula|Chain rule|Limit of a function' && dash.chips.join('|') === 'Teach|Practise|Practise|Practise'
+    && dash.terms === 'weight 0.80 · recall 50% · 3 layers not shown · priority 1.60', `ideas: ${JSON.stringify({ i: dash.ideas, c: dash.chips, t: dash.terms })}`);
+  expect(/Series/.test(dash.unmapped) && /1 past paper in your libraries, 1 with a mark scheme/.test(dash.papers)
+    && dash.budget === '45' && /^About 3 problems, 15 minutes each/.test(dash.help) && /can’t be paused/.test(dash.help) && !dash.go && !dash.overflow, `papers and budget: ${JSON.stringify(dash)}`);
+  await page.shot('exam-dashboard');
+
+  // A budget outside the limits stops the start.
+  await page.evaluate(fill2('.exam-start input', '3'));
+  const bad = await page.evaluate(`({ help: ${textOf('.exam-start .help')}, go: ${q('.exam-start button[type=submit]')}.disabled })`);
+  expect(bad.help === 'Between 5 and 360 minutes.' && bad.go, `bad budget: ${JSON.stringify(bad)}`);
+  await page.evaluate(fill2('.exam-start input', '45'));
+
+  // Start: the paper opens on the Practice screen and the clock starts when the whole paper is posed.
+  await page.evaluate(`${q('.exam-start button[type=submit]')}.click()`);
+  await until('the paper screen', () => page.evaluate(shown('#practice')));
+  await until('the clock', () => page.evaluate(shown('.exam-clock')));
+  const started = await page.evaluate(argsOf('start_exam'));
+  expect(started.length === 1 && JSON.stringify(started[0]) === JSON.stringify({ goalSessionId: 'L1', budgetMin: 45 }) && (await page.evaluate(argsOf('start_practice'))).length === 0, `start_exam: ${JSON.stringify(started)}`);
+  const paper = await page.evaluate(`(() => ({
+    word: ${textOf('#practice-word')}, clock: ${textOf('.exam-clock')}, role: ${q('.exam-clock')}.getAttribute('role'), label: ${textOf('.exam-clock-label')},
+    kickers: ${qa('.exam-paper .problem .kicker')}.map((k) => k.textContent), boxes: ${qa('.exam-paper textarea')}.length, scales: ${qa('.exam-paper .confidence')}.length,
+    labels: ${qa('.exam-paper textarea')}.map((t) => document.querySelector('label[for="' + t.id + '"]')?.textContent),
+    buttons: ${qa('#practice button')}.filter((b) => !b.hidden && b.getClientRects().length).map((b) => b.textContent.trim()),
+    flow: ${q('#practice-flow')}.childElementCount, note: ${note()}, composer: ${shown('#composer')}, panel: document.getElementById('exam-panel').open, toggle: ${shown('#exam-toggle')},
+    count: ${textOf('.exam-count')}, focus: document.activeElement?.tagName, bar: getComputedStyle(${q('.exam-bar')}).position, overflow: !(${noOverflow}),
+  }))()`);
+  expect(paper.word === 'Practice · exam paper' && /^(44:5\d|45:00)$/.test(paper.clock) && paper.role === 'timer' && paper.label === 'left of 45 minutes · 15 marks',
+    `paper clock: ${JSON.stringify(paper)}`);
+  expect(paper.kickers.join('|') === 'Problem 1 of 3 · 5 marks|Problem 2 of 3 · 4 marks|Problem 3 of 3 · 6 marks' && paper.boxes === 3 && paper.scales === 3
+    && paper.labels.join('|') === 'Your answer to problem 1|Your answer to problem 2|Your answer to problem 3', `paper problems: ${JSON.stringify(paper)}`);
+  // No hints, no skipping, no Next, no feedback; the clock bar is the one thing that sticks.
+  expect(paper.buttons.every((b) => !/Hint|give up|Next|End practice|Stop/.test(b)) && paper.buttons.includes('Hand in the paper') && paper.flow === 0 && paper.note === ''
+    && !paper.composer && !paper.panel && !paper.toggle && paper.count === '0 of 3 answered.' && paper.focus === 'TEXTAREA' && paper.bar === 'sticky' && !paper.overflow, `paper controls: ${JSON.stringify(paper)}`);
+  const refused = await page.evaluate(`window.__TAURI__.core.invoke('practice_hint', { sessionId: 'X1' }).then(() => 'allowed', (e) => String(e?.message ?? e))`);
+  expect(/no hints/.test(refused), `a hint on a paper: ${refused}`);
+  await page.shot('exam-paper');
+
+  // Typing is saved by the app (the deadline hands in the latest save).
+  const fillAnswer = (i, value) => `(() => { const t = ${qa('.exam-paper textarea')}[${i}]; t.value = ${JSON.stringify(value)}; t.dispatchEvent(new Event('input')); return true; })()`;
+  await page.evaluate(fillAnswer(0, 'It is 6x cos(3x^2)'));
+  await page.evaluate(`${qa('.exam-paper .exercise')}[0].querySelector('.confidence input[value="70"]').click()`);
+  await page.evaluate(fillAnswer(1, 'wrong: I got 6x'));
+  await until('the draft save', () => page.evaluate(`${argsOf('practice_exam_save')}.length > 0 && ${textOf('.exam-saved')} === 'Saved.'`));
+  const saved = (await page.evaluate(argsOf('practice_exam_save'))).at(-1);
+  expect(JSON.stringify(saved) === JSON.stringify({ sessionId: 'X1', answers: [
+    { problemId: 'p1', text: 'It is 6x cos(3x^2)', confidence: 70 }, { problemId: 'p2', text: 'wrong: I got 6x' },
+  ] }) && (await page.evaluate(textOf('.exam-count'))) === '2 of 3 answered.', `practice_exam_save: ${JSON.stringify(saved)}`);
+
+  // Leaving and coming back: the saved answers return and the clock kept running.
+  await page.evaluate(click('practice-back'));
+  await until('Home', () => page.evaluate(shown('#start')));
+  await page.evaluate(`${qa('#session-list .session-open')}.find((b) => /Exam paper/.test(b.textContent)).click()`);
+  await until('the paper again', () => page.evaluate(`${qa('.exam-paper textarea')}.length === 3`));
+  const back = await page.evaluate(`({ boxes: ${qa('.exam-paper textarea')}.map((t) => t.value), conf: ${qa('.exam-paper .confidence')}.map((f) => f.querySelector('input:checked')?.value ?? null), clock: ${textOf('.exam-clock')} })`);
+  expect(back.boxes.join('|') === 'It is 6x cos(3x^2)|wrong: I got 6x|' && back.conf.join() === '70,,' && /^(44:|45:)/.test(back.clock), `paper after reopening: ${JSON.stringify(back)}`);
+
+  // Handing in with a problem unanswered asks first.
+  await page.evaluate(press('Hand in the paper', '#practice'));
+  await untilDump('the first confirmation', () => page.evaluate(`document.getElementById('confirm').open`), page);
+  const ask = await page.evaluate(`({ title: ${textOf('#confirm-title')}, text: ${textOf('#confirm-text')}, ok: ${textOf('#confirm-ok')}, cancel: ${textOf('#confirm-cancel')}, calls: ${argsOf('practice_submit_set')}.length })`);
+  expect(ask.title === 'Hand in the paper?' && /1 problem has no answer/.test(ask.text) && ask.ok === 'Hand in' && ask.cancel === 'Keep working' && ask.calls === 0, `hand-in confirmation: ${JSON.stringify(ask)}`);
+  await page.evaluate(click('confirm-cancel'));
+  await until('the dialog closed', () => page.evaluate(`!document.getElementById('confirm').open`));
+  expect((await page.evaluate(argsOf('practice_submit_set'))).length === 0 && (await page.evaluate(`${qa('.exam-paper textarea')}.length === 3`)), 'Keep working keeps the paper open');
+  // A state refresh landing right after the dialog closed can swallow one
+  // click, as it can for a learner: press again until the dialog opens.
+  let pressed = 0;
+  await untilDump('the second confirmation', async () => {
+    if (await page.evaluate(`document.getElementById('confirm').open`)) return true;
+    if (pressed++ < 6) await page.evaluate(press('Hand in the paper', '#practice'));
+    await sleep(250);
+    return page.evaluate(`document.getElementById('confirm').open`);
+  }, page);
+  await page.evaluate(click('confirm-ok'));
+  try {
+    await until('the marked paper', () => page.evaluate(`${qa('.exam-paper .result')}.length === 3 && ${shown('.exam-score-line')} && ${qa('.exam-paper .entry.tutor')}.length === 1 && Boolean(${qa('.exam-actions button')}.find((b) => b.textContent === 'Finish' && !b.disabled))`));
+  } catch (err) {
+    const snap = await page.evaluate(`({ results: ${qa('.exam-paper .result')}.length, score: ${shown('.exam-score-line')}, tutor: ${qa('.exam-paper .entry.tutor')}.length, actions: ${qa('.exam-actions button')}.map((b) => b.textContent + (b.disabled ? ' (disabled)' : '')), status: document.querySelector('.exam-paper .form-status, .exam-status')?.textContent, errs: window.__errors, tail: window.__bridge.log.slice(-8).map((c) => c.cmd) })`);
+    throw new Error(`${err.message}: ${JSON.stringify(snap)}`);
+  }
+  const handed = await page.evaluate(argsOf('practice_submit_set'));
+  expect(handed.length === 1 && JSON.stringify(handed[0]) === JSON.stringify({ sessionId: 'X1', answers: [
+    { problemId: 'p1', text: 'It is 6x cos(3x^2)', confidence: 70 }, { problemId: 'p2', text: 'wrong: I got 6x' },
+  ] }), `practice_submit_set: ${JSON.stringify(handed)}`);
+  await page.shot('exam-review');
+  const review = await page.evaluate(`(() => { const cards = ${qa('.exam-paper .problem')};
+    return { score: ${textOf('.exam-score-line')}, when: ${textOf('.exam-score .you-meta')}, verdicts: cards.map((c) => c.querySelector('.verdict')?.textContent.replace(/^\\S+ /, '')),
+      marks: cards.map((c) => c.querySelector('.exam-marks')?.textContent), you: cards.map((c) => c.querySelector('.you .you-text')?.textContent),
+      conf: cards.map((c) => c.querySelector('.you .you-meta')?.textContent ?? null), miss: cards.map((c) => c.querySelector('.result-miss')?.textContent ?? null),
+      scheme: cards.map((c) => c.querySelector('details.reveal')?.textContent.includes('Names the outer and the inner function')), boxes: ${qa('.exam-paper textarea')}.length,
+      clock: ${shown('.exam-clock')}, coach: ${qa('.exam-paper .entry.tutor')}.length, buttons: ${qa('.exam-actions button')}.map((b) => b.textContent), word: ${textOf('#practice-word')} };
+  })()`);
+  expect(review.score === '7 of 15 marks (47%)' && /^Handed in after \d+ of 45 minutes\.$/.test(review.when) && review.verdicts.join('|') === 'Correct.|Partly right.|Don’t know.'
+    && review.marks.join('|') === '5 of 5 marks|2 of 4 marks|0 of 6 marks' && review.you.join('|') === 'It is 6x cos(3x^2)|wrong: I got 6x|No answer.' && review.conf[0] === 'Fairly sure (≈70%)'
+    && review.miss[1] === 'What went wrong: Right idea, slip in the working.' && review.scheme.every(Boolean) && review.boxes === 0 && !review.clock && review.coach === 1
+    && review.buttons.join() === 'Finish', `review: ${JSON.stringify(review)}`);
+  await page.evaluate(press('Finish', '#practice'));
+  await until('the paper ended', () => page.evaluate(`${qa('.exam-actions button')}.map((b) => b.textContent).join() === 'Back to sessions'`));
+  await page.evaluate(press('Back to sessions', '#practice'));
+  await until('Home', () => page.evaluate(shown('#start')));
+  let errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+
+  // The deadline: the clock reaches 0, the boxes lock, and the app hands in what was saved.
+  const late = await openApp('none', { ...EXAM, query: `${EXAM.query}&examShortMs=3500` });
+  await openDashboard(late);
+  await late.evaluate(`${q('.exam-start button[type=submit]')}.click()`);
+  await until('the clock', () => late.evaluate(shown('.exam-clock')));
+  await late.evaluate(`(() => { const t = ${qa('.exam-paper textarea')}[0]; t.value = 'Auto answer'; t.dispatchEvent(new Event('input')); return true; })()`);
+  await until('the draft save', () => late.evaluate(`${argsOf('practice_exam_save')}.length > 0`));
+  await until('time up', () => late.evaluate(`${textOf('.exam-clock')} === '0:00' && ${q('.exam-paper textarea')}.disabled`));
+  const lock = await late.evaluate(`({ status: ${textOf('.exam-status')}, boxes: ${qa('.exam-paper textarea')}.every((t) => t.disabled), hand: ${q('.exam-bar .btn')}.disabled, low: ${q('.exam-bar')}.classList.contains('low') })`);
+  expect(/^Time is up\. Your saved answers are being handed in\.$/.test(lock.status) && lock.boxes && lock.hand && lock.low, `locked at the deadline: ${JSON.stringify(lock)}`);
+  await until('the auto hand-in', () => late.evaluate(`${qa('.exam-paper .result')}.length === 3 && ${shown('.exam-score-line')}`), 20_000);
+  const auto = await late.evaluate(`({ score: ${textOf('.exam-score-line')}, when: ${textOf('.exam-score .you-meta')}, you: ${qa('.exam-paper .problem .you .you-text')}.map((e) => e.textContent),
+      handIn: ${argsOf('practice_submit_set')}.length, saved: ${argsOf('practice_exam_save')}.at(-1).answers })`);
+  expect(auto.score === '5 of 15 marks (33%)' && auto.when === 'Time ran out: the app handed in your last saved answers.' && auto.you.join('|') === 'Auto answer|No answer.|No answer.'
+    && auto.handIn === 0 && JSON.stringify(auto.saved) === JSON.stringify([{ problemId: 'p1', text: 'Auto answer' }]), `auto hand-in: ${JSON.stringify(auto)}`);
+  errors = await late.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await late.close();
+
+  // A phone: the dashboard and the paper fit, the clock bar stacks.
+  const phone = await openApp('none', { ...EXAM, width: 390, height: 844, mobile: true, dark: true });
+  await openDashboard(phone);
+  expect(await phone.evaluate(noOverflow), 'the dashboard overflows a 390 px screen');
+  await phone.shot('exam-dashboard-phone');
+  await phone.evaluate(`${q('.exam-start button[type=submit]')}.click()`);
+  await until('the clock', () => phone.evaluate(shown('.exam-clock')));
+  expect(await phone.evaluate(`${noOverflow} && ${q('.exam-bar .btn')}.getBoundingClientRect().width > 300`), 'the paper overflows a 390 px screen, or its hand-in button is not full width');
+  await phone.shot('exam-paper-phone');
+  errors = await phone.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await phone.close();
+  console.log('exam: dashboard (days left, today, labelled estimate, coverage bars, ideas by priority, papers, budget limits), start_exam, timed paper (clock, marks, no hints/skip/next, autosave, draft survives a reopen), hand-in confirmation, marked review with mark scheme and score, deadline lock and the app handing in the saved draft, phone layout');
+}
+const fill2 = (sel, value) => `(() => { const el = ${q(sel)}; el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input')); return true; })()`;
+
+const cases = { ipc, placement, sync, library, map, session, turn, plugins: pluginsCase, practice, 'practice-set': practiceSet, 'practice-resume': practiceResume, exam };
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases);
 try {
   for (const name of wanted) {

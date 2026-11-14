@@ -49,21 +49,19 @@
             <span class="resume-place" id="resume-place"></span>
           </button>
           <h1 class="hero" id="hero">What do you want to learn?</h1>
-          <fieldset class="modes" id="mode-toggle">
-            <legend class="sr-only">Mode</legend>
-            <label class="mode">
-              <input type="radio" name="mode" value="learn" checked />
-              <span class="mode-name">Learn</span>
-            </label>
-            <label class="mode">
-              <input type="radio" name="mode" value="practice" />
-              <span class="mode-name">Practice</span>
-            </label>
-          </fieldset>
           <p class="setup-notice" id="setup-notice" hidden>
             Connect a model to start. <button class="btn text" type="button" id="setup-button">Settings</button>
           </p>
           <div class="composer-slot" id="home-composer-slot"></div>
+          <section class="review-cue" id="review-cue" aria-labelledby="review-cue-heading" hidden>
+            <h2 class="review-cue-heading" id="review-cue-heading">Due for review</h2>
+            <p class="review-cue-text" id="review-cue-text"></p>
+            <div class="review-cue-actions">
+              <div id="review-cue-format"></div>
+              <button class="btn secondary" id="practise-due" type="button">Practise</button>
+            </div>
+            <p class="field-error" id="review-cue-error" role="status"></p>
+          </section>
         </div>
         <p class="unavailable" id="unavailable" hidden>Open this in P's Learning Harness.</p>
         <div class="sync-banner" id="sync-banner" role="status" hidden>
@@ -101,6 +99,7 @@
             <span class="workspace-name" id="head-workspace-name"></span>
           </span>
           <button class="btn text" id="plan-toggle" type="button" aria-haspopup="dialog" hidden>Plan</button>
+          <button class="btn text" id="exam-toggle" type="button" aria-haspopup="dialog" hidden>Exam</button>
           <div class="head-menu-wrap" id="session-menu-wrap" hidden>
             <button class="btn text head-menu-button" id="session-menu" type="button"
                     aria-haspopup="menu" aria-expanded="false" aria-controls="session-menu-list"
@@ -147,6 +146,43 @@
       </footer>
     </section>
 
+    <section class="conversation practice" id="practice" aria-labelledby="practice-title" hidden>
+      <header class="head">
+        <div class="col head-inner">
+          <button class="btn text back" id="practice-back" type="button" aria-label="Back to sessions">
+            <span aria-hidden="true">←</span><span class="back-label"> Sessions</span>
+          </button>
+          <h1 class="head-title" id="practice-title" tabindex="-1"></h1>
+          <span class="head-word" id="practice-word">Practice</span>
+          <button class="btn text" id="practice-fullscreen" type="button">Full screen</button>
+          <p class="head-status" id="practice-status" role="status"></p>
+        </div>
+      </header>
+
+      <div class="messages" id="practice-scroll">
+        <div class="col page" id="practice-page">
+          <p class="practice-picked" id="practice-picked" hidden></p>
+          <div class="timeline" id="practice-flow"></div>
+          <div class="practice-exam-slot" id="practice-exam-slot"></div>
+          <div class="live" id="practice-live"></div>
+          <div class="practice-answer" id="practice-answer"></div>
+        </div>
+      </div>
+
+      <footer class="desk">
+        <div class="col desk-inner">
+          <div class="desk-note practice-desk">
+            <p id="practice-note"></p>
+            <div class="practice-actions">
+              <button class="btn text" id="practice-stop" type="button" hidden>Stop</button>
+              <button class="btn secondary" id="practice-secondary" type="button" hidden></button>
+              <button class="btn primary" id="practice-primary" type="button" hidden></button>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </section>
+
     <section class="conversation mapview" id="map" aria-labelledby="map-heading" hidden>
       <header class="head">
         <div class="col head-inner">
@@ -164,6 +200,7 @@
           <div class="map-desk">
             <p class="map-count" id="map-count">Nothing selected</p>
             <button class="btn text" id="map-clear" type="button" hidden>Clear</button>
+            <div class="map-format" id="map-format"></div>
             <button class="btn primary" id="map-practise" type="button" disabled>Practise</button>
           </div>
           <p class="field-error" id="map-error" role="status"></p>
@@ -192,6 +229,8 @@
   </form>
 
   <dialog class="plan-overlay" id="plan-panel" aria-labelledby="plan-sheet-heading"></dialog>
+
+  <dialog class="settings exam-sheet" id="exam-panel" aria-labelledby="exam-heading"></dialog>
 
   <dialog class="settings" id="settings" aria-labelledby="settings-heading">
     <div class="settings-col">

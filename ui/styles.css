@@ -1572,3 +1572,105 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
 .starting-point-row { display: inline-flex; align-items: center; gap: var(--s2); min-block-size: 24px; color: var(--ink); }
 .starting-point .help { margin-block-start: 0; margin-inline-start: calc(24px + var(--s2)); }
 @media (pointer: coarse) { .starting-point-row { min-block-size: 44px; } }
+
+/* ---------- Practice (ui-design §7.3) ---------- */
+.review-cue { margin-block-start: var(--s6); }
+.review-cue-heading { font: 600 var(--fs-ui)/1.45 var(--font-ui); color: var(--ink); }
+.review-cue-text { margin: var(--s1) 0 0; color: var(--ink-2); }
+.review-cue-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s5); margin-block-start: var(--s2); }
+.review-cue-actions .modes, .map-format .modes { margin: 0; }
+.map-format { flex: none; }
+
+.practice-picked { margin: 0 0 var(--s5); font-size: var(--fs-small); color: var(--ink-3); }
+.practice-picked[hidden] { display: none; }
+.practice-answer:not(:empty), .practice-exam-slot:not(:empty) { margin-block-start: var(--s7); }
+.practice-answer > * { font-family: var(--font-ui); }
+.problem .statement { margin-block-start: var(--s2); }
+.answer-help { margin: 0; color: var(--ink-2); font-size: var(--fs-small); }
+.confidence-hint { grid-column: 1 / -1; margin: 0 0 var(--s2); font-size: var(--fs-meta); color: var(--ink-3); }
+.practice-composer { margin-block-start: var(--s4); }
+.answer-card .actions { margin-block-start: var(--s3); }
+.answer-card:not(.pending) .practice-composer { margin-block-start: var(--s2); }
+
+.concluded { font-family: var(--font-ui); }
+.result > * + * { margin-block-start: var(--s2); }
+.result .verdict { margin-block-start: 0; }
+.result-miss { color: var(--ink-2); }
+.problem .you + .result { margin-block-start: var(--s3); }
+.reveal { margin-block-start: var(--s4); }
+.reveal summary { cursor: pointer; color: var(--ink-2); font-size: var(--fs-small); }
+.reveal-body { margin-block-start: var(--s3); padding-inline-start: var(--s4); border-inline-start: var(--line); }
+.reveal-moves { margin: 0; padding-inline-start: 1.3em; }
+.reveal-moves li + li, .reveal-list li + li { margin-block-start: var(--s2); }
+.reveal-list { margin: 0; padding-inline-start: 1.3em; }
+.reveal-key, .reveal-label {
+  font: 400 var(--fs-meta)/1.4 var(--font-ui);
+  font-variant-caps: all-small-caps; letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+.reveal-key { display: block; }
+.reveal-label { margin: var(--s3) 0 var(--s1); }
+.reveal-note { margin: var(--s3) 0 0; font-size: var(--fs-small); color: var(--ink-3); }
+.practice-summary { padding-block-start: var(--s6); border-block-start: var(--hair); font-family: var(--font-ui); }
+.summary-title { font: 600 var(--fs-h2)/1.3 var(--font-read); color: var(--ink); }
+.summary-line, .summary-ideas { margin: var(--s2) 0 0; color: var(--ink-2); }
+.practice-summary .calibration { margin-block-start: var(--s4); }
+
+.practice-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--s2) var(--s4); }
+@media (max-width: 599px) {
+  .practice-actions { justify-content: stretch; }
+  .practice-actions .btn:not(.text) { flex: 1 1 auto; }
+  #practice-fullscreen { display: none; }
+}
+
+/* ---------- exam mode (ui/exam.js; docs/ui-design.md §11c) ---------- */
+.exam-col { font-family: var(--font-ui); }
+.exam-top { padding-block-start: var(--s5); }
+.exam-days { margin: 0; font: 600 var(--fs-h1)/1.2 var(--font-read); }
+.exam-section > * + * { margin-block-start: var(--s3); }
+.exam-today-lead { margin: 0; font: 600 var(--fs-learner)/1.4 var(--font-ui); }
+.exam-label, .exam-sub { margin: 0; font: 600 var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-3); }
+.exam-sub { margin-block-start: var(--s4); }
+.exam-figure { font: 600 var(--fs-h3)/1.3 var(--font-read); }
+.exam-estimate-line { margin: 0; color: var(--ink-2); }
+.exam-list, .exam-ideas, .exam-bars { margin: 0; padding: 0; list-style: none; }
+.exam-list li + li, .exam-idea-row + .exam-idea-row, .exam-bar-row + .exam-bar-row { margin-block-start: var(--s3); }
+.exam-idea { font-weight: 600; }
+.exam-idea-head, .exam-bar-label { margin: 0; }
+.exam-idea-row > p + p, .exam-bar-row > p + p, .exam-bar-row > .exam-meter + p { margin-block-start: var(--s1); }
+.exam-chip { padding: 0 var(--s2); border: var(--line); border-radius: var(--r); font-size: var(--fs-meta); color: var(--ink-2); }
+.exam-chip.teach { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.exam-meter { position: relative; margin-block-start: var(--s1); block-size: 10px; border: var(--line); border-radius: var(--r); background: var(--raised); }
+.exam-meter-fill { position: absolute; inset-block: 0; inset-inline-start: 0; background: var(--accent); }
+.exam-meter-day { position: absolute; inset-block: -3px; inline-size: 2px; margin-inline-start: -1px; background: var(--ink); }
+.exam-start { max-inline-size: 28rem; }
+.exam-start input[type="number"] { inline-size: 8ch; }
+.exam-start .btn { margin-block-start: var(--s3); }
+@media (forced-colors: active) {
+  .exam-meter-fill { forced-color-adjust: none; background: Highlight; }
+  .exam-meter-day { forced-color-adjust: none; background: CanvasText; }
+}
+
+.exam-paper { font-family: var(--font-ui); }
+.exam-paper > * + * { margin-block-start: var(--s6); }
+.exam-bar {
+  position: sticky; inset-block-start: 0; z-index: 1;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s3);
+  padding-block: var(--s3); background: var(--paper); border-block-end: var(--line);
+}
+.exam-clock { font: 600 var(--fs-h2)/1.2 var(--font-mono); font-variant-numeric: tabular-nums; }
+.exam-bar.low .exam-clock { color: var(--danger); }
+.exam-clock-label { flex: 1 1 auto; color: var(--ink-3); font-size: var(--fs-small); }
+.exam-foot > * + * { margin-block-start: var(--s2); }
+.exam-count { margin: 0; color: var(--ink-2); }
+.exam-status:empty, .exam-saved:empty { display: none; }
+.exam-score { padding-block-start: var(--s2); }
+.exam-score-line { margin: var(--s2) 0 0; font: 600 var(--fs-h3)/1.3 var(--font-read); }
+.exam-marks { font-weight: 600; }
+.exam-score .summary-title { inline-size: fit-content; }
+.exam-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s2) var(--s4); }
+@media (max-width: 599px) {
+  .exam-bar { gap: var(--s1) var(--s2); }
+  .exam-bar .btn { flex: 1 1 100%; }
+  .exam-actions .btn:not(.text) { flex: 1 1 auto; }
+}

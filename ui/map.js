@@ -2336,11 +2336,11 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     request();
   }
 
-  /** The selected ideas in display order: { title, topic } per idea. */
+  /** The selected ideas in display order: { id, title, topic } per idea. */
   function selection() {
     const out = [];
     for (const [key, { node }] of entries) {
-      if (selected.has(key)) out.push({ title: node.title, topic: node.cluster.path });
+      if (selected.has(key)) out.push({ id: key, title: node.title, topic: node.cluster.path });
     }
     return out;
   }

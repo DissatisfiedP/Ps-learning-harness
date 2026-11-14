@@ -202,8 +202,47 @@ function confidenceLine(a) {
   // With no typed answer the answer line already says "I don't know."
   if (a.dontKnow) return a.answer ? 'I don’t know' : '';
   if (typeof a.confidence !== 'number') return '';
-  const label = CONFIDENCE.find(([v]) => v === a.confidence)?.[1];
-  return label ? `${label} (≈${a.confidence}%)` : `${a.confidence}% sure`;
+  return confidenceLabel(a.confidence);
+}
+
+/** The learner's confidence in words: "Fairly sure (≈70%)". */
+export function confidenceLabel(value) {
+  const label = CONFIDENCE.find(([v]) => v === value)?.[1];
+  return label ? `${label} (≈${value}%)` : `${value}% sure`;
+}
+
+/**
+ * The five-button "How sure are you?" scale, shared by the check question and
+ * Practice. `value()` is 10|30|50|70|90 or null; `clear()` unchecks it.
+ */
+export function confidenceField({ legend = 'How sure are you?', hint = '' } = {}) {
+  const el = h('fieldset', 'confidence');
+  el.append(h('legend', '', legend));
+  if (hint) el.append(h('p', 'confidence-hint', hint));
+  const name = nextId('conf');
+  const radios = [];
+  for (const [value, label] of CONFIDENCE) {
+    const l = h('label', 'seg');
+    const r = h('input');
+    r.type = 'radio';
+    r.name = name;
+    r.value = String(value);
+    const text = h('span', 'seg-text');
+    text.append(h('span', 'seg-label', label), h('span', 'seg-pct', `≈${value}%`));
+    l.append(r, text);
+    el.append(l);
+    radios.push(r);
+  }
+  return {
+    el,
+    radios,
+    value: () => {
+      const chosen = radios.find((r) => r.checked);
+      return chosen ? Number(chosen.value) : null;
+    },
+    set: (value) => radios.forEach((r) => (r.checked = Number(r.value) === value)),
+    clear: () => radios.forEach((r) => (r.checked = false)),
+  };
 }
 
 /** Container shared by pending questions and choices. */
@@ -262,23 +301,9 @@ function questionForm(item, onAnswer) {
   const thinking = textareaField('Your reasoning (optional)', { rows: 2, placeholder: 'How did you get there?' });
   form.append(thinking.wrap);
 
-  const conf = h('fieldset', 'confidence');
-  conf.append(h('legend', '', 'How sure are you?'));
-  const confName = nextId('conf');
-  const confRadios = [];
-  for (const [value, label] of CONFIDENCE) {
-    const l = h('label', 'seg');
-    const r = h('input');
-    r.type = 'radio';
-    r.name = confName;
-    r.value = String(value);
-    const text = h('span', 'seg-text');
-    text.append(h('span', 'seg-label', label), h('span', 'seg-pct', `≈${value}%`));
-    l.append(r, text);
-    conf.append(l);
-    confRadios.push(r);
-  }
-  form.append(conf);
+  const conf = confidenceField();
+  const confRadios = conf.radios;
+  form.append(conf.el);
 
   const actions = h('div', 'actions');
   const submit = button('Submit', 'primary', 'submit');

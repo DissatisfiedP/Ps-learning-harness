@@ -519,7 +519,7 @@ Desktop:
             │ Derivatives                  Plan · review │   newest session can go on (§7.9)
             └────────────────────────────────────────────┘
             What do you want to learn?          ← --fs-display, serif, left-aligned in column
-            (•) Learn   ( ) Practice
+            (the "Due for review" block follows the composer when ideas are due)
             ┌────────────────────────────────────────────┐
             │ A topic or goal…                            │ [Start]
             └────────────────────────────────────────────┘
@@ -549,7 +549,7 @@ Desktop:
 - **Sync banner** (Home only, never in sessions): above "Your sessions", `role="status"`, in the `sessions-error` style. "⟨Target⟩ not synced: ⟨its last error⟩" (the first failing target, e.g. "Git not synced: …") in `--danger` with a "Try again" text button (runs `sync_now`), and/or "⟨n⟩ files changed on two devices need a look." in `--ink-2` with a "Review" text button (opens Settings at the needs-attention list). Hidden when neither applies.
 - **Sync refresh:** `sync_status` is read when Home shows, every 60 s while Home is visible and the window is in front (no timer otherwise), when Settings opens and after every sync command.
 - **Background sync:** when the document becomes hidden (`visibilitychange` → `hidden`; on mobile this is the app going to the background) the UI calls `sync_if_changed()` once, fire-and-forget. The backend syncs only when a configured target has local changes; nothing is shown.
-- **Mode:** a real radio group (`fieldset` + `legend` "Mode", visually hidden legend), replacing `role="tablist"` (wrong semantics). The two options sit on one line and show their names only (`--fs-ui` 600), with no description. The display line already says what each mode is for ("What do you want to learn?" / "…to practise?"), so a description restated it (copy rule (a), §7.10); cutting it also keeps the start area to the question, the choice and the input. Switching mode updates the display line and placeholder from today's `COPY` ("A topic or goal…" / "A topic or problem set…").
+- **No mode control.** Home starts Learn only: the display line is always "What do you want to learn?" and the placeholder "A topic or goal…". Practice starts from the Map's "Practise n ideas" and from Home's "Due for review" block (§7.3.1), which follows the composer. (The earlier Learn/Practice radio group is removed, 2026-11-14: a Practice session is no longer a first message but a scheduled set of problems.)
 - **Continue:** see §7.9.
 - **Input:** the same `#composer` element moved into the home slot (keep today's slot mechanism). Its label is the display line (`aria-labelledby` = `#hero`). The button reads "Start" (primary).
 - **No suggestions.** There is no "Or try:" line. Example topics are content the learner did not ask for (a seductive detail, §2.3) and a second set of targets next to the one input (§2.8).
@@ -1006,22 +1006,87 @@ Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src '
 
 ### 7.3 Practice session
 
-Behavior is **unchanged**, except for attachments:
+Practice is the coach (architecture §4.11–4.13). Its commands, events and state are §11b; this section is the surface. Code: `ui/practice.js` (the screen), wired from `ui/app.js`; markup is `<section id="practice">` in `index.html`; ui-check cases `practice`, `practice-set` and `practice-resume` (§7.3.9).
 
-- `send_message({ sessionId, mode: "practice", text, attachments, onEvent })` with a per-call channel;
-- `retry_reply` for Retry and "Get a reply";
-- `session` events update the list and title;
-- Practice never calls Learn commands.
-- **Images only.** Practice has no file tools, so its composer hides "+" and turns the `@` list off; pasted and dropped images still become chips, while a dropped non-image file gets "Practice can take images only." Switching the composer to Practice removes pending file and folder chips with the same note. The backend refuses file and folder attachments in Practice, and a file line replayed from an older Practice session omits the "read it with file_read" hint.
+#### 7.3.1 Starting
 
-Visual changes only:
+- **Format chooser.** A two-radio group, "One at a time" (stream) and "A set of problems" (set), built from one list (`FORMATS` in `practice.js`); the choice is remembered (`localStorage` `lh.practice.format`) and every chooser on screen shows the same one. Adding a format is one entry in `FORMATS` plus its renderer. (The exam paper is not offered here: it starts from the exam goal's own card, `docs/ui-design.md` exam sections.)
+- **Map.** "Practise n ideas" (the Map desk, with the chooser beside it) calls `start_practice({ targets: ids, format })` with the picked ideas' graph ids and opens the new session; the Map's selection is cleared once the session exists. Nothing persists before that call.
+- **Home.** Home has no Learn/Practice toggle any more (the hero is always "What do you want to learn?"). When `review_queue` has due ideas, a "Due for review" block under the composer says "n ideas are due: A, B, C, and k more." with the same chooser and one secondary button, "Practise" → `start_practice({ targets: [], format })` (the scheduler picks what is due or weak). The block is hidden when nothing is due or the read fails. A finished Learn session's "Practise these ideas" (§7.9) starts a session on that plan's graph ideas the same way.
+- The screen opens on the `session` event, before the coach has written anything: the head shows the title, the flow says "Writing a problem…" (or "Writing the set…"), Stop is offered. A refusal before the event (no model, an empty map) is reported where the learner clicked (the Map's `#map-error`, the Home block's status, the desk note) and nothing opens. A failed first turn leaves the screen open with the error block (§7.3.5).
 
-- The head: back, title, "Practice".
-- The page: tutor prose and learner entries as in §6.4. Exercises are whatever the tutor writes in prose.
-- The desk: composer, or composer + Stop.
-- The streaming scroll rule is identical to Learn (§7.2.2).
-- **Reasoning** (`thinking`): rendered *before* the reply text, in reading order with how it was produced, as a closed `details` with summary "Tutor's working". It is never auto-opened, and while streaming the summary does not change text.
-- Errors: the block from §7.2.11 with "Retry" → `runPractice(null)`.
+#### 7.3.2 The screen
+
+`#practice` has the Learn session's layout: a head (back "← Sessions", the title, "Practice" / "Practice · set" / "Practice · ended" / "Read-only", "Full screen" on desktop, a `role="status"` line), the page (`.messages` scroller) and the desk. It is not a Learn timeline: the page is drawn from `practice_state` alone (§11b), keyed so a re-read rebuilds only what changed. Nothing scrolls on its own except where §9.1 allows it: a problem that has just been posed, and the session open, align under the head. Under the head, once, when the learner picked ideas: "On: A, B" (their own choice; a scheduler-picked session shows nothing).
+
+Page blocks, in order of the feed:
+
+- **Problem** (`.exercise.problem`): small-caps kicker "Problem 3", "Problem 3 of 5" in a set, with " · Critique" / " · Design" / " · Retest"; the statement as Markdown + KaTeX, with `artifact:` figures resolved from the session's op log, exactly as a tutor message renders. **It never names the idea:** `targets`, `hosts`, `layer`, `level`, `cueDistance` exist only in `result` and are shown only after the problem concluded.
+- **You** entries (§6.4): the learner's own submission without the confidence line the backend appends (`[confidence: …]`), with "Fairly sure (≈70%)" beneath; "Asked for a hint." and "Gave up on this problem." for the two buttons.
+- **Coach** entries: tutor-message prose; the coach's reasoning, when present, is the closed "Tutor's working" disclosure before the text, never auto-opened. While a coach message streams it is a live reply (the page grows in place; no follow-scroll) and gives way to the persisted entry once `practice_state` carries it.
+- **Result** (after `concluded`): the verdict line with its glyph (✓ Correct, ◐ Partly right, ✗ Not quite, ○ Don't know, – Skipped; `role` none, focusable heading line), then "Tested: …· 2 hints used · Rated good · 2 min", the miss class in words ("What went wrong: Right idea, slip in the working."), the misconception if any, and the **Worked solution** disclosure (open): the moves (the ones that need a new idea marked "Key step"), the answer, "Also accepted", "What a good answer has" (essential criteria marked), and "A script reproduced this answer." / "Not checked by a script (Python with SymPy isn't available here), so this answer is unverified." from `answerCheck`.
+- **Summary** (`ended`): "Practice finished", "3 problems: 2 correct, 1 skipped.", hints and retests used, the ideas tested, and the "Your confidence" disclosure from `calibration` (the Learn close's component).
+
+#### 7.3.3 Stream: answering, hints, giving up
+
+While a problem is open the answer card (`.exercise.pending`) sits after the flow: the heading "Your answer", one line of help, **the five-button confidence scale** (the check question's control, `confidenceField` in `cards.js`, "Pick one when you give an answer."), the shared composer (images only; label "Your working or answer", Enter sends), and a row "Hint (n used)" and "I give up — show me".
+
+- Send → `practice_submit({ text, confidence?, attachments })`. The confidence is whatever is picked and is cleared on send; a working trace or a question may go without one. A refused send (turn running, not ready) gives the text, the attachments and the confidence back with the reason.
+- Hint → `practice_hint`. **The UI shows how many hints were used, never which rung** (the coach picks R0–R5; `hintRung` is not shown). The count reads on the button and in the desk note ("Problem 2 · 1 hint used").
+- "I give up — show me" asks once ("Sure? It counts as missed", reverting after 4 s) and then calls `practice_dismiss`: it concludes as `dismissed` and is retested.
+- After the verdict the same card becomes "Ask about this problem" (composer only; no scale): questions go through `practice_submit` with no confidence.
+
+The **desk** shows one note and at most one primary:
+
+| `status` | Note | Buttons |
+|---|---|---|
+| `writing` / `set-writing` | Writing a problem… / Writing the set… | Stop while a turn runs |
+| `open` | "Problem 2" + hints used | (the card has the actions) |
+| `concluded` | "Problem 2 done." | **Next problem** (`practice_next`), End practice |
+| `concluded`, `wrapUp` | "Retesting what you missed: n left." | **Next retest**, Skip retests and end (`practice_end { skipRetests: true }`); with none left "Retests done." and **End practice** |
+| `set-open` | "2 of 3 answered. Unanswered ones count as “don't know”." | **Hand in the set** |
+| `set-review` | "The coach is reviewing your answers…" → "Review." | **End practice** |
+| `ended` | "Practice ended." | **Practise again** (same ideas and format), Back to sessions |
+
+Every button is disabled from `can.*`, `turnRunning` and while a command is in flight (`practice_*` refuses a second turn). "End practice" → `practice_end`: with misses, R3+ hints or dismissals not yet retested the first call starts the wrap-up (`wrapUp`), each `practice_next` serves one retest, and the second End ends the session and the coach may close with one calibration line. Send is the quiet button while Next is the primary (one primary per state, §6.5). Stop → `cancel_reply`.
+
+#### 7.3.4 Set
+
+All statements are listed at once ("Problem k of n"), each with its own labelled answer box ("Your answer to problem k"), its own confidence scale ("How sure are you? (optional)") and nothing else: no hints, no composer, no coach text. **Answers are held on this device** (memory plus `localStorage` `lh.practice.draft.<sessionId>`, removed once handed in), so leaving the screen or restarting loses nothing; there is no feedback of any kind before **Hand in the set** → one `practice_submit_set({ answers })` with the problems that have a text or a confidence (the rest count as `dontknow`). Then each card becomes its review: "You" (the answer handed in, read back from the `setSubmit` op so a reopened review has it) with confidence, the result (verdict, rating, **first break and miss class** as the coach concluded them, the revealed solution), "Reviewing…" until the coach concludes that problem, and the coach's overall review as an entry after the cards. Questions about the review use "Ask about this review" (composer only).
+
+#### 7.3.5 Opening, resuming, restarting
+
+Opening a Practice row from Home's list (the row's meta reads "Practice · time"; ended and older sessions open the same way) reads `load_session` (the op log: figures, a set's handed-in answers) and `practice_state` and draws the screen; the last problem or result is aligned under the head and focus lands on the learner's next action (the answer box, a set's first box, Next, or the summary heading). Home's "Continue" cue names the place ("Practice · problem 3", "Practice · set review") for the newest session that can go on; an ended or older session has none. State is never guessed from the page: the backend's `turnRunning` and `lastTurnError` (§11b, as Learn's `session_state`) decide, and events that arrive while the session is loading are replayed after it.
+
+- A turn running when the session opens: the flow shows "The coach is writing. The reply will appear when it's finished." (the earlier deltas were missed); the finished message arrives through `practice_state`.
+- A failed turn (`turnEnd` with `error`, or `lastTurnError`): the §7.2.11 error block, `role="alert"`, "The last reply failed." and the reason, **Try again** → `practice_resume`, plus Settings when the reason is about the model.
+- A reply the coach owes (a restart cut the turn: a learner entry with no answer, a problem planned but never written, a set review with problems still unconcluded): a `role="status"` block "The coach hasn't answered this yet." with **Get a reply** → `practice_resume`.
+- Older sessions (`legacy`): the plain transcript read-only (Markdown, KaTeX), head "Read-only", desk "Made with an older tutor. Read-only." with **Start a new practice session**.
+- Another device's sync that changes the open session re-reads its state when no turn runs.
+
+#### 7.3.6 Attachments
+
+**Images only.** Practice has no file tools: while the answer card holds the composer, "+" is hidden and the `@` list is off; pasted and dropped images become chips, a dropped non-image file gets "Practice can take images only.", and pending file/folder chips are removed with the same note. The backend refuses file and folder attachments in Practice. Images go as `attachments` on `practice_submit`.
+
+#### 7.3.7 Errors
+
+A command that fails reads in the head's status line ("Couldn't start the next problem: …"), unless the turn error block already says it. System failures use `--danger`; the learner's wrong answers never do (§9.7).
+
+#### 7.3.8 Accessibility and responsive
+
+- The section is labelled by its title; problems and result blocks are named `section`s; the page is not a live region. One polite announcement per change, through `#announcer`: "Problem ready.", "The set is ready.", "Feedback: Correct.", "Handed in. The coach is reviewing.", "Retesting what you missed: n left.", "Practice ended.", else "Reply finished." at a turn's end. The busy line is a `role="status"`.
+- Focus (§9.1): programmatic focus only replaces lost focus or lands on the learner's next action, always `preventScroll`: on a new problem the answer box; on a verdict the verdict line (when focus was in the answer card or lost); on the set's first answer box; on a button that was relabelled, the new primary; on the summary heading after End. Nothing steals focus while the learner types.
+- Reduced motion: nothing here moves (no transitions of its own; scroll alignments are instant).
+- Phone (< 600 px): the confidence scale stacks as one column of 44 px rows, the desk's buttons share the row, the head hides "Full screen", the composer, Hint and Give up are 44 px tall, nothing scrolls sideways (checked at 390 px).
+- The break nudge (§7.8) is added at a turn boundary after the newest flow item, as in Learn.
+
+#### 7.3.9 Checks
+
+`bash scripts/ui-check/run.sh practice practice-set practice-resume` (fake bridge `?practice=1`; `practiceSeed=failed,owed,cut,legacy` and `practiceFail=start` stage the restart cases):
+
+- `practice`: Home cue and the two choosers (no mode toggle); Map pick → `start_practice { targets, format }`; "Writing a problem…" then the statement without the idea named, with KaTeX; hint count (never a rung); answer + confidence → `practice_submit` → verdict, solution, coach reply, once; a follow-up question without confidence; Next; give up asks twice; End → retest (kicker "Retest") → End → summary; the session list row, a read-only reopen; the 390 px layout.
+- `practice-set`: start from Home; every statement with its own box and scale; no command and no feedback before the hand-in; drafts survive leaving and reopening; one `practice_submit_set`; the review (verdict, miss class, answer, solution, the coach's note) and its survival across a reopen; summary.
+- `practice-resume`: a failed turn (Try again → `practice_resume`), a reply owed, a problem never written, an older session (read-only, "Start a new practice session"), a failed first turn keeps the screen open.
 
 ### 7.4 Session list and navigation
 
@@ -1857,9 +1922,9 @@ Sessions run for hours. Focus mode keeps the rest of the computer out of view wh
 
 Two places used to end in a dead end: Home after an interruption (find the session in the list, then find your place) and a finished Learn session (a composer with nothing left to ask). Each now offers one next step. Neither adds a second primary.
 
-- **Continue (Home).** When the newest session (`list_sessions`, newest first) is not read-only and can go on, the top of Home's start area shows one large *secondary* button: small-caps "Continue", then the title (600, one line, ellipsis) and, right-aligned in `--fs-small` `--ink-2`, where it stands. For Learn the place is the head's own current-phase label from `session_state` ("Teach 2/5", "Plan · review", "Measure"; `placeText()` in `cards.js`); for Practice it is "Practice". A Learn session whose state says `ended`, a read-only session, or a failed `session_state` call shows no block. `SessionSummary` carries no phase, so Home asks `session_state` for that one session only. Accessible name: "Continue ⟨title⟩, ⟨place⟩". Activating it is the list row's open path (`openSession`), so focus, alignment and the resumption cue are the same (§9.1). Start stays the one primary: Continue is a shortcut to something already on the screen (the newest row), not a new decision. The block re-checks on Home show, list load and delete.
+- **Continue (Home).** When the newest session (`list_sessions`, newest first) is not read-only and can go on, the top of Home's start area shows one large *secondary* button: small-caps "Continue", then the title (600, one line, ellipsis) and, right-aligned in `--fs-small` `--ink-2`, where it stands. For Learn the place is the head's own current-phase label from `session_state` ("Teach 2/5", "Plan · review", "Measure"; `placeText()` in `cards.js`); for Practice it is the coach session's place from `practice_state` ("Practice · problem 3", "Practice · set", "Practice · set review"; `practicePlace()` in `practice.js`). A Learn session whose state says `ended`, an ended or older Practice session, a read-only session, or a failed state call shows no block. `SessionSummary` carries no phase, so Home asks `session_state` / `practice_state` for that one session only. Accessible name: "Continue ⟨title⟩, ⟨place⟩". Activating it is the list row's open path (`openSession`), so focus, alignment and the resumption cue are the same (§9.1). Start stays the one primary: Continue is a shortcut to something already on the screen (the newest row), not a new decision. The block re-checks on Home show, list load and delete.
   - Reason: interrupted tasks tend to be resumed; a meta-analysis puts the weighted resumption rate around 67 % (Ovsiankina effect) [Ghibellini & Meier 2025]. Cues that stay available cut the resumption lag (§2.2) [Altmann & Trafton 2004]. Putting the session one press away from the screen the learner lands on removes the search step that sits between the intention and the work [inference].
-- **Practise these ideas (ended Learn session).** When `session_state.ended` is true (not for legacy read-only sessions, which keep their note), the desk shows "Session complete." and one primary button "Practise these ideas". It starts a Practice session with the plan's nodes, using the Map's message builder (`practiseText()` in `app.js`), so the first message is the same shape as the Map's "Practise": `Practise: ⟨titles⟩`, a blank line, "Mix them together rather than one at a time." and one line per node, "- ⟨title⟩ (in “⟨topic⟩”)" where the topic is the plan section that node belongs to (a node outside any section falls back to the plan's goal). The session view switches in place (no trip through Home), so Focus mode stays on. A plan without nodes gets "Start a new session" instead. No model: the note reads "Choose a model first." and Settings opens.
+- **Practise these ideas (ended Learn session).** When `session_state.ended` is true (not for legacy read-only sessions, which keep their note), the desk shows "Session complete." and one primary button "Practise these ideas". It calls `start_practice({ targets, format })` with the plan's nodes that are on the knowledge map (`planTargets()` in `app.js`: each plan node's `graphNode`), in the format last chosen (§7.3.1). The Practice screen replaces the session view in place (no trip through Home), so Focus mode stays on. A plan with no such nodes gets "Start a new session" instead. No model: the note reads "Choose a model first." and Settings opens.
   - Reason: practice testing right after learning beats restudy [Adesope 2017] (§2.6), and mixing the ideas is what the Map already asks for. A next step at the end keeps the learner in the work instead of in a menu [inference].
 
 ### 7.10 Copy
@@ -2104,7 +2169,7 @@ Nothing in this table scrolls, moves focus or animates.
      - Assistant messages with empty `content` are not rendered.
      - `job` ops update one line per `jobId`.
      - `compaction` → divider; `title` → head title.
-   - **Practice** keeps `send_message({ sessionId, mode:"practice", text, onEvent })` and `retry_reply` with per-call channels, and adds `attachments?` (images only, §7.3). Learn never calls `send_message`.
+  - **Practice** (the coach, built 2026-11-14): commands and the `PracticeView` are in §11b. `send_message`, `retry_reply` and the `ChatEvent` channel are gone; Learn never called them. `cancel_reply({ sessionId })` stops a running coach turn too.
    - **Legacy** `readOnly` sessions: render read-only, no composer, "Start a new session" → Home.
    - **Mobile lock** (`readOnlyReason === "desktop-plugin"`): render read-only with the desktop-plugin note; "Continue here anyway" → `mobile_unlock({ sessionId })` → re-open (§6.3, §7.2.12).
 2. **Accessibility (hard requirement):**
@@ -2122,9 +2187,140 @@ Nothing in this table scrolls, moves focus or animates.
    - deferred KaTeX warm-up via `requestIdleCallback`.
    Removing autoscroll must not add layout reads per paint.
 4. **No new dependencies beyond the vendored set, no bundler, no runtime font downloads.** System font stacks only (§5.1). Vendored marked, DOMPurify and KaTeX are unchanged; KaTeX's CSS is only overridden for `font-size` (§5.2). The outputs build added two vendored libraries, both loaded on demand (`docs/architecture.md` §4.24): Prism (`ui/vendor/prism/`, core plus per-language grammars loaded when a finished code block needs one) and Mermaid (`ui/vendor/mermaid/`, loaded on the first `mermaid` block). Nothing is fetched from the network.
-5. **Practice behavior unchanged except attachments** (§7.3): same commands, channels, retry and recovery, auto-title. Its composer takes images only (pasted or dropped; no "+", no `@` list), sent as `attachments` on `send_message`. Otherwise only its rendering changes.
+5. **Practice is the coach** (§7.3, §11b): the images-only composer rule stays (pasted or dropped images only; no "+", no `@` list), sent as `attachments` on `practice_submit`. The surface is §7.3 (`ui/practice.js`).
 6. **IDs used by `app.js` stay or are renamed in the same change:** `#messages`, `#timeline`, `#plan-slot`, `#live`, `#composer`, `#prompt`, `#send`, `#home`, `#conversation`, `#plan-panel` (now a `dialog`), `#settings`. This is a clean cutover: remove `#toast`, `#sidebar`, `#scrim`, `#model-pill`, `#session-mode`, `#phase-strip`'s separate band, `.only-mobile`, and their dead CSS and JS.
 7. Do not copy code or text from LearnHarness (AGPL-3.0).
+
+## 11b. Practice backend contract (built 2026-11-14)
+
+The coach (architecture §4.11–4.13, `crates/harness/prompts/coach/base.md`) runs a practice session as a tool loop. The UI never sees what the coach writes while it is writing a problem, nor the solution before the problem ends: the backend hides both. Everything below is what `crates/harness/src/practice/` provides; shapes are exact.
+
+**Commands** (Tauri; arguments camelCase; every command that runs a coach turn returns when the turn ends, with events streaming meanwhile, like the Learn commands):
+
+| Command | Does |
+|---|---|
+| `start_practice({ targets?, format?, size? }) -> SessionSummary` | New Practice session. `targets`: graph node ids the learner picked on the Map (`[]`/absent: the scheduler picks what is due or weak). `format`: `"stream"` (default) or `"set"`; `"exam"` is refused (a timed paper starts from the exam goal's session with `start_exam`, §11c). `size`: set length, 2–10, default 5. Emits a `session` event first, then runs the coach until the first problem is posed. Refused when the graph is empty, an id is unknown, or no Tutor model is set |
+| `practice_state({ sessionId }) -> PracticeView` | The learner-visible state (below). Re-read it on `turnEnd` and on every `op` event whose `op.op === "practice"`, debounced ~50 ms as `session_state` is |
+| `practice_submit({ sessionId, text, confidence?, attachments? })` | One submission: a working trace, a question, or a claimed answer; the coach decides which. `confidence` is `10 \| 30 \| 50 \| 70 \| 90` (the five buttons) and is what calibration counts. Images only. Not for a set before it is submitted (use `practice_submit_set`) |
+| `practice_hint({ sessionId })` | The Hint button. Stream only: the coach picks the rung (R0–R5) and the app records the highest one it reports |
+| `practice_dismiss({ sessionId })` | "Skip this problem". Stream only. Concluded as `dismissed` (an Again rating, retested at the end) even if the coach does not call `problem_conclude` |
+| `practice_next({ sessionId })` | Next problem; only after the current one concluded. The scheduler chooses the target, the coach writes the problem |
+| `practice_submit_set({ sessionId, answers: [{ problemId, text, confidence? }] })` | Set only: all answers at once; starts the review. Problems without an entry count as unanswered (`dontknow`) |
+| `practice_end({ sessionId, skipRetests? })` | End practice. If misses, R3+ hints or dismissals have not been retested, the first call starts the retests (`wrapUp`) and each `practice_next` serves one; `skipRetests: true` (or nothing left) ends the session and runs one closing coach turn |
+| `practice_resume({ sessionId })` | Runs the coach turn again: Retry after `lastTurnError`, or after an app restart cut a turn short. Refused while the session waits for the learner |
+| `cancel_reply({ sessionId })` | Existing: stops a running coach turn (the partial reply is kept as interrupted) |
+
+Practice sessions from before the coach have `PracticeView.legacy === true` and only plain messages: show them read-only from `load_session`, with "Start a new practice session".
+
+**Events** are the Learn ones (`AgentEvent`): `session`, `turnStart`, `text`, `thinking`, `op`, `turnEnd`, with `agent: "coach"` for the coach's turn. Text and thinking stream **only** when the learner may read them (a posed problem is open, or it has concluded); while a problem is being written (`status` `writing`/`set-writing`) nothing streams and the UI shows "Writing a problem…". A `turnEnd` with `error` is a failed turn: show the error block with "Try again" → `practice_resume`. `op` events carry the learner-safe op (below).
+
+**`PracticeView`:**
+
+```
+{ sessionId, legacy, format: "stream"|"set",
+  status: "writing" | "open" | "concluded" | "set-writing" | "set-open" | "set-review" | "ended",
+  wrapUp: boolean, setSize: number|null, retestsLeft: number,
+  turnRunning: boolean, lastTurnError: string|null,
+  picked: [{ id, title, home }],            // the ideas the learner chose; [] when the scheduler chose
+  problems: [Problem], feed: [FeedItem],
+  can: { submit, hint, dismiss, next, end, submitSet },   // booleans: which buttons are live now
+  calibration: { graded, buckets: [{ confidence, label, correct, total }], notes: [string] } | null }
+
+Problem = { problemId, index, status: "writing"|"open"|"concluded",
+  statement?, type?: "standard"|"critique"|"design",   // absent while writing
+  answerCheck?: "passed"|"none"|"skipped",              // "passed": a script reproduced the committed answer; "skipped": python3/SymPy missing, say it is unverified
+  hints: number, posedAt?, result? }
+result = { verdict: "correct"|"partial"|"wrong"|"dontknow"|"dismissed", hintRung: 0..5|null,
+  missClass?: "cue"|"discrimination"|"execution"|"careless"|"structural", misconception?,
+  rating: "again"|"hard"|"good"|"easy", durationSec,
+  targets: [{ id, title, home }], hosts: [{ id, title }], layer: "recall"|"discrimination"|"composition",
+  level: "explain"|"use"|"analyze"|"design", cueDistance: 0..3, isDistractor, retestOf?: problemId,
+  reveal: { solution: [{ move, usesNode?, decisionPoint }], finalAnswer, acceptableVariants: [string],
+            rubric: [{ id, criterion, essential }] } }
+FeedItem = { kind: "problem", problemId, at }                       // render statement from problems[]
+         | { kind: "learner", intent: "submission"|"hint"|"dismiss"|"set", text, confidence?, at }
+         | { kind: "coach", text, thinking?, opId, at }
+         | { kind: "concluded", problemId, verdict, at }
+```
+
+Rules the UI must keep:
+- **`targets`, `hosts`, `layer`, `level`, `cueDistance` exist only in `result`** (after the problem concluded). Naming the idea before then defeats the exercise: never show them on an open problem. `picked` is the learner's own choice, so it may be shown.
+- **Status → surface:** `writing` (a plan is waiting; nothing readable) → spinner line; `open` → statement + composer with confidence buttons + Hint and Skip; `concluded` → verdict, the revealed solution (`result.reveal`), the coach's last message, composer for questions about the problem, **Next** and **End**; `set-writing` → spinner; `set-open` → every statement, one answer field and confidence each, one Submit (no hints, no feedback); `set-review` → each problem's result as the coach concludes it; `ended` → read-only.
+- **No separate verdict widget is required:** the coach's message after a conclusion says it in words; `result` is the structured record (rating chip, reveal).
+- Statements may contain `![…](artifact:<id>)`; artifacts are ordinary `artifact` ops in the session's op log (`load_session`), shown as in Learn (§7.2.15).
+- `load_session` ops of a Practice session are learner-safe: tool ops keep only `name`/`callId`, assistant messages written while a problem is being written are blank, and a `practice` op never carries a solution before its problem concluded. Use `practice_state`, not the raw ops, for everything above. A message with `tag` `practice-next`, `practice-end` is the app speaking to the coach: do not render it; `practice-submission`, `practice-hint`, `practice-dismiss`, `practice-set` are the learner's own entries (already in `feed`).
+- Commands that return while another turn runs are refused with a readable error ("a coach turn is already running"); disable the buttons from `can.*` and `turnRunning`.
+
+**The Map's "Practise n ideas"** calls `start_practice({ targets: ids, format })` and opens the new session (§7.3.1). §12's S2 and G5 are rewritten for it.
+
+
+## 11c. Exam mode contract (built 2026-11-14)
+
+Architecture §4.14. An exam goal is a Learn session whose goal has `purpose: "exam"` (and `exam { name, date, syllabus, pastPapers, weights }`). Its plan nodes carry `weight` (0–1) and `practiceOnly`. Everything below is `crates/harness/src/exam.rs` and `crates/harness/src/practice/paper.rs`; shapes are exact. The papers themselves are Practice sessions: §11b applies except where this section says otherwise.
+
+**Commands** (Tauri, camelCase arguments):
+
+| Command | Does |
+|---|---|
+| `exam_plan({ sessionId }) -> ExamPlan` | The exam goal's ranked plan, the day's sitting, the mix and the score estimate, computed now from the plan, the knowledge graph and `practice/outcomes.jsonl`. `sessionId` is the **Learn** session. Refused when its goal is not an exam, it has no goal, or no plan yet |
+| `start_exam({ goalSessionId, budgetMin, size? }) -> SessionSummary` | New timed paper. `budgetMin`: 5–360 minutes. `size`: problems, 2–10, default `ceil(budgetMin / 15)` clamped. The nodes are ranked as in `exam_plan` and the paper is one problem per target, cycling through the best-ranked **practice-mode** nodes (nodes that need teaching are left off). Emits a `session` event, then runs the coach until the whole paper is posed; **the clock starts then**. Refused with no Tutor model, an unknown or non-exam session, or nothing that can go on a paper |
+| `practice_exam_save({ sessionId, answers: [{ problemId, text, confidence? }] })` | Saves what the learner has typed (the UI sends it about a second after typing stops, and once more at the deadline). The latest save is what the app hands in at the deadline. Refused after the deadline plus 2 s of grace ("time is up"), after the hand-in, and for an unknown problem. No coach turn |
+| `practice_submit_set({ sessionId, answers })` | The learner's hand-in of a paper, as for a set. After the deadline plus 2 s the app **hands in the last saved draft instead** and then refuses the call ("time is up: …") |
+| `practice_hint`, `practice_dismiss`, `practice_next`, `practice_submit` | Refused for a paper (an exam paper has no hints) |
+| `practice_resume({ sessionId })` | On a paper whose deadline passed with nothing handed in (the app was closed), hands in the saved draft first; otherwise as in §11b |
+| `start_practice({ format: "exam" })` | Refused: a paper starts from the exam goal's session (`start_exam`) |
+
+**The clock is the app's.** The app keeps a timer armed from the moment the paper opens and hands in the saved draft at `deadline + 2 s`; the same hand-in runs when a late command finds the deadline passed (the timer does not survive a restart). The countdown the UI draws is `deadline − (now_on_this_device + offset)`, where `offset = Date.parse(exam.now) − Date.now()` measured at every `practice_state` read: the harness's clock, never the device's. Hand-in and the deadline's hand-in both write one `setSubmit` op, so the paper is handed in once.
+
+**`ExamPlan`:**
+
+```
+{ sessionId, now, daysLeft?: number,            // whole days to exam.date; negative once past; absent without a date
+  exam: { name, date?, syllabus?, pastPapers?, weights? },
+  nodes: [Entry],                               // priority order
+  unmapped: [{ planNode, title }],              // plan nodes that are not (yet) ideas of the graph
+  today: { kind: "teach"|"paper"|"practice"|"over"|"none", nodeIds: [id], reason },
+  mix: { teachShare, teachNodes, practiceNodes, sittings?, teachSittings?, practiceSittings?, papers? },
+  simulation: Simulation,
+  papers: [{ library, path, title, pages?, markScheme? }],   // past papers in the reference libraries
+  lastPaperAt?: string,
+  paper: { defaultBudgetMin, minBudgetMin, maxBudgetMin, minutesPerProblem, defaultProblems, targets } }
+Entry = { id, title, home, homeTitle, planNode, weight, weightSource: "plan"|"goal"|"default",
+  retrievability, layerGap: 0..3, priority, mode: "practice"|"teach", reason, evidence: boolean,
+  practiceOnly, structuralMisses, misconception? }
+Simulation = { label: "estimate", note, horizonDays, expectedNow, expectedExam?, unseen,
+  topics: [{ home, title, nodes, weight, expectedNow, expectedExam? }],
+  raise: [{ id, title, mode, gain }] }          // gain: points of the whole score (0–1) one clean review today adds on the exam day
+```
+
+- **Weights.** A plan node's `weight` (the planner writes it with `plan_write`); else the weight a line of `exam.weights` gives a node whose title it names (`topic: 30%`, `topic - 0.3`, `topic (12)`: `%` divides by 100, a plain number up to 1 is taken as is, larger plain numbers are points scaled so the largest is 1); else 0.5. A plan node maps to the graph node named by its `graphNode`, else the node with its id, else the live node with its title (or alias).
+- **Priority** = `weight × (1 − R) × (layerGap + 1)`; R is the node's retrievability now (0 without evidence); `layerGap` is how many of recall, discrimination and composition the learner has not shown (3 without evidence). Recomputed on every call.
+- **Mode.** `teach` for a node with an open misconception or two or more recorded structural misses; everything else is `practice`. `today.kind`: `teach` when such a node is among the top three; `paper` in the last 7 days when no paper was sat in the last 3; else `practice` on the top three.
+- **Simulation.** `expectedNow` is the weight-averaged retrievability; `expectedExam` carries each node's FSRS curve to the exam date with no more practice. It is an **estimate**: FSRS's parameters were fit on flashcards, not exam answers **[inference]**. The UI must say "Estimate" next to the figures and show `note`.
+
+**`PracticeView` additions for `format: "exam"`.** `status` follows a set: `set-writing` → `set-open` → `set-review` → `ended`.
+
+```
+exam?: { name, goalSessionId, budgetSec,
+  openedAt: string|null, deadline: string|null,     // null until the last problem is posed
+  now: string, remainingSec: number|null, expired: boolean, closed: boolean,   // closed: deadline + 2 s has passed
+  submitted, autoSubmitted, elapsedSec: number|null,
+  draft: [{ problemId, text, confidence? }],         // the latest practice_exam_save
+  score: { awarded, outOf } | null }                 // once every problem is marked
+Problem.marks?: number                                // exam paper: what the problem is worth
+result.marksAwarded?: number                          // exam paper: after it is marked
+can.end = false while the paper is open; can.submitSet = false once closed
+```
+
+`result.reveal.rubric` is the mark scheme. Marking: the coach reads the library's mark scheme when the paper block lists one for this kind of question (`exam::papers`: a `question-bank` file and a file of the same library whose name adds a mark-scheme word), else its own rubric; `marksAwarded` is gated by code (a correct answer earns all the marks, `partial`/`wrong` fewer, `dontknow` none). Outcomes are written as in a set with **`format: "exam"`** and **`durationSec` = the paper's elapsed seconds ÷ its problems** (the problems are answered together).
+
+**Events.** The Learn ones (§11b). The `op` events a paper adds: `practice` ops `examOpen { openedAt, deadline }` (the clock started), `examDraft { answers }` (a save) and `setSubmit { answers, auto?, elapsedSec? }` (`auto: true` when the app handed in at the deadline). The UI re-reads `practice_state` on them like every `practice` op.
+
+**UI (`ui/exam.js`).**
+- **Dashboard.** An exam goal's Learn session shows an **Exam** button in the head (beside Plan) once it has a plan. It opens a full-screen sheet from one `exam_plan` read: days left and the date; **Today** (the day's sitting and why); **Expected score** (figures labelled "Estimate", the note, "What would raise it most"); **Coverage by topic** (a bar of the expected score now per topic with a mark for the exam day, its share of the exam; the bars have a text alternative, the numbers are also printed); **Ideas in priority order** (weight, recall, layers not shown, priority, a Teach/Practise chip and the reason; the first eight, "Show all" for the rest; plan ideas not in the graph are named); **Teaching and practice** (the mix); **Past papers** (how many, with a mark scheme); **Sit a timed paper** (time budget in minutes with what it holds; "Start the paper" → `start_exam`, then the Practice screen opens on the `session` event).
+- **Paper.** The Practice screen draws a paper in `#practice-exam-slot` (the flow, the answer card and the desk are empty): a sticky bar with the countdown (`role="timer"`, spoken at 10, 5 and 1 minutes and at the deadline) and **Hand in the paper**; each problem with its marks, its answer box and the confidence scale; "n of N answered"; the save status. There is no Hint, Skip, Next or End. Handing in with a problem unanswered asks first. At 0 the boxes lock ("Time is up. Your saved answers are being handed in."), the UI saves once more, then waits for the app's hand-in (if nothing happens within ~9 s it calls `practice_resume`).
+- **Review.** The result (marks of marks and per cent, how it was handed in), each problem with the learner's answer, the verdict, its marks, the miss class, the mark scheme and the worked solution, the coach's overall review, then **Finish** (`practice_end`) and **Back to sessions**.
+- **Reopening** a paper restores the saved draft from `exam.draft`.
 
 ---
 
@@ -2148,7 +2344,7 @@ light and dark, with no console errors. All §12 items pass; measured numbers:
 | E1–E7 | desk guard + hidden composer; answer sentinel absent from `innerText`; confidence radios unchecked with validation; `answer` payloads `confidence: 70` / `dontKnow: true`; verdict "✓ Correct. You were Fairly sure."; "(suggested)" with no preselection; focus lands in the answer textarea |
 | P1–P4 | plugin checkboxes → `removedPlugins:[{sectionId:"s1",plugin:"graph"}]`; change draft survives re-render; "Teach 1/2" head, closed plan sheet, focus returns to Plan on Esc; section opener "Section 2 of 2 / Power rule" announced |
 | B1–B4 | job line updates in place with no scroll/focus/announcement change; `turnEnd` error → inline `role="alert"` + Retry → `resume_turn`; rejected send restores the draft; planner failure → notice + "Plan · failed" head label once a `phase: plan` op arrives |
-| S1–S5 | legacy read-only with "Start a new session"; Practice `send_message`/`retry_reply` unchanged; Home radio group with descriptions, 59 px rows, two-press delete; theme persists across reload; phone `scrollWidth = 390` |
+| S1–S5 | legacy read-only with "Start a new session"; Practice (since rebuilt on the coach, §7.3); Home radio group with descriptions (since replaced by the due-for-review block), 59 px rows, two-press delete; theme persists across reload; phone `scrollWidth = 390` |
 | K1/K2 | keyboard-only Home → question → answer → confidence → Ctrl+Enter → verdict; every `:focus-visible` tab stop gets a 2 px accent ring |
 
 One nuance: the "Plan · failed" head label is rendered from `session_state`'s
@@ -2313,8 +2509,8 @@ Use the mocked backend: serve `ui/` with `index.html` patched to load a `window.
 **Other surfaces**
 
 - [ ] S1 Session `legacy`: there is no composer. The desk shows the read-only note and "Start a new session", which goes to Home.
-- [ ] S2 Session `pr` (Practice): sending calls `send_message` with `mode:"practice"` and a fresh channel. Retry calls `retry_reply`. The head shows "Practice", and there is no phase or Plan.
-- [ ] S3 Home: the mode control is a radio group with descriptions. There is no "Or try:" line and no visible Enter hint. The list shows group headings and rows at least 48 px tall. Each row's "…" opens Extract (greyed below a quarter of the automatic threshold) and Delete; Delete needs two presses.
+- [ ] S2 Practice session (§7.3): the head shows "Practice", there is no phase or Plan, the answer card carries the confidence scale and the images-only composer, and sending calls `practice_submit`; Try again calls `practice_resume`. Checked by `ui-check practice` and `practice-resume`.
+- [ ] S3 Home: there is no mode control (the hero is always "What do you want to learn?"), no "Or try:" line and no visible Enter hint; with due ideas, a "Due for review" block follows the composer (§7.3.1). The list shows group headings and rows at least 48 px tall. Each row's "…" opens Extract (greyed below a quarter of the automatic threshold) and Delete; Delete needs two presses.
 - [ ] S4 Settings: role fieldsets with inline status after "Use this model". Appearance → Dark switches the theme, and the choice persists across a reload.
 - [ ] S5 At 390 px nothing scrolls horizontally (`document.documentElement.scrollWidth <= 390`), and every button is at least 44 px tall under `pointer: coarse` emulation.
 
@@ -2334,7 +2530,7 @@ Use the mocked backend: serve `ui/` with `index.html` patched to load a `window.
 - [ ] G2 In a group, every prerequisite box sits in a higher layer than the boxes that need it; reopening the page gives identical box positions.
 - [ ] G3 Boxes show ✓ / ◐ / dashed border for checked / needs work / not checked, and the label's accessible name contains the state in words. No hue other than the selection accent is used.
 - [ ] G4 Nothing is selected on open. "Needs work (n)" selects exactly those n ideas; "Select all" shows the indeterminate state for a partial group; the desk count follows.
-- [ ] G5 "Practise n ideas" calls `send_message` with `mode:"practice"` and a first message listing the selected titles; the session view opens in Practice.
+- [ ] G5 "Practise n ideas" calls `start_practice({ targets, format })` with the picked ideas' graph ids and opens the Practice screen (§7.3.1); the format chooser sits beside it. Checked by `ui-check practice`.
 - [ ] G6 `document.getAnimations()` is empty on the Map page, and at 390 px only a drawing's own box scrolls horizontally (`document.documentElement.scrollWidth <= 390`).
 
 ---
