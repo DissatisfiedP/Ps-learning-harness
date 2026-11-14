@@ -408,7 +408,7 @@ From the confidence the learner already gives on every answer, show them how wel
 - The data already exists. `question_ask` answers carry confidence in five buckets (10/30/50/70/90, `docs/ui-design.md` §7.2.4) plus a verdict.
 
 ### Behavior
-- **Computed by code** from ops: per plan (per topic once per-topic calibration is built — it is not yet), per confidence bucket, the share of correct answers. **Every graded answer counts**, probe answers included: a probe answer has no node, and that only keeps it out of the per-node learner model, not out of calibration. An "I don't know" answer carries no confidence, so it never counts.
+- **Computed by code** from ops: per plan (per topic once per-topic calibration is built — it is not yet), per confidence bucket, the share of correct answers. **Every graded probe and check answer counts**: a probe answer has no node, and that only keeps it out of the per-node learner model, not out of calibration. A `predict` answer never counts, graded or not: it is an attempt made before the teaching, not a claim to know. An "I don't know" answer carries no confidence, so it never counts.
 - **Threshold:** shown only once a plan has **20** graded answers with confidence. Within that, report only buckets with **at least 5** answers.
 - **What's said:**
   - name a bucket only when accuracy differs from the bucket's value by **15 percentage points or more**;
@@ -477,6 +477,10 @@ The frontier lives in `frontier.jsonl`, not in a session.
 5. `hunt_send`: refused unless the current section's hunt is enabled.
 6. Teach-phase `question_ask` in a hunted section: refused until a `debrief` op exists for that hunt, or the hunt was skipped.
 7. Nothing from a hunt or debrief counts toward any `section_done` condition.
+8. `question_ask`: refused while the latest answered probe or check has no verdict (a choice answer and "I don't know" are graded by code; a `predict` needs none), so no answer is lost to the gates, calibration or the learner model.
+9. `question_ask`: refused when the learner already answered a question with the same prompt (not in a `perceptual` section or a view task, which repeat one prompt over different examples; a question set aside may be asked again).
+10. `goal_set` on an exam goal: `exam.date` is `YYYY-MM-DD` or absent; the planner's days and sittings left are counted from it (one sitting a day).
+11. A regrade (`verdict_record` again on the same question) replaces the earlier verdict everywhere: the gates, calibration and the learner model's outcome log.
 
 ---
 
@@ -527,7 +531,7 @@ new evidence.
 
 **Levels**
 - [x] `levels` flag on; `targetLevel` on every section; `level` on every probe and check question.
-  (`agent.rs:341` sets the flag; `question_ask` refuses a probe or check without a level, `agent.rs:2549`, and both phase schemas list `level` as required, so the model sees the requirement — `tools.rs` `question_ask`, test `goal_and_question_schemas_carry_the_learning_system_fields`; `probe_done` carries `levelReached`, `tools.rs` schema; the plan schema offers `targetLevel` on each section, `tools.rs:363`, and `check_plan` refuses an unknown one.)
+  (`agent.rs:341` sets the flag; `question_ask` refuses a probe or check without a level, `agent.rs:2549`; the measure schema lists `level` as required and the teach schema offers it with the rule in its description — not as required, because a `predict` carries none — `tools.rs` `question_ask`, test `goal_and_question_schemas_carry_the_learning_system_fields`; `probe_done` carries `levelReached`, `tools.rs` schema; the plan schema offers `targetLevel` on each section, `tools.rs:363`, and `check_plan` refuses an unknown one.)
 - [x] `section_done` refused without a passing check at target level; the error names the level.
   (`close_problems`, `agent.rs:2804`; `state.rs:449`; test `section_done_needs_a_passing_check_at_the_target_level`.)
 - [x] Highest level per node derived from ops, not stored; Map shows "Reached · Aim".

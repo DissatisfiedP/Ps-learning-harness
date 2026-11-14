@@ -146,7 +146,11 @@ export function askConsent(details, action, { label = 'Install', busy = 'Install
       resolve(value);
     };
     const decline = () => finish(null);
-    const onClose = () => finish(null);
+    // Chromium delivers `close` on the next frame: one from the previous
+    // consent can arrive after this one opened, and must not dismiss it.
+    const onClose = () => {
+      if (!dialog.open) finish(null);
+    };
     const accept = async () => {
       install.disabled = true;
       cancel.disabled = true;

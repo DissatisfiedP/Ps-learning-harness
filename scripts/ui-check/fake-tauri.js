@@ -314,6 +314,20 @@
     { op: 'debrief', opId: 'o9', at, huntId: 'h1', claims },
     { op: 'tool', opId: 'o10', at, agent: 'tutor', callId: 'd1', result: { content: 'Debrief recorded (5 claims).', isError: false } },
   ];
+  // `&reading=check|predict` (the `reading` case): `__bridge.deliverReading()`
+  // plays a tutor turn that delivers its explanation with `message_send` and
+  // opens a question of that role, as a live turn would.
+  const readingRole = new URLSearchParams(location.search).get('reading');
+  // Long enough that the question arrives below the fold.
+  const readingMessage = ['A derivative is the limit of secant slopes: **shrink the step** and the slope settles.',
+    ...Array.from({ length: 40 }, (_, i) => `Step ${i + 1}: halve the step again and the secant turns a little further towards the tangent.`)].join('\n\n');
+  const readingOps = [
+    { op: 'tool', opId: 'o11', at, agent: 'tutor', callId: 'm1', name: 'message_send', args: { message: readingMessage } },
+    { op: 'message', opId: 'o12', at, role: 'assistant', tag: 'sent', content: readingMessage },
+    { op: 'tool', opId: 'o13', at, agent: 'tutor', callId: 'm1', result: { content: 'Shown to the learner.', isError: false } },
+    { op: 'tool', opId: 'o14', at, agent: 'tutor', callId: 'c1', name: 'question_ask',
+      args: { role: readingRole, level: 'explain', nodeId: 'limit', format: 'free', prompt: 'Why does the secant slope settle?', answer: 'The step shrinks to zero.' } },
+  ];
   const sessionState = {
     phase: 'teach', ended: false, plan, planVersion: 1, approvedVersion: 1, currentSection: 's1', completedSections: [], checks: {},
     activePlugins: [], lastNodeId: null, knownRefuted: [], nodeLevels: {}, hunt, hunts: [hunt], pendingPlanQuestion: null,
@@ -321,6 +335,11 @@
   };
   const learnHandlers = {
     list_sessions: () => [structuredClone(session)],
+    answer: () => null,
+    subscribe_events: ({ onEvent }) => {
+      channels.push(onEvent);
+      return null;
+    },
     load_session: ({ id }) => {
       if (id !== 'L1') throw new Error(`no session ${id}`);
       return { ...structuredClone(session), ops: structuredClone(sessionOps) };
@@ -896,7 +915,12 @@
     }
   }
 
-  window.__bridge = { log, forbidden, sync, secretStorage, finishLogin: (account) => finishLogin?.(account) };
+  const deliverReading = () => {
+    emit({ kind: 'turnStart', sessionId: 'L1', agent: 'tutor' });
+    for (const op of readingOps) emit({ kind: 'op', sessionId: 'L1', op });
+    emit({ kind: 'turnEnd', sessionId: 'L1', agent: 'tutor' });
+  };
+  window.__bridge = { log, forbidden, sync, secretStorage, finishLogin: (account) => finishLogin?.(account), deliverReading };
   window.__TAURI__ = { core: { invoke, Channel: class {} } };
   window.__TAURI_INTERNALS__ = { invoke };
   window.ipc = { postMessage: (message) => forbidden.push({ via: 'window.ipc', message: String(message) }) };

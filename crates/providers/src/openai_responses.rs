@@ -82,7 +82,7 @@ fn replay_message(m: &crate::Message) -> Vec<Value> {
                     "image_url": format!("data:{media_type};base64,{data}"),
                 }));
             }
-            ContentBlock::Native { wire, raw } if *wire == Wire::OpenaiResponses => {
+            ContentBlock::Native { wire, raw, .. } if *wire == Wire::OpenaiResponses => {
                 // Replay the whole reasoning/output item verbatim.
                 out.push(raw.clone());
             }
@@ -160,6 +160,7 @@ impl Decode for Decoder {
                         out.push_native(ContentBlock::Native {
                             wire: Wire::OpenaiResponses,
                             raw: item.clone(),
+                            at: 0,
                         });
                     }
                     _ => {}

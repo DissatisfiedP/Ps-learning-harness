@@ -13,11 +13,12 @@ built, except the items below. What remains is mostly **proof**, not code.
   (`crates/harness/tests/*_e2e.rs`). The one real-model exercise was replaying tutor turns on Claude Sonnet 5.5
   with the stored subscription credential (2026-11-13); it found that model returns text written before a tool call
   as an empty or summarised `thinking` block, so an explanation sent in the same step as a question card never
-  reaches the learner (no harness fix: use `claude-sonnet-5`, see `docs/claude-subscription.md`). Still untested
+  reaches the learner (since 2026-11-15 the tutor delivers such text with `message_send` and a question whose
+  explanation stayed hidden is refused; proven on one real turn, see `docs/claude-subscription.md`). Still untested
   against a real model: level tagging, hunt eligibility, the "parts I already know" split, plan edits, debrief
   sorting, artifact placement, the graph builder, the researcher, **the practice coach, the problem checker, exam
   papers and marking**, and whether the measurer and planner actually skip what the learner model shows as held.
-- **The UI is verified in headless Chromium only**, against a mocked Tauri bridge (twelve `scripts/ui-check`
+- **The UI is verified in headless Chromium only**, against a mocked Tauri bridge (thirteen `scripts/ui-check`
   cases) — never in WebKitGTK and never on a device. Plugin-view isolation likewise: Chromium, not WebKitGTK.
 - **Sync is proven against local servers only.** Git against a temp bare repository, WebDAV against an
   in-process test server: no real host (GitHub, Koofr, Nextcloud), no TLS server, no phone. The mobile session
@@ -61,8 +62,13 @@ built, except the items below. What remains is mostly **proof**, not code.
   git's HTTPS trust is decided by rustls in libgit2's certificate callback (`docs/sync-build.md`); proven on
   desktop with OpenSSL stripped of its roots, not yet on a phone. Certificates the learner installed on the phone are
   not trusted by git. WebDAV and the model clients use the same rustls trust.
-- **A session file that sync double-encoded** (the 2026-11-10 session `01M723XJ0N…` holds `â€¦` for `…` in 73
-  lines, first seen in sync commit `eaf6fef`). No code that could do this was found; it was not repaired.
+- **A session file that was double-encoded** (the 2026-11-10 session `01M723XJ0N…` held `â€¦` for `…` in 73
+  lines, first seen in sync commit `eaf6fef`). Traced 2026-11-14: that commit was made on the desktop and changed
+  exactly the lines holding non-ASCII text, byte for byte (UTF-8 read as Windows-1252 and written back; key order
+  and every ASCII line untouched), in the same commit that replaced 32 graph ops with the field-named graph being
+  developed that hour. No harness path transcodes text (session and graph logs are written as bytes or from parsed
+  values; the union merge keeps lines verbatim), so this was a hand-run tool on the data repo during development,
+  not sync **[inference]**. The session has since been deleted; nothing was repaired.
 
 ## 4. Deliberately not built
 

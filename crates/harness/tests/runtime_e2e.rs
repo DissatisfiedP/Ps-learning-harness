@@ -164,16 +164,23 @@ async fn scripted_session_runs_end_to_end() {
     assert_eq!(graded["verdict"], "correct");
     assert_eq!(graded["questionId"], "q1");
 
-    // 4. probe_done refused before the brief.
+    // 4. The free probe answer is graded; probe_done refused before the brief.
     s.push(
         "tutor",
         Reply::Calls(
             "",
-            vec![(
-                "p1",
-                "probe_done",
-                json!({ "strands": [{"name":"ohm"}], "notes": "fluent" }),
-            )],
+            vec![
+                (
+                    "pv2",
+                    "verdict_record",
+                    json!({ "questionId": "q2", "verdict": "correct", "note": "ratio" }),
+                ),
+                (
+                    "p1",
+                    "probe_done",
+                    json!({ "strands": [{"name":"ohm"}], "notes": "fluent" }),
+                ),
+            ],
         ),
     );
     s.push("tutor", Reply::Text("I'm waiting for the field brief."));
@@ -388,9 +395,13 @@ async fn scripted_session_runs_end_to_end() {
     h.answer(&id, "q4", answer("2 mA")).await.unwrap();
     h.wait_background(&id).await;
 
+    // The probe's verdict (step 4) and the check's.
     assert_eq!(
         results(&h, &id, "verdict_record"),
-        [("Verdict recorded.".to_owned(), false)]
+        [
+            ("Verdict recorded.".to_owned(), false),
+            ("Verdict recorded.".to_owned(), false)
+        ]
     );
     assert_eq!(
         results(&h, &id, "echo_echo"),
@@ -1035,4 +1046,49 @@ fn ulid_like() -> String {
 
 fn chrono_year(_id: &str) -> String {
     "2026".into()
+}
+
+/// The exam plan counts its days from `exam.date`, so a phrase is refused
+/// (with today's date, so the tutor can work the date out) and a date kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_exam_goal_needs_a_real_date() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("goal-exam-date");
+    let h = harness(&repo, &config, &base).await;
+
+    let goal = |date: &str| {
+        json!({
+            "goal": "Pass the MA111 mid-term", "purpose": "exam",
+            "exam": { "name": "MA111 mid-term", "date": date },
+            "successLooksLike": ["16 MCQ in an hour"], "materials": [],
+            "outOfScope": [], "preferences": [], "orientationFirst": false })
+    };
+    let s = &*script;
+    s.push(
+        "tutor",
+        Reply::Calls("", vec![("g1", "goal_set", goal("in a few days"))]),
+    );
+    s.push(
+        "tutor",
+        Reply::Calls("", vec![("g2", "goal_set", goal("2099-01-10"))]),
+    );
+    s.push("tutor", Reply::Text("Recorded."));
+    s.push("title", Reply::Text("MA111 mid-term"));
+    let id = h
+        .start_teaching("My mid-term is in a few days")
+        .await
+        .unwrap()
+        .id;
+
+    let result = results(&h, &id, "goal_set");
+    let today = chrono::Utc::now().date_naive().to_string();
+    assert!(
+        result[0].1 && result[0].0.contains("YYYY-MM-DD") && result[0].0.contains(&today),
+        "{result:?}"
+    );
+    assert!(!result[1].1, "{result:?}");
+    let goal = h.session_state(&id).unwrap().goal.unwrap();
+    assert_eq!(goal["exam"]["date"], "2099-01-10");
 }

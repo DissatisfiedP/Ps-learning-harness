@@ -88,12 +88,41 @@ fn replay_tool(t: &ToolSpec) -> Value {
 }
 
 /// Build one Anthropic message from typed content blocks.
+///
+/// A reasoning block goes back where the model produced it: its `at` is the
+/// offset into the message text that follows it, so text written between two
+/// thinking blocks is sent between them again (the wire accepts reasoning
+/// only unmodified, order included).
 fn replay_message(m: &crate::Message) -> Value {
-    let content: Vec<Value> = m
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(json!({ "type": "text", "text": text })),
+    let mut content: Vec<Value> = Vec::with_capacity(m.content.len());
+    // Native blocks waiting for the text they are placed in.
+    let mut placed: Vec<(usize, &Value)> = Vec::new();
+    for block in &m.content {
+        match block {
+            ContentBlock::Native { wire, raw, at } => {
+                if *wire == Wire::AnthropicMessages {
+                    placed.push((*at, raw));
+                }
+                continue;
+            }
+            ContentBlock::Text { text } => {
+                let mut from = 0;
+                for (at, raw) in placed.drain(..) {
+                    // An offset that no longer fits the text (the text was
+                    // changed after it was streamed) places the block here.
+                    if at > from && text.is_char_boundary(at) {
+                        push_text(&mut content, &text[from..at]);
+                        from = at;
+                    }
+                    content.push(raw.clone());
+                }
+                push_text(&mut content, &text[from..]);
+                continue;
+            }
+            _ => {}
+        }
+        content.extend(placed.drain(..).map(|(_, raw)| raw.clone()));
+        match block {
             ContentBlock::ToolCall {
                 id,
                 name,
@@ -108,33 +137,31 @@ fn replay_message(m: &crate::Message) -> Value {
                 } else {
                     json!({})
                 };
-                Some(json!({ "type": "tool_use", "id": id, "name": name, "input": input }))
+                content.push(json!({ "type": "tool_use", "id": id, "name": name, "input": input }));
             }
             ContentBlock::ToolResult {
                 call_id,
-                content,
+                content: result,
                 is_error,
             } => {
                 let mut b = json!({
                     "type": "tool_result",
                     "tool_use_id": call_id,
-                    "content": content,
+                    "content": result,
                 });
                 if *is_error {
                     b["is_error"] = true.into();
                 }
-                Some(b)
+                content.push(b);
             }
-            ContentBlock::Image { media_type, data } => Some(json!({
+            ContentBlock::Image { media_type, data } => content.push(json!({
                 "type": "image",
                 "source": { "type": "base64", "media_type": media_type, "data": data },
             })),
-            ContentBlock::Native { wire, raw } if *wire == Wire::AnthropicMessages => {
-                Some(raw.clone())
-            }
-            ContentBlock::Native { .. } => None,
-        })
-        .collect();
+            ContentBlock::Text { .. } | ContentBlock::Native { .. } => {}
+        }
+    }
+    content.extend(placed.drain(..).map(|(_, raw)| raw.clone()));
     let role = if m.role == Role::User {
         "user"
     } else {
@@ -145,12 +172,48 @@ fn replay_message(m: &crate::Message) -> Value {
     json!({ "role": role, "content": content })
 }
 
+/// One text block; the wire refuses an empty or whitespace-only one, which a
+/// split between two reasoning blocks can leave.
+fn push_text(content: &mut Vec<Value>, text: &str) {
+    if !text.trim().is_empty() {
+        content.push(json!({ "type": "text", "text": text }));
+    }
+}
+
+impl ContentBlock {
+    /// Whether this is an Anthropic "narration" block: prose the model wrote
+    /// for its reader that the wire returned as a thinking block, so nothing
+    /// of it is readable (docs/claude-subscription.md). The signature opens
+    /// with a short readable tag, `thinking` for reasoning and `narration`
+    /// for such prose. The tag is undocumented: when it is absent this says
+    /// no, and callers must treat that as "unknown", never as "no narration".
+    pub fn is_narration(&self) -> bool {
+        use base64::Engine as _;
+        let ContentBlock::Native { wire, raw, .. } = self else {
+            return false;
+        };
+        if *wire != Wire::AnthropicMessages || raw["type"] != "thinking" {
+            return false;
+        }
+        let Some(head) = raw["signature"]
+            .as_str()
+            .and_then(|s| s.get(..s.len().min(80) / 4 * 4))
+        else {
+            return false;
+        };
+        base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(head.trim_end_matches('='))
+            .is_ok_and(|bytes| bytes.windows(9).any(|w| w == b"narration"))
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Decoder {
     /// Accumulated tool_use blocks by content-block index.
     calls: Vec<(usize, PartialCall)>,
-    /// Native reasoning blocks captured from content_block_start.
-    native: Vec<Value>,
+    /// Native reasoning blocks captured from content_block_start, each with
+    /// the length of the text streamed before it.
+    native: Vec<(usize, Value)>,
 }
 
 struct PartialCall {
@@ -211,7 +274,7 @@ impl Decode for Decoder {
                         out.tool_use();
                     }
                     Some("thinking") | Some("redacted_thinking") => {
-                        self.native.push(block.clone());
+                        self.native.push((out.text_len(), block.clone()));
                     }
                     _ => {}
                 }
@@ -226,7 +289,7 @@ impl Decode for Decoder {
                     Some("signature_delta") => {
                         // A signature arrives after the thinking block; attach
                         // it to the last native thinking block.
-                        if let Some(last) = self.native.last_mut() {
+                        if let Some((_, last)) = self.native.last_mut() {
                             last["signature"] = delta["signature"].clone();
                         }
                     }
@@ -306,10 +369,11 @@ impl Decoder {
                 arguments: ser::parse_args(&c.arguments),
             });
         }
-        for raw in self.native.drain(..) {
+        for (at, raw) in self.native.drain(..) {
             out.push_native(ContentBlock::Native {
                 wire: Wire::AnthropicMessages,
                 raw,
+                at,
             });
         }
     }

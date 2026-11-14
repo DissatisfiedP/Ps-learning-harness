@@ -239,6 +239,13 @@ h1, h2, h3 { margin: 0; }
 .input::placeholder { color: var(--ink-3); opacity: 1; }
 textarea.input.resizable { resize: vertical; }
 .field { margin-block-start: var(--s4); }
+/* A check waiting for the learner to finish the explanation: only its kicker
+   and the bar that opens it. */
+.exercise.collapsed > :not(.kicker):not(.ex-reveal) { display: none; }
+.ex-reveal { margin-block: var(--s2) 0; }
+/* "While you read", in the desk so it stays in view through the explanation. */
+.desk-reading { margin: 0; }
+.desk-reading .input { inline-size: 100%; max-block-size: max(20dvh, 96px); }
 .field > label, fieldset > legend {
   display: block;
   margin-block-end: var(--s1);

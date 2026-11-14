@@ -44,7 +44,7 @@ A bad first question: "What do you already know about circuits?" It asks for a s
 { goal, purpose: "curiosity" | "project" | "work" | "exam",
   successLooksLike: [string],              // 2–4 observable abilities
   constraints: { deadline?, minutesPerSitting?, device? },
-  exam?: { name, date, syllabus?, pastPapers?, weights? },
+  exam?: { name, date, syllabus?, pastPapers?, weights? },   // date: YYYY-MM-DD, or left out when unknown
   materials: [string], outOfScope: [string], preferences: [string],
   orientationFirst: boolean }              // the learner doesn't know the field well enough to choose
 ```

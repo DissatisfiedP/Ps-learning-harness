@@ -372,14 +372,8 @@ async fn answer_mode_grades_through_the_view_and_never_records_a_verdict() {
     assert_eq!(pending.call_id, "q1");
     assert_eq!(pending.args["view"]["target"]["equals"], 3.0);
 
-    // A right submission is graded by the plugin; no verdict follows.
-    s.push(
-        "tutor",
-        Reply::Calls(
-            "",
-            vec![("q2", "question_ask", view_question(&circuit, "Again."))],
-        ),
-    );
+    // A right submission is graded by the plugin, which records no verdict.
+    s.push("tutor", Reply::Text("One moment."));
     h.answer(&id, "q1", json!({ "answer": divider(1000.0) }))
         .await
         .unwrap();
@@ -390,15 +384,31 @@ async fn answer_mode_grades_through_the_view_and_never_records_a_verdict() {
     assert!(tool_ops(&h, &id, "verdict_record").is_empty());
     assert!(!h.session_state(&id).unwrap().node_passed(NODE));
 
-    // A wrong one is graded false; the tutor's own verdict_record counts.
+    // The tutor's own verdict_record is what counts, and the next question
+    // waits for it. A wrong submission is graded false.
+    s.push(
+        "tutor",
+        Reply::Calls(
+            "",
+            vec![
+                (
+                    "v1",
+                    "verdict_record",
+                    json!({ "questionId": "q1", "verdict": "correct", "note": "3.02 V" }),
+                ),
+                ("q2", "question_ask", view_question(&circuit, "Again.")),
+            ],
+        ),
+    );
+    h.send_learner_message(&id, "Next.").await.unwrap();
     s.push(
         "tutor",
         Reply::Calls(
             "",
             vec![(
-                "v1",
+                "v2",
                 "verdict_record",
-                json!({ "questionId": "q1", "verdict": "correct", "note": "3.02 V" }),
+                json!({ "questionId": "q2", "verdict": "wrong", "note": "5.1 V" }),
             )],
         ),
     );
@@ -412,7 +422,10 @@ async fn answer_mode_grades_through_the_view_and_never_records_a_verdict() {
     assert_eq!(wrong["view"]["correct"], false, "{wrong}");
     assert_eq!(
         results(&h, &id, "verdict_record"),
-        [("Verdict recorded.".to_owned(), false)]
+        [
+            ("Verdict recorded.".to_owned(), false),
+            ("Verdict recorded.".to_owned(), false)
+        ]
     );
     assert!(h.session_state(&id).unwrap().node_passed(NODE));
 

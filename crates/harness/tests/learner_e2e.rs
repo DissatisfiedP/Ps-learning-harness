@@ -54,7 +54,7 @@ fn check(call_id: &'static str) -> Reply {
             call_id,
             "question_ask",
             json!({ "role": "check", "level": "explain", "nodeId": NODE, "format": "free",
-                "prompt": "What is across the 1 kΩ?", "answer": "3 V" }),
+                "prompt": format!("What is across the 1 kΩ? ({call_id})"), "answer": "3 V" }),
         )],
     )
 }

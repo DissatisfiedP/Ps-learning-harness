@@ -24,6 +24,13 @@ use crate::state::{
 pub(crate) const PENDING_RESULT: &str = "(waiting for the learner's answer)";
 const MISSING_RESULT: &str = "(no result: the call was interrupted)";
 
+/// Tag of an assistant message the tutor delivered with `message_send`: the
+/// learner-facing copy of that call's text. Every reader of the log sees it
+/// as an ordinary tutor message; the model's own history keeps the call.
+pub(crate) const SENT_TAG: &str = "sent";
+/// The tool behind [`SENT_TAG`].
+pub(crate) const MESSAGE_SEND: &str = "message_send";
+
 /// Whether a tool op belongs to the conversation (the tutor's loop).
 pub(crate) fn is_conversation_tool(t: &ToolOp) -> bool {
     t.agent.as_deref().is_none_or(|a| a == "tutor")
@@ -426,10 +433,10 @@ fn pending_plan_question(ops: &[Op]) -> Option<PlanQuestion> {
 
 /// Fold one graded answer into the derived state (§2 and §7). Returns whether
 /// it was correct when the graded question is one this knows how to read:
-/// **every** `question_ask` answer counts towards calibration, including
-/// probe answers, which carry no node; only `check` questions tagged to a real
-/// node count towards a section's exit, the per-node learner model and the
-/// level gate.
+/// every probe and check answer counts towards calibration (a probe carries
+/// no node); only `check` questions tagged to a real node count towards a
+/// section's exit, the per-node learner model and the level gate. A
+/// `predict` is an attempt made before the teaching: it counts nowhere.
 fn record_verdict(
     s: &mut SessionState,
     calls: &HashMap<String, (String, Value)>,
@@ -438,6 +445,9 @@ fn record_verdict(
 ) -> Option<bool> {
     let (name, args) = calls.get(question_id)?;
     if name != "question_ask" {
+        return None;
+    }
+    if args.get("role").and_then(Value::as_str) == Some("predict") {
         return None;
     }
     let correct = verdict == "correct";
@@ -737,6 +747,8 @@ pub(crate) fn conversation_with(
     let mut view_states: BTreeMap<&str, &str> = Default::default();
     for op in tail {
         match op {
+            // The model reads what it sent in its own `message_send` call.
+            Op::Message(m) if m.role == Role::Assistant && m.tag.as_deref() == Some(SENT_TAG) => {}
             Op::Message(m) if m.role == Role::Assistant => {
                 for n in &m.native {
                     b.assistant(n.clone());
@@ -949,11 +961,12 @@ pub(crate) fn transcript_items(ops: &[Op]) -> Vec<TranscriptItem> {
 }
 
 /// Whether `op` is a [`transcript_items`] entry: a non-empty message or a
-/// conversation tool call or result.
+/// conversation tool call or result. A `message_send` call is left out: the
+/// message it delivered is in the log as the tutor's own.
 pub(crate) fn in_transcript(op: &Op) -> bool {
     match op {
         Op::Message(m) => !m.content.trim().is_empty(),
-        Op::Tool(t) => is_conversation_tool(t),
+        Op::Tool(t) => is_conversation_tool(t) && t.name != MESSAGE_SEND,
         _ => false,
     }
 }
@@ -1894,5 +1907,77 @@ mod tests {
             .filter(|o| !matches!(o, Op::Plan(_)))
             .collect::<Vec<_>>();
         assert_eq!(replay_state(&ops).hunt_state(), "");
+    }
+
+    /// A prediction is an attempt before the teaching: a verdict on it must
+    /// not read as over- or under-confidence (§7).
+    #[test]
+    fn a_prediction_never_counts_towards_calibration() {
+        let mut ops = Vec::new();
+        for i in 0..19 {
+            ops.extend(graded(&format!("q{i}"), "n1", Some("use"), 70, "correct"));
+        }
+        let mut predict = graded("p1", "n1", None, 90, "wrong");
+        if let Op::Tool(t) = &mut predict[0] {
+            t.args["role"] = serde_json::json!("predict");
+        }
+        ops.extend(predict);
+        assert!(replay_state(&ops).calibration.is_none());
+    }
+
+    /// What the tutor delivered with `message_send` is one tutor message to
+    /// every reader of the log, and the model's history keeps its own call
+    /// (with its result paired) instead of a second copy as text.
+    #[test]
+    fn a_sent_message_is_shown_once_and_replayed_as_its_call() {
+        let mut sent = new_message(Role::Assistant, "One path, one current.".into());
+        sent.tag = Some(SENT_TAG.into());
+        let ops = vec![
+            text(Role::User, "go on"),
+            call(
+                "m1",
+                MESSAGE_SEND,
+                serde_json::json!({ "message": "One path, one current." }),
+            ),
+            Op::Message(sent),
+            result("m1", MESSAGE_SEND, "Shown to the learner.", false),
+            call("q1", "question_ask", serde_json::json!({ "prompt": "?" })),
+        ];
+        let labels: Vec<String> = transcript_items(&ops)
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(labels, ["Learner", "Tutor", "Tutor called question_ask"]);
+
+        let msgs = conversation(&ops);
+        let kinds: Vec<Vec<&str>> = msgs
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::Text { .. } => "text",
+                        ContentBlock::ToolCall { .. } => "call",
+                        ContentBlock::ToolResult { .. } => "result",
+                        _ => "other",
+                    })
+                    .collect()
+            })
+            .collect();
+        // No text copy of the message: its call, that call's result, then
+        // the open question.
+        assert_eq!(
+            kinds,
+            [
+                vec!["text"],
+                vec!["call"],
+                vec!["result"],
+                vec!["call"],
+                vec!["result"]
+            ]
+        );
+        assert!(matches!(&msgs[2].content[0],
+            ContentBlock::ToolResult { call_id, content, .. }
+                if call_id == "m1" && content == "Shown to the learner."));
     }
 }

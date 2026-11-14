@@ -51,7 +51,7 @@ fn question_ask(roles: &[&str], teach: bool) -> ToolSpec {
         "answer": { "type": "string", "description": "Your committed answer; for choice format, the exact text of the correct option." },
         "explanation": { "type": "string" },
         "level": { "type": "string", "enum": ["explain", "use", "analyze", "design"],
-            "description": "How far the question demands the learner go: explain (state it and why), use (apply it to a new case), analyze (take it apart, diagnose, judge), design (build something new to constraints). Required: the app refuses a probe or check question without one. Write the question to this level." },
+            "description": "How far the question demands the learner go: explain (state it and why), use (apply it to a new case), analyze (take it apart, diagnose, judge), design (build something new to constraints). Required on every probe and check: the app refuses one without it. Write the question to this level. Leave it out of a predict question, which measures nothing." },
         "view": { "type": "object", "description": "Answer in an interactive view (W7). Only with a view whose plugin has answer = true.", "properties": {
             "artifactId": { "type": "string" },
             "task": { "type": "string", "description": "What the learner should do in the view." },
@@ -65,8 +65,11 @@ fn question_ask(roles: &[&str], teach: bool) -> ToolSpec {
         props["strand"] = json!({ "type": "string" });
         props["nodeId"] = json!({ "type": "string", "description": "The learner's graph node this question measures, when the graph has one (find it with graph_search). The graded answer then counts as evidence on that node." });
     }
+    // A teach-phase `predict` carries no level (§2), so the schema can't
+    // require one there: the description says when it is required and
+    // `gate_question` refuses a check without it.
     let required: &[&str] = if teach {
-        &["role", "nodeId", "level", "format", "prompt", "answer"]
+        &["role", "nodeId", "format", "prompt", "answer"]
     } else {
         &["role", "level", "format", "prompt", "answer"]
     };
@@ -75,6 +78,19 @@ fn question_ask(roles: &[&str], teach: bool) -> ToolSpec {
         "Ask one graded question. Ends your turn; the learner's answer, thinking and confidence come back as the result, with `questionId` for verdict_record.",
         props,
         required,
+    )
+}
+
+/// The tutor's verbatim channel to the learner, offered on wires that can
+/// return reply text as hidden reasoning (`agent.rs`, the narration guard).
+pub(crate) fn message_send() -> ToolSpec {
+    tool(
+        "message_send",
+        "Show the learner a message exactly as written (Markdown and LaTeX). In a reply that calls any other tool, this is the only text the learner is sure to see: send your complete feedback and teaching here first, then make the other calls. Does not end your turn. Don't repeat the message as reply text.",
+        json!({
+            "message": { "type": "string", "description": "The complete text for the learner." }
+        }),
+        &["message"],
     )
 }
 
@@ -1687,8 +1703,9 @@ mod tests {
         );
         assert_eq!(strand["reason"]["enum"], json!(["new", "skipped"]));
 
-        // Teach: the schema asks for a level on every question, so the model
-        // sees the requirement the gate enforces.
+        // Teach: the schema offers the level and says when it is required;
+        // a predict question has none, so it is not in `required` (the gate
+        // refuses a check without one).
         let teach = tutor_tools(Phase::Teach, false);
         let q = teach.iter().find(|t| t.name == "question_ask").unwrap();
         assert_eq!(
@@ -1696,11 +1713,11 @@ mod tests {
             json!(["explain", "use", "analyze", "design"])
         );
         assert!(
-            q.input_schema["required"]
+            !q.input_schema["required"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("level")),
-            "a teach-phase question must carry a level"
+            "a predict question carries no level"
         );
         let described = q.input_schema["properties"]["level"]["description"]
             .as_str()

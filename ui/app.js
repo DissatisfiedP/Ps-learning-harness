@@ -80,6 +80,8 @@ const els = {
   planSlot: $('#plan-slot'),
   live: $('#live'),
   continueBtn: $('#continue-reading'),
+  deskReading: $('#desk-reading'),
+  deskReadingInput: $('#desk-reading-input'),
   deskNote: $('#desk-note'),
   deskNoteText: $('#desk-note-text'),
   deskNoteButton: $('#desk-note-button'),
@@ -452,6 +454,30 @@ function setTitle(s, title) {
 
 // ---------- page items ----------
 
+/**
+ * Whether `item` comes right after the tutor's prose (figures and refused
+ * calls between them don't count).
+ */
+function followsProse(s, item) {
+  const items = s.tl.items;
+  for (let i = items.indexOf(item) - 1; i >= 0; i--) {
+    const prev = items[i];
+    if (prev.kind === 'assistant') return true;
+    if (prev.kind !== 'artifacts' && prev.kind !== 'nudge' && !prev.failed) return false;
+  }
+  return false;
+}
+
+/**
+ * The open check that follows the tutor's explanation, if any: it waits
+ * collapsed while the learner reads, and the desk shows "While you read".
+ */
+function readingItem(s) {
+  const item = pendingItem(s);
+  const check = item?.kind === 'question' && item.args.role === 'check' && !item.args.view;
+  return check && followsProse(s, item) ? item : null;
+}
+
 function renderItem(item) {
   const s = state.current;
   const onAnswer = (callId, payload) => cmd('answer', { sessionId: s.id, callId, payload });
@@ -474,7 +500,12 @@ function renderItem(item) {
     case 'job':
       return jobChip(item, { onCancel: s.readOnly ? null : (jobId) => cmd('cancel_job', { sessionId: s.id, jobId }) });
     case 'question':
-      return questionCard(item, { readOnly: s.readOnly, onAnswer, ctx });
+      return questionCard(item, {
+        readOnly: s.readOnly,
+        onAnswer,
+        ctx,
+        reading: readingItem(s) === item ? () => els.deskReadingInput.value : null,
+      });
     case 'choice':
       return choiceCard(item, { readOnly: s.readOnly, onAnswer });
     case 'hunt':
@@ -1604,6 +1635,13 @@ function renderDesk({ quiet = false, free = notEngaged() } = {}) {
   const wasShown = s.composerShown;
   s.composerShown = Boolean(d.composer);
   els.composer.hidden = !d.composer;
+  // "While you read": one draft per check, kept in view by the desk.
+  const reading = readingItem(s);
+  els.deskReading.hidden = !reading;
+  if ((reading?.callId ?? null) !== s.readingFor) {
+    s.readingFor = reading?.callId ?? null;
+    els.deskReadingInput.value = '';
+  }
   els.deskNote.hidden = !d.note;
   if (d.note && els.deskNoteText.textContent !== d.note) els.deskNoteText.textContent = d.note;
   const b = els.deskNoteButton;
@@ -1698,8 +1736,11 @@ function onDeskNoteButton() {
     return;
   }
   let target = null;
-  if (act === 'question') target = pendingItem(s)?.el?.querySelector('[data-first]');
-  else if (act === 'plan') target = els.planSlot.querySelector('.plan-title');
+  if (act === 'question') {
+    const el = pendingItem(s)?.el;
+    el?.querySelector('.ex-open')?.click();
+    target = el?.querySelector('[data-first]');
+  } else if (act === 'plan') target = els.planSlot.querySelector('.plan-title');
   if (!target) return;
   target.scrollIntoView({ block: 'center', behavior: 'instant' });
   focusQuiet(target);

@@ -93,7 +93,16 @@ pub enum ContentBlock {
     Native {
         wire: Wire,
         raw: serde_json::Value,
+        /// Where the model produced the block: the byte offset into the
+        /// reply's text that it came before. 0 (the start) when the wire
+        /// doesn't place its blocks, and in logs written before this field.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        at: usize,
     },
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl ContentBlock {
@@ -315,13 +324,19 @@ pub(crate) struct Collector<'f> {
     stop: Option<StopReason>,
     pub tool_calls: Vec<ToolCall>,
     pub native: Vec<ContentBlock>,
+    /// Bytes of text forwarded so far (where a native block falls in it).
+    text_len: usize,
 }
 
 impl Collector<'_> {
     pub fn text(&mut self, delta: &str) {
         if !delta.is_empty() {
+            self.text_len += delta.len();
             (self.on_event)(StreamEvent::Text(delta));
         }
+    }
+    pub fn text_len(&self) -> usize {
+        self.text_len
     }
     pub fn thinking(&mut self, delta: &str) {
         if !delta.is_empty() {
@@ -392,6 +407,7 @@ async fn drive(
         stop: None,
         tool_calls: Vec::new(),
         native: Vec::new(),
+        text_len: 0,
     };
     let mut sse = SseDecoder::default();
     let mut events = Vec::new();

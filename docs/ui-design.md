@@ -360,8 +360,8 @@ See §8 for where these may be used.
 │        │                                                      │  │
 │        │  ┌ PREDICT FIRST (small caps) ────────────────────┐  │  │
 │        │  │ Prompt in serif …                              │  │  │
-│        │  │ Your answer [__________________________]       │  │  │
 │        │  │ Your reasoning (optional) [____________]       │  │  │
+│        │  │ Your answer [__________________________]       │  │  │
 │        │  │ How sure are you?  ○Guessing ○Unsure ○Even …   │  │  │
 │        │  │ [Submit]  I don't know — show me               │  │  │
 │        │  └────────────────────────────────────────────────┘  │  │
@@ -658,10 +658,10 @@ padding `--s5`; `--s4` on phone). It is a `<section aria-labelledby>`.
  Before we compute: what do you predict happens to the secant slope
  of f(x) = x² at x = 1 as h → 0?                ← --font-read, --fs-read
  
- Your answer                                    ← label, --fs-small 600 --ink-2
- [ Your best guess is fine.                       ]  ← textarea, 3 rows; for format:"choice" a radio list (below)
- Your reasoning (optional)
- [ How did you get there?                         ]  ← textarea, 2 rows
+ Your reasoning (optional)                      ← label, --fs-small 600 --ink-2
+ [ Work it out here.                              ]  ← textarea, 6 rows: the learner reasons first, so it is first and large
+ Your answer
+ [ Your best guess is fine.                       ]  ← textarea, 2 rows; for format:"choice" the radio list comes first, then a 2-row reasoning box ("How did you get there?")
  How sure are you?                              ← fieldset legend
  ( ) Guessing  ( ) Unsure  ( ) Even odds  ( ) Fairly sure  ( ) Certain
      ≈10%          ≈30%        ≈50%            ≈70%           ≈90%   ← --fs-meta --ink-3
@@ -669,7 +669,7 @@ padding `--s5`; `--s4` on phone). It is a `<section aria-labelledby>`.
 ```
 
 - **Kicker labels** (sentence case rendered as small caps; never uppercase transforms or accent color): `probe` → "Quick question", `predict` → "Predict first", `check` → "Check your understanding".
-- **Never collapsed while pending**, for any role. This removes the `details` for `check` (fixes D10).
+- **Open while pending, with one exception** (reversed 2026-11-15). A `check` that comes right after the tutor's prose (figures and refused calls between them don't count) arrives **collapsed**: its kicker and one secondary button, "Show the question". It opens, and stays open, when that bar is fully in view (the learner reached the end of the explanation: `IntersectionObserver`, threshold 1) or when the button or the desk's "Go to question" is pressed; opening by scroll never moves focus. Predictions, probes, view questions and a check with no prose before it are open at once. A session opened at its end shows the check open, because its bar is already in view.
 - **`format: "choice"`:** a `fieldset` with legend "Choose one" (visually hidden, since the prompt is the question) and native radios as full-width rows (`--line` border between rows, 44 px minimum height on touch; label text in `--font-ui` 16 px). No row is preselected.
 - **Confidence:** a `fieldset` of five native radios, labels "Guessing", "Unsure", "Even odds", "Fairly sure", "Certain", sending `confidence` 10 / 30 / 50 / 70 / 90.
   - **No default.**
@@ -682,7 +682,7 @@ padding `--s5`; `--s4` on phone). It is a `<section aria-labelledby>`.
   - On success: status "Sent".
   - On rejection: controls are re-enabled and the status shows the message in `--danger`.
   - Validation for an empty answer when not using "I don't know": "Write an answer or pick “I don't know”."
-- **`thinkingWhileReading`:** optional in the contract and not collected. Do not add a field.
+- **`thinkingWhileReading`:** while such a check is pending, collapsed or open, the desk shows one more box above its note: label "While you read (optional)", placeholder "Anything that comes to mind as you read. It goes to the tutor with your answer.", two rows. It is in the desk so it stays in view through the whole explanation. Its trimmed text is sent with the check's answer as `thinkingWhileReading` only when non-empty, the draft is cleared when another check takes its place, and the answered card shows it as "While reading: …" above the reasoning. (Reversed 2026-11-15: it was "not collected".)
 - **Never put `args.answer` in the DOM** before `item.answer` exists. Show `args.explanation` only after a verdict.
 
 Answered state (fill removed; becomes part of the page):
@@ -2159,7 +2159,7 @@ Nothing in this table scrolls, moves focus or animates.
      - `cancel_reply`, `cancel_job({ sessionId, jobId })`, `resume_turn`
      - `list_sessions`, `load_session({ id })`, `delete_session({ id })`
    - **Payloads for `answer`:**
-     - `question_ask`: `{ answer, thinking, confidence? (omit when dontKnow), dontKnow }`. `thinkingWhileReading` is optional and not sent.
+     - `question_ask`: `{ answer, thinking, confidence? (omit when dontKnow), dontKnow, thinkingWhileReading? }`. `thinkingWhileReading` is the desk's "While you read" text, sent with a check's answer when it has any.
      - `choice_ask`: `{ answer }`.
    - **Ops:**
      - Only tutor tool ops are shown; planner and other tool ops stay hidden.

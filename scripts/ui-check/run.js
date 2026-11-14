@@ -29,6 +29,13 @@
 //   library    Home's "+" menu: a folder imported as a reference library
 //              becomes a "Reference library" chip, the menu then lists it as
 //              linked, Escape closes the menu; Settings → Libraries lists it.
+//   reading    a Teach check that follows the tutor's delivered explanation
+//              (`message_send`): the explanation renders as the tutor's own
+//              message, the check waits collapsed below it while the desk
+//              shows "While you read", the check opens once its bar is
+//              scrolled into view (reasoning first and large, answer small),
+//              and the desk text rides the answer as `thinkingWhileReading`;
+//              a prediction is open at once and has no reading box.
 //
 // Exit code 0 when every check passes. Usage: run.js [ipc|placement|sync|library]...
 
@@ -1056,6 +1063,65 @@ async function session() {
   console.log('session: debrief list (five verdict groups, notes, sources, tip attribution/scope, after the reply), plan sheet controls (box ⋯ → drawer, level + known parts, Escape, plan options, list Options, Send → one edit_plan)');
 }
 
+async function reading() {
+  const openSession = async (role) => {
+    const page = await openApp('none', { query: `&fixture=learn&reading=${role}` });
+    await until('the session list', () => page.evaluate(`Boolean(document.querySelector('#session-list .session-open'))`));
+    await page.evaluate(`document.querySelector('#session-list .session-open').click()`);
+    await until('the session', () => page.evaluate(`Boolean(document.querySelector('#timeline .debrief'))`));
+    await page.evaluate(`window.__bridge.deliverReading()`);
+    await until('the question card', () => page.evaluate(`Boolean(document.querySelector('#timeline .exercise.pending .ex-form'))`));
+    return page;
+  };
+  const card = `document.querySelector('#timeline .exercise.pending')`;
+  const look = `(() => { const card = ${card}; const desk = document.getElementById('desk-reading');
+    const sent = [...document.querySelectorAll('#timeline .entry.tutor')].filter((e) => /secant slopes/.test(e.textContent));
+    return { sent: sent.length, bold: sent[0]?.querySelector('strong')?.textContent, before: Boolean(sent[0] && sent[0].compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING),
+      collapsed: card.classList.contains('collapsed'), form: card.querySelector('.ex-form').getClientRects().length > 0, prompt: card.querySelector('.prompt').getClientRects().length > 0,
+      opener: card.querySelector('.ex-open')?.textContent, desk: !desk.hidden && desk.getClientRects().length > 0, label: desk.querySelector('label').textContent,
+      fields: [...card.querySelectorAll('.ex-form .field')].map((f) => [f.querySelector('label').textContent, f.querySelector('textarea')?.rows]) }; })()`;
+
+  // Reading: the check is closed below the fold, the reading box is in the desk.
+  const page = await openSession('check');
+  await sleep(300); // an open-on-arrival would have happened by now
+  const closed = await page.evaluate(look);
+  expect(closed.sent === 1 && closed.bold === 'shrink the step' && closed.before && closed.collapsed && !closed.form && !closed.prompt
+    && closed.opener === 'Show the question' && closed.desk && closed.label === 'While you read (optional)', `while reading: ${JSON.stringify(closed)}`);
+  await page.evaluate(`document.getElementById('desk-reading-input').value = '  Why shrink the step?  '`);
+  await page.shot('reading-closed');
+
+  // Reaching the end opens it; the reading box stays, with its text.
+  await page.evaluate(`${card}.scrollIntoView({ block: 'end', behavior: 'instant' })`);
+  await until('the check to open', () => page.evaluate(`!${card}.classList.contains('collapsed')`));
+  const open = await page.evaluate(look);
+  expect(open.form && open.prompt && !open.opener && open.desk
+    && JSON.stringify(open.fields.slice(0, 2)) === JSON.stringify([['Your reasoning (optional)', 6], ['Your answer', 2]]), `opened: ${JSON.stringify(open)}`);
+  expect(await page.evaluate(`document.getElementById('desk-reading-input').value`) === '  Why shrink the step?  ', 'the reading draft was lost when the check opened');
+  await page.shot('reading-open');
+  await page.evaluate(`(() => { const [reasoning, answer] = ${card}.querySelectorAll('.ex-form textarea');
+    reasoning.value = 'The step goes to zero, so the slopes close in.';
+    answer.value = 'It approaches one value.';
+    ${card}.querySelector('.ex-form .confidence input[value="70"]').click();
+    ${card}.querySelector('.ex-form button[type="submit"]').click(); })()`);
+  await until('the answer sent', () => page.evaluate(`${argsOf('answer')}.length === 1`));
+  const sent = (await page.evaluate(argsOf('answer')))[0];
+  expect(sent.callId === 'c1' && sent.payload.thinkingWhileReading === 'Why shrink the step?' && sent.payload.answer === 'It approaches one value.'
+    && sent.payload.thinking === 'The step goes to zero, so the slopes close in.' && sent.payload.confidence === 70 && sent.payload.dontKnow === false, `answer: ${JSON.stringify(sent)}`);
+  let errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+
+  // A prediction comes before the teaching: open at once, nothing to read.
+  const predict = await openSession('predict');
+  await sleep(300);
+  const p = await predict.evaluate(look);
+  expect(!p.collapsed && !p.opener && !p.desk, `a prediction: ${JSON.stringify(p)}`);
+  errors = await predict.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await predict.close();
+  console.log('reading: a delivered explanation renders once, its check waits collapsed while the desk shows "While you read", scrolling to it opens it (reasoning large and first, answer small), the desk text rides the answer as thinkingWhileReading, a prediction is open with no reading box');
+}
+
 // The backend's turn status decides the "reply owed" offer; the page doesn't
 // guess it from the last message.
 async function turn() {
@@ -1600,7 +1666,7 @@ async function exam() {
 }
 const fill2 = (sel, value) => `(() => { const el = ${q(sel)}; el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input')); return true; })()`;
 
-const cases = { ipc, placement, sync, library, map, session, turn, plugins: pluginsCase, practice, 'practice-set': practiceSet, 'practice-resume': practiceResume, exam };
+const cases = { ipc, placement, sync, library, map, session, reading, turn, plugins: pluginsCase, practice, 'practice-set': practiceSet, 'practice-resume': practiceResume, exam };
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases);
 try {
   for (const name of wanted) {

@@ -270,7 +270,14 @@ function verdictLine(item) {
   return p;
 }
 
-function questionForm(item, onAnswer) {
+const answerChoice = (args) => args.format === 'choice' && Array.isArray(args.options);
+
+/**
+ * The answer form. Free recall puts the reasoning first and large (the
+ * learner works the question out there) and the answer small below it.
+ * `reading` returns the desk's "While you read" text, when the card has one.
+ */
+function questionForm(item, onAnswer, reading = null) {
   const args = item.args;
   const form = h('form', 'ex-form');
   form.noValidate = true;
@@ -292,14 +299,19 @@ function questionForm(item, onAnswer) {
     }
     options[0]?.setAttribute('data-first', '');
     form.append(fs);
-  } else {
-    const f = textareaField('Your answer', { rows: 3, placeholder: 'Your best guess is fine.' });
-    answerInput = f.input;
-    answerInput.dataset.first = '';
-    form.append(f.wrap);
   }
-  const thinking = textareaField('Your reasoning (optional)', { rows: 2, placeholder: 'How did you get there?' });
-  form.append(thinking.wrap);
+  const thinking = textareaField('Your reasoning (optional)', {
+    rows: answerChoice(args) ? 2 : 6,
+    placeholder: answerChoice(args) ? 'How did you get there?' : 'Work it out here.',
+  });
+  if (answerChoice(args)) {
+    form.append(thinking.wrap);
+  } else {
+    const f = textareaField('Your answer', { rows: 2, placeholder: 'Your best guess is fine.' });
+    answerInput = f.input;
+    thinking.input.dataset.first = '';
+    form.append(thinking.wrap, f.wrap);
+  }
 
   const conf = confidenceField();
   const confRadios = conf.radios;
@@ -329,6 +341,10 @@ function questionForm(item, onAnswer) {
       }
     }
     const payload = { answer, thinking: thinking.input.value.trim(), dontKnow };
+    // What the learner thought while reading the teaching: its own channel,
+    // never merged into the reasoning on the question.
+    const readingText = reading?.().trim();
+    if (readingText) payload.thinkingWhileReading = readingText;
     if (!dontKnow) payload.confidence = Number(chosen.value);
     controls().forEach((c) => (c.disabled = true));
     status.set('Sending…');
@@ -380,8 +396,44 @@ function viewAnswerSummary(answer) {
   return typeof answer === 'string' && answer.trim() ? answer : 'Answer submitted in the figure.';
 }
 
-/** Block for a `question_ask` call. Never collapsed while pending. */
-export function questionCard(item, { onAnswer, readOnly, ctx = {} }) {
+/**
+ * Hides a pending check behind its kicker until the learner reaches it: the
+ * explanation above is read first, and the question opens when its bar comes
+ * fully into view (the end of the flow) or is pressed. Stays open after.
+ */
+function collapseUntilReached(block, item) {
+  const bar = h('p', 'ex-reveal');
+  const open = button('Show the question', 'secondary');
+  open.classList.add('ex-open');
+  bar.append(open);
+  block.classList.add('collapsed');
+  block.append(bar);
+  let watcher = null;
+  const reveal = () => {
+    if (item.revealed) return;
+    item.revealed = true;
+    watcher?.disconnect();
+    bar.remove();
+    block.classList.remove('collapsed');
+  };
+  open.addEventListener('click', () => {
+    reveal();
+    block.querySelector('[data-first]')?.focus({ preventScroll: true });
+  });
+  if (typeof IntersectionObserver !== 'function') {
+    reveal();
+    return;
+  }
+  watcher = new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && reveal(), { threshold: 1 });
+  watcher.observe(bar);
+}
+
+/**
+ * Block for a `question_ask` call. With `reading` (a check that follows the
+ * tutor's explanation; the getter returns the desk's "While you read" text)
+ * the pending card starts collapsed, see `collapseUntilReached`.
+ */
+export function questionCard(item, { onAnswer, readOnly, ctx = {}, reading = null }) {
   if (item.failed) return hiddenItem();
   const args = item.args;
   const pending = !item.answer && !readOnly;
@@ -420,6 +472,7 @@ export function questionCard(item, { onAnswer, readOnly, ctx = {} }) {
     block.append(
       youBlock([
         [answerText, 'you-text'],
+        [a.thinkingWhileReading ? `While reading: ${a.thinkingWhileReading}` : '', 'you-meta'],
         [a.thinking ? `Reasoning: ${a.thinking}` : '', 'you-meta'],
         [confidenceLine(a), 'you-meta'],
       ]),
@@ -436,7 +489,8 @@ export function questionCard(item, { onAnswer, readOnly, ctx = {} }) {
   } else if (readOnly) {
     block.append(h('p', 'waiting', 'Not answered.'));
   } else {
-    block.append(questionForm(item, onAnswer));
+    block.append(questionForm(item, onAnswer, reading));
+    if (reading && !item.revealed) collapseUntilReached(block, item);
   }
   return block;
 }

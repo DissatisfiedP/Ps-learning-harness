@@ -266,6 +266,10 @@ pub fn append_outcome(repo: &Path, outcome: &Outcome) -> Result<(), Error> {
 /// Every outcome in the log, deduplicated by `opId` and ordered by
 /// `(at, opId)`, plus how many lines were skipped (unparseable, or breaking
 /// the §5 shape). A missing file is an empty log.
+///
+/// A teaching question graded twice (the tutor's regrade) appends a second
+/// `check` outcome for the same question: only the latest is returned, the
+/// rule the session's gates follow (`replay::record_verdict`).
 pub fn read_outcomes(repo: &Path) -> Result<(Vec<Outcome>, usize), Error> {
     let path = path(repo);
     if !path.is_file() {
@@ -290,7 +294,17 @@ pub fn read_outcomes(repo: &Path) -> Result<(Vec<Outcome>, usize), Error> {
         out.push((at, o));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.op_id.cmp(&b.1.op_id)));
-    Ok((out.into_iter().map(|(_, o)| o).collect(), skipped))
+    let mut regraded = HashSet::new();
+    let mut latest: Vec<Outcome> = Vec::with_capacity(out.len());
+    for (_, o) in out.into_iter().rev() {
+        if o.format != Format::Check
+            || regraded.insert((o.session_id.clone(), o.problem_id.clone()))
+        {
+            latest.push(o);
+        }
+    }
+    latest.reverse();
+    Ok((latest, skipped))
 }
 
 fn parse_at(at: &str) -> Option<DateTime<Utc>> {
@@ -1210,6 +1224,26 @@ mod tests {
             assert!(err.contains(why), "{err}");
         }
         assert!(!path(&repo).exists(), "nothing was written");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A regraded teaching question leaves two outcomes in the log; the model
+    /// must follow the tutor's latest verdict, as the section gates do.
+    #[test]
+    fn a_regraded_question_counts_once_with_its_latest_verdict() {
+        let repo = temp_repo("regrade");
+        let mut first = outcome("a", 1, &["n"], Verdict::Wrong);
+        first.problem_id = "q1".into();
+        let mut regrade = outcome("b", 1, &["n"], Verdict::Correct);
+        regrade.problem_id = "q1".into();
+        let other = outcome("c", 2, &["n"], Verdict::Wrong);
+        for o in [&first, &regrade, &other] {
+            append_outcome(&repo, o).unwrap();
+        }
+        let (log, _) = read_outcomes(&repo).unwrap();
+        let kept: Vec<(&str, Verdict)> =
+            log.iter().map(|o| (o.op_id.as_str(), o.verdict)).collect();
+        assert_eq!(kept, [("b", Verdict::Correct), ("c", Verdict::Wrong)]);
         let _ = std::fs::remove_dir_all(&repo);
     }
 }

@@ -164,6 +164,7 @@ async fn chat_replay_shape_and_cross_wire_native_drop() {
                 ContentBlock::Native {
                     wire: Wire::AnthropicMessages,
                     raw: serde_json::json!({"type":"thinking","signature":"sig"}),
+                    at: 0,
                 },
             ],
         },
@@ -256,7 +257,7 @@ async fn responses_two_split_tool_calls_and_reasoning_native() {
     // The reasoning item is replayable unchanged.
     assert_eq!(done.native.len(), 1);
     match &done.native[0] {
-        ContentBlock::Native { wire, raw } => {
+        ContentBlock::Native { wire, raw, .. } => {
             assert_eq!(*wire, Wire::OpenaiResponses);
             assert_eq!(raw["type"], "reasoning");
             assert_eq!(raw["encrypted_content"], "enc");
@@ -295,6 +296,7 @@ async fn responses_replay_shape_and_native_reasoning() {
                 ContentBlock::Native {
                     wire: Wire::OpenaiResponses,
                     raw: serde_json::json!({"type":"reasoning","id":"rs_1","encrypted_content":"enc"}),
+                    at: 0,
                 },
             ],
         },
@@ -420,7 +422,7 @@ async fn anthropic_two_split_tool_calls_and_thinking_native() {
     // The thinking block carries its signature.
     assert_eq!(done.native.len(), 1);
     match &done.native[0] {
-        ContentBlock::Native { wire, raw } => {
+        ContentBlock::Native { wire, raw, .. } => {
             assert_eq!(*wire, Wire::AnthropicMessages);
             assert_eq!(raw["type"], "thinking");
             assert_eq!(raw["signature"], "sig-xyz");
@@ -476,6 +478,7 @@ async fn anthropic_replay_shape_native_and_cache_control() {
                 ContentBlock::Native {
                     wire: Wire::AnthropicMessages,
                     raw: serde_json::json!({"type":"thinking","thinking":"hmm","signature":"sig"}),
+                    at: 0,
                 },
             ],
         },
@@ -537,6 +540,81 @@ async fn anthropic_replay_shape_native_and_cache_control() {
     // cache_control on the last message's last block.
     let last = msgs.last().unwrap()["content"].as_array().unwrap();
     assert_eq!(last.last().unwrap()["cache_control"]["type"], "ephemeral");
+}
+
+/// Text the model wrote between two thinking blocks goes back between them:
+/// the decoder records where each block fell, and the replay splits the text
+/// there.
+#[tokio::test]
+async fn anthropic_thinking_blocks_keep_their_place_in_the_text() {
+    let events = [
+        (
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s1"}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Héllo"}}"#,
+        ),
+        (
+            "content_block_start",
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"thinking","thinking":""}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"signature_delta","signature":"s2"}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":" world"}}"#,
+        ),
+        (
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
+        ),
+        ("message_stop", r#"{"type":"message_stop"}"#),
+    ];
+    let stream = |events: &[(&str, &str)]| {
+        events
+            .iter()
+            .map(|(e, d)| format!("event: {e}\ndata: {d}\n\n"))
+            .collect::<String>()
+    };
+    let (base, _raw) = serve(vec![stream(&events)]).await;
+    let (done, seen, _) = run_full(ProviderId::Anthropic, &base, &messages(), &[]).await;
+    assert_eq!(seen, ["T:Héllo", "T: world"]);
+
+    // The harness stores the blocks and the text apart and replays them as
+    // natives, text, calls.
+    let mut content = done.native.clone();
+    content.push(ContentBlock::text("Héllo world"));
+    let replayed = vec![
+        Message {
+            role: Role::Assistant,
+            content,
+        },
+        Message::text(Role::User, "go on"),
+    ];
+    let (base, raw) = serve(vec![stream(&events[6..])]).await;
+    run_full(ProviderId::Anthropic, &base, &replayed, &[]).await;
+    let body = body_of(&raw.await.unwrap());
+    let sent: Vec<String> = body["messages"][0]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| match b["type"].as_str().unwrap() {
+            "thinking" => format!("thinking:{}", b["signature"].as_str().unwrap()),
+            _ => format!("text:{}", b["text"].as_str().unwrap()),
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        ["thinking:s1", "text:Héllo", "thinking:s2", "text: world"]
+    );
 }
 
 fn messages() -> Vec<Message> {

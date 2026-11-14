@@ -95,7 +95,7 @@ fn replay_message(m: &crate::Message) -> Vec<Value> {
                 }));
             }
             // Only replay our own native blocks; this wire has none normally.
-            ContentBlock::Native { wire, raw } if *wire == Wire::OpenaiChat => {
+            ContentBlock::Native { wire, raw, .. } if *wire == Wire::OpenaiChat => {
                 native_text = Some(raw.to_string());
             }
             ContentBlock::Native { .. } => {}

@@ -392,6 +392,14 @@ impl Harness {
         if state.branch.is_some() {
             flags.insert("branch".to_owned());
         }
+        // The Anthropic wire can return reply text written before a tool call
+        // as unreadable reasoning; there the tutor gets a verbatim channel.
+        let message_send = lock(&self.config)
+            .resolve(ModelRole::Tutor)
+            .is_ok_and(|c| c.provider.spec().wire == providers::Wire::AnthropicMessages);
+        if message_send {
+            flags.insert("message_send".to_owned());
+        }
         let workspace = lock(&self.workspaces).get(session_id).is_some();
         if workspace {
             flags.insert("workspace".to_owned());
@@ -511,6 +519,9 @@ impl Harness {
         let mut system = composer.compose_tutor(file, label, &base, &values, &flags)?;
         system.push_str(&self.library_prompt(ops, "tutor")?);
         let mut tools = tools::tutor_tools(phase, workspace);
+        if message_send {
+            tools.push(tools::message_send());
+        }
         if phase == Phase::Teach {
             tools.extend(plugin_tools);
         }
@@ -607,15 +618,22 @@ impl Harness {
                     .and_then(Value::as_str)
                     .unwrap_or("the learner's exam"),
             );
+            let days = exam_rec
+                .and_then(|e| e.get("date"))
+                .and_then(Value::as_str)
+                .and_then(days_until);
             values.set(
                 "days_left",
-                exam_rec
-                    .and_then(|e| e.get("date"))
-                    .and_then(Value::as_str)
-                    .and_then(days_until)
-                    .map_or_else(|| "unknown".to_owned(), |d| d.to_string()),
+                days.map_or_else(|| "unknown".to_owned(), |d| d.to_string()),
             );
-            values.set("sittings_left", "unknown");
+            // One sitting a day, as the exam mix counts them (exam.rs `mix`).
+            values.set(
+                "sittings_left",
+                days.map_or_else(
+                    || "unknown".to_owned(),
+                    |d| format!("{} (one a day)", d.max(0)),
+                ),
+            );
         }
         composer.compose_planner(&values, exam, &flags)
     }
@@ -668,6 +686,7 @@ impl Harness {
         }
         let mut handed_off = false;
         let mut compacted = false;
+        let mut narration_refusals = 0;
         for _ in 0..MAX_LOOP {
             let ops = self.store.ops(session_id)?;
             let mut state = replay_state(&ops);
@@ -748,6 +767,7 @@ impl Harness {
             }
             let mobile = self.is_mobile();
             let mut paused = false;
+            let mut prose_hidden = hides_prose(&reply, &tools);
             for (call, stamp) in calls.iter().zip(stamps) {
                 let mut op = tool_op(call, None);
                 // On mobile: the desktop-only plugin this call goes to.
@@ -778,12 +798,23 @@ impl Harness {
                     self.append(session_id, result_op(call, &msg, true, None))?;
                     continue;
                 }
+                if prose_hidden
+                    && narration_refusals < MAX_NARRATION_REFUSALS
+                    && matches!(call.name.as_str(), "question_ask" | "choice_ask")
+                {
+                    narration_refusals += 1;
+                    self.append(session_id, result_op(call, NARRATION_REFUSAL, true, None))?;
+                    continue;
+                }
                 let started = std::time::Instant::now();
                 let exec = self.execute_tutor_tool(session_id, call, &tools).await?;
                 tracing::debug!(tool = %call.name, ms = started.elapsed().as_millis() as u64, "tool");
                 match exec {
                     Exec::Pause => paused = true,
                     Exec::Done { content, is_error } => {
+                        if call.name == replay::MESSAGE_SEND && !is_error {
+                            prose_hidden = false;
+                        }
                         self.append(session_id, result_op(call, &content, is_error, None))?;
                     }
                 }
@@ -936,6 +967,16 @@ impl Harness {
             "debrief_record" => self.debrief_record(session_id, &ops, args),
             "frontier_park" => self.frontier_park(session_id, &state, args),
             "preference_add" => self.preference_add(session_id, &state, args),
+            replay::MESSAGE_SEND => {
+                let message = opt_str(args, "message").map(str::trim).unwrap_or("");
+                if message.is_empty() {
+                    return Ok(refuse(name, "`message` is empty"));
+                }
+                let mut m = sessions::new_message(Role::Assistant, message.to_owned());
+                m.tag = Some(replay::SENT_TAG.into());
+                self.append(session_id, Op::Message(m))?;
+                Ok(done("Shown to the learner."))
+            }
             "session_end" => {
                 if state.phase != Phase::Close {
                     self.append(session_id, phase_op(Phase::Close, None))?;
@@ -1059,6 +1100,25 @@ impl Harness {
                 ));
             }
         }
+        // The exam plan counts its days from this date (planner/exam.md,
+        // exam.rs): "in a few days" would read as no date at all.
+        if purpose == "exam" {
+            let date = args
+                .pointer("/exam/date")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|d| !d.is_empty());
+            let now = chrono::Utc::now();
+            if date.is_some_and(|d| crate::exam::days_left(d, now).is_none()) {
+                return Ok(refuse(
+                    name,
+                    format!(
+                        "`exam.date` must be a date, YYYY-MM-DD (today is {}): work it out from what the learner said, ask them when it is unclear, or leave it out if they don't know",
+                        now.date_naive()
+                    ),
+                ));
+            }
+        }
 
         // Normalise the record so replay and the gates read one shape: the
         // depth default, explore off (always for course and exam goals), and
@@ -1164,9 +1224,10 @@ impl Harness {
         // phase change.
         self.refute_known_section(session_id, ops, qid, &question, args)?;
         // Evidence for the learner model (§4.8). An "I don't know" was
-        // recorded when it was sent, and a question already graded keeps its
-        // first verdict.
-        if !answered_dont_know(ops, qid) && !already_graded(ops, qid) {
+        // recorded when it was sent. A regrade appends a second outcome for
+        // the same question; the log's reader keeps the latest, as the gates
+        // do (`replay::record_verdict`).
+        if !answered_dont_know(ops, qid) {
             if let Some(v) = crate::learner::Verdict::parse(verdict) {
                 self.record_outcome(session_id, ops, qid, v, misconception)?;
             }
@@ -2956,6 +3017,29 @@ pub(crate) fn ensure_user_last(messages: &mut Vec<Message>) {
 /// Most probe questions a `quick` starting point allows (§3).
 const QUICK_PROBE_QUESTIONS: usize = 5;
 
+/// Most questions one tutor turn has refused for hidden narration before the
+/// question goes out anyway: a model that never delivers must not stall the
+/// lesson.
+const MAX_NARRATION_REFUSALS: usize = 2;
+
+/// Tells the model why its question wasn't asked and how to deliver the
+/// prose that should precede it.
+const NARRATION_REFUSAL: &str = "not asked: what you wrote for the learner in this reply was not shown to them. Send the complete feedback and explanation with `message_send`, then make this call again.";
+
+/// Whether `reply` wrote for the learner and none of it can be shown: no
+/// text, a narration block (`ContentBlock::is_narration`), and a tutor that
+/// has `message_send` to deliver it with. Then the learner would get a
+/// question about teaching they never saw, so the question waits.
+fn hides_prose(reply: &Reply, tools: &[ToolSpec]) -> bool {
+    reply.text.trim().is_empty()
+        && reply
+            .completion
+            .native
+            .iter()
+            .any(ContentBlock::is_narration)
+        && tools.iter().any(|t| t.name == replay::MESSAGE_SEND)
+}
+
 /// The places a hunt can send the learner (§5).
 const HUNT_KINDS: [&str; 7] = [
     "forum",
@@ -3088,6 +3172,34 @@ fn gate_question(ops: &[Op], state: &SessionState, args: &Value) -> Exec {
             );
         }
     }
+    // Evidence first (§2, §7): the last answer is graded before the next
+    // question goes out, or it never reaches the gates, calibration or the
+    // learner model.
+    if let Some(qid) = ungraded_answer(ops) {
+        return refuse(
+            name,
+            format!(
+                "question `{qid}` was answered but has no verdict: call `verdict_record` for it first (the same turn is fine), then ask again"
+            ),
+        );
+    }
+    // A repair or a re-check needs a fresh question: the same one again
+    // tests the memory of the last attempt. A perceptual drill and a view
+    // task repeat one prompt over different examples.
+    let perceptual = state
+        .current_section()
+        .is_some_and(|s| s.mode.as_str() == "perceptual");
+    if !perceptual && args.get("view").is_none() {
+        let prompt = opt_str(args, "prompt").unwrap_or("");
+        if let Some(earlier) = answered_same_prompt(ops, prompt) {
+            return refuse(
+                name,
+                format!(
+                    "this exact question was already asked and answered (`{earlier}`): write a fresh one that uses the idea in a new case"
+                ),
+            );
+        }
+    }
     Exec::Pause
 }
 
@@ -3193,6 +3305,51 @@ fn already_graded(ops: &[Op], qid: &str) -> bool {
         matches!(o, Op::Tool(t) if calls.contains(t.call_id.as_str())
             && t.result.as_ref().is_some_and(|r| !r.is_error))
     })
+}
+
+/// The learner's answer to question `qid`, parsed: `None` while it is open,
+/// refused, or set aside for a comment.
+fn question_answer(ops: &[Op], qid: &str) -> Option<Value> {
+    ops.iter().rev().find_map(|o| match o {
+        Op::Tool(t) if t.call_id == qid => {
+            let result = t.result.as_ref().filter(|r| !r.is_error)?;
+            let answer: Value = serde_json::from_str(&result.content).ok()?;
+            (answer.get("setAside").and_then(Value::as_bool) != Some(true)).then_some(answer)
+        }
+        _ => None,
+    })
+}
+
+/// The `question_ask` calls in the log, oldest first.
+fn question_calls(ops: &[Op]) -> impl DoubleEndedIterator<Item = &ToolOp> {
+    ops.iter().filter_map(|o| match o {
+        Op::Tool(t) if t.name == "question_ask" && t.result.is_none() => Some(t),
+        _ => None,
+    })
+}
+
+/// The latest answered probe or check that still waits for the tutor's
+/// verdict. Choice answers and "I don't know" are graded by code; a
+/// prediction needs no verdict.
+fn ungraded_answer(ops: &[Op]) -> Option<&str> {
+    let (question, answer) = question_calls(ops)
+        .rev()
+        .find_map(|t| question_answer(ops, &t.call_id).map(|a| (t, a)))?;
+    let graded_by_code = answer.get("verdict").is_some()
+        || answer.get("dontKnow").and_then(Value::as_bool) == Some(true);
+    let needs_verdict = matches!(opt_str(&question.args, "role"), Some("probe" | "check"));
+    (needs_verdict && !graded_by_code && !already_graded(ops, &question.call_id))
+        .then_some(question.call_id.as_str())
+}
+
+/// An earlier question with the same prompt that the learner answered.
+fn answered_same_prompt<'a>(ops: &'a [Op], prompt: &str) -> Option<&'a str> {
+    question_calls(ops)
+        .find(|t| {
+            opt_str(&t.args, "prompt").is_some_and(|p| same_answer(p, prompt))
+                && question_answer(ops, &t.call_id).is_some()
+        })
+        .map(|t| t.call_id.as_str())
 }
 
 /// Build the tool result for a learner's answer. Choice questions are graded
@@ -3475,6 +3632,7 @@ mod tests {
         let block = |bytes: usize| ContentBlock::Native {
             wire: providers::Wire::AnthropicMessages,
             raw: json!({ "type": "thinking", "thinking": "t".repeat(bytes), "signature": "s" }),
+            at: 0,
         };
         let small = vec![block(1000), block(2000)];
         assert_eq!(capped_native(&small, "s1"), small);
@@ -3782,5 +3940,123 @@ mod tests {
             platforms: None,
         }));
         assert!(matches!(gate_question(&six, &quick, &probe), Exec::Pause));
+    }
+
+    #[test]
+    fn the_next_question_waits_for_the_last_verdict_and_must_be_fresh() {
+        let op = |call_id: &str, name: &str, args: Value, result: Option<&str>| {
+            Op::Tool(ToolOp {
+                op_id: op_id(),
+                at: now_iso(),
+                call_id: call_id.into(),
+                name: name.into(),
+                args,
+                result: result.map(|content| ToolResultValue {
+                    content: content.into(),
+                    is_error: false,
+                }),
+                agent: None,
+                plugin: None,
+                platforms: None,
+            })
+        };
+        let question = |role: &str, prompt: &str| json!({"role":role,"level":"use","nodeId":"n1","format":"free","prompt":prompt,"answer":"3 kΩ"});
+        let answered = |role: &str, answer: &str| {
+            vec![
+                op("q1", "question_ask", question(role, "Find R1."), None),
+                op("q1", "question_ask", Value::Null, Some(answer)),
+            ]
+        };
+        let refusal = |ops: &[Op], args: &Value| match gate_question(ops, &teach_state(), args) {
+            Exec::Done { content, is_error } => {
+                assert!(is_error);
+                content
+            }
+            Exec::Pause => String::new(),
+        };
+        let fresh = question("check", "Find R2.");
+
+        // An answered check with no verdict holds the next question back.
+        let mut ops = answered("check", r#"{"answer":"4 kΩ","confidence":70}"#);
+        let why = refusal(&ops, &fresh);
+        assert!(
+            why.contains("`q1` was answered but has no verdict"),
+            "{why}"
+        );
+
+        // Graded: a fresh question goes out, the same one again does not.
+        ops.push(op(
+            "v1",
+            "verdict_record",
+            json!({"questionId":"q1","verdict":"wrong"}),
+            None,
+        ));
+        ops.push(op(
+            "v1",
+            "verdict_record",
+            Value::Null,
+            Some("Verdict recorded."),
+        ));
+        assert_eq!(refusal(&ops, &fresh), "");
+        let why = refusal(&ops, &question("check", "find  r1."));
+        assert!(why.contains("already asked and answered (`q1`)"), "{why}");
+
+        // Neither gate applies to an answer the app graded, a prediction, or
+        // a question the learner set aside (which may be asked again).
+        for (role, answer) in [
+            ("check", r#"{"answer":"","dontKnow":true}"#),
+            (
+                "check",
+                r#"{"answer":"3 kΩ","confidence":70,"verdict":"correct"}"#,
+            ),
+            ("predict", r#"{"answer":"4 kΩ","confidence":70}"#),
+        ] {
+            assert_eq!(
+                refusal(&answered(role, answer), &fresh),
+                "",
+                "{role} {answer}"
+            );
+        }
+        let aside = answered("check", r#"{"setAside":true,"note":"…"}"#);
+        assert_eq!(refusal(&aside, &question("check", "Find R1.")), "");
+    }
+
+    #[test]
+    fn a_reply_hides_prose_only_when_it_is_all_narration_and_can_be_delivered() {
+        use base64::Engine as _;
+        let block = |tag: &[u8]| {
+            let mut bytes = vec![0x12, 0x00, b'B', b'\t'];
+            bytes.extend_from_slice(tag);
+            bytes.extend_from_slice(&[0x1a; 40]);
+            ContentBlock::Native {
+                wire: providers::Wire::AnthropicMessages,
+                raw: json!({ "type": "thinking", "thinking": "",
+                    "signature": base64::engine::general_purpose::STANDARD.encode(bytes) }),
+                at: 0,
+            }
+        };
+        let reply = |text: &str, native: Vec<ContentBlock>| Reply {
+            completion: Completion {
+                stop: StopReason::ToolUse,
+                usage: providers::Usage::default(),
+                tool_calls: Vec::new(),
+                native,
+            },
+            text: text.into(),
+            thinking: String::new(),
+            model: "m".into(),
+            interrupted: false,
+        };
+        let with_send = [tools::message_send()];
+        let narrated = || vec![block(b"thinking"), block(b"narration")];
+
+        assert!(hides_prose(&reply("", narrated()), &with_send));
+        // Ordinary reasoning, visible text, or no way to deliver: not held.
+        assert!(!hides_prose(
+            &reply("", vec![block(b"thinking")]),
+            &with_send
+        ));
+        assert!(!hides_prose(&reply("Shown.", narrated()), &with_send));
+        assert!(!hides_prose(&reply("", narrated()), &[]));
     }
 }
