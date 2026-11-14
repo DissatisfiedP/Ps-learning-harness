@@ -44,7 +44,7 @@ The prompts are live, so every prompt instruction that depends on unbuilt code s
 
 Purpose `course` is introduced together with `levels`: the `goal_set` schema's `purpose` enum gains `"course"` in that change.
 
-`coach/base.md` and `jobs/graph-builder.md` are not live yet (no coach, no graph), so they're written for the target directly, without flags.
+`coach/base.md` is live (2026-11-14) and written for the target without flags; the coach's state block sets the `calibration` flag when the block exists.
 
 ---
 
@@ -111,7 +111,7 @@ In exam mode the target per section comes from the past papers: the highest leve
 
 **Probe:** brackets record the level reached, e.g. "uses the divider rule; can't analyze a loaded divider." The planner uses this to decide where to start each strand *and* how far each section must go.
 
-**Coach** (when built): targets each node's gap between level reached and target, and adds two problem types:
+**Coach** (built 2026-11-14): the scheduler targets each node's gap between the level reached (`NodeState.level_reached`, from graded answers that carry `level`) and the plan's target level, one step at a time and never above the target; `problem_commit` refuses a problem at any other level. It adds two problem types:
 - **Critique** (Analyze): find the flaw in a given solution, design or argument.
 - **Design to constraints** (Design): graded against a rubric committed beforehand.
 
@@ -596,8 +596,8 @@ new evidence.
 3. **The graph-dependent parts are partly built; the rest still waits** (§2, §5, §6): the graph
    exists and its builder job runs, but the `heuristic` node kind with `attribution`/`scope`,
    `hunt` provenance on nodes (and its `unverified` state until the debrief) and calibration per
-   topic are not built, and the coach's critique and design-to-constraints problems wait for the
-   coach. **Venues are built**: the builder submits a `venue` op per topic (`crates/harness/src/graph/`),
+   topic are not built (the coach's critique and design-to-constraints problems are built:
+   `problem_commit` `type: critique | design`, with a rubric required for design). **Venues are built**: the builder submits a `venue` op per topic (`crates/harness/src/graph/`),
    the read model aggregates own plus descendants, and the Map shows them. The honest residue is
    the builder's judgement — a venue only reaches its topic because the model named one, and no
    code checks that the topic is the right one — and the learner cannot edit or remove a venue in

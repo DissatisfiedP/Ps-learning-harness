@@ -251,8 +251,9 @@ pub fn replay_state(ops: &[Op]) -> SessionState {
                 }
             }
             // The view summary is rendered into the conversation below; the
-            // mobile lock is read by `mobile.rs`, never by replay.
-            Op::ViewState(_) | Op::MobileUnlock(_) => {}
+            // mobile lock is read by `mobile.rs`, never by replay; practice
+            // ops are read by `practice::state`.
+            Op::ViewState(_) | Op::MobileUnlock(_) | Op::Practice(_) => {}
         }
     }
     // A `running` op carries no args; keep the ones from `queued`.
@@ -510,7 +511,7 @@ const CALIBRATION_GAP: u32 = 15;
 /// answers with both a confidence and a recorded verdict count — a probe
 /// answer counts the same as a check (§7, "the confidence the learner already
 /// gives on every answer").
-fn calibration(
+pub(crate) fn calibration(
     graded: &HashMap<String, bool>,
     confidences: &HashMap<String, u32>,
 ) -> Option<Calibration> {

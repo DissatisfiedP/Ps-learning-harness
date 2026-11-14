@@ -828,7 +828,7 @@ impl Harness {
 
     /// Compaction turn (architecture §4.15): the tutor's role writes notes
     /// that replace the older turns. Returns whether a compaction was written.
-    async fn compact(
+    pub(crate) async fn compact(
         self: &Arc<Self>,
         session_id: &str,
         ops: &[Op],
@@ -1335,7 +1335,11 @@ impl Harness {
         Ok(done("Accepted. The planner is building the plan from this conversation. Tell the learner in one line, then end your turn."))
     }
 
-    fn research_request(self: &Arc<Self>, session_id: &str, args: &Value) -> Result<Exec, Error> {
+    pub(crate) fn research_request(
+        self: &Arc<Self>,
+        session_id: &str,
+        args: &Value,
+    ) -> Result<Exec, Error> {
         let name = "research_request";
         let kind = match opt_str(args, "kind") {
             Some(k @ ("verify" | "scope" | "source")) => k,
@@ -1907,7 +1911,7 @@ impl Harness {
         roots
     }
 
-    async fn file_tool(
+    pub(crate) async fn file_tool(
         &self,
         session_id: &str,
         state: &SessionState,
@@ -2021,7 +2025,7 @@ impl Harness {
         }
     }
 
-    async fn plugin_call(
+    pub(crate) async fn plugin_call(
         &self,
         session_id: &str,
         state: &SessionState,
@@ -2251,7 +2255,10 @@ impl Harness {
     /// to lack vision; the composer asks first (W2/W3). A linked library
     /// that no longer exists is refused the same way, before anything is
     /// written.
-    fn check_vision(&self, attachments: &[crate::sessions::Attachment]) -> Result<(), Error> {
+    pub(crate) fn check_vision(
+        &self,
+        attachments: &[crate::sessions::Attachment],
+    ) -> Result<(), Error> {
         crate::library::check_attachments(&self.repo, attachments)?;
         if attachments.iter().any(|a| a.kind == "image")
             && self.role_vision(ModelRole::Tutor) == Some(false)

@@ -17,9 +17,9 @@ use std::time::Duration;
 use harness::providers::workbuddy::LoginStart;
 use harness::providers::{ModelInfo, ProviderId};
 use harness::{
-    AgentEvent, ChatEvent, Coalescer, Envelope, Harness, KnowledgeMap, Mode, ModelChoice,
-    ModelRole, ProviderStatus, RemovedPlugin, RoleInfo, RoleTestResult, RoleUsageEntry, Session,
-    SessionState, SessionSummary, Settings, StoredMessage,
+    AgentEvent, Coalescer, Envelope, Harness, KnowledgeMap, Mode, ModelChoice, ModelRole,
+    ProviderStatus, RemovedPlugin, RoleInfo, RoleTestResult, RoleUsageEntry, Session, SessionState,
+    SessionSummary, Settings,
 };
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Manager, RunEvent, State, WindowEvent};
@@ -54,16 +54,6 @@ fn view_url(id: &str) -> String {
 #[cfg(not(any(target_os = "windows", target_os = "android")))]
 fn view_url(id: &str) -> String {
     format!("pluginview://localhost/{id}")
-}
-
-fn forward(channel: &Channel) -> impl FnMut(ChatEvent<'_>) + Send + '_ {
-    move |event| {
-        if let Ok(json) = serde_json::to_string(&event) {
-            // A closed channel means the window went away; the turn still
-            // completes and is saved.
-            let _ = channel.send(InvokeResponseBody::Json(json));
-        }
-    }
 }
 
 /// Run blocking IO off the async workers.
@@ -347,33 +337,119 @@ fn cancel_job(h: H<'_>, session_id: String, job_id: String) -> Result<()> {
     h.cancel_job(&session_id, &job_id).map_err(err)
 }
 
-// ---- Practice (single prompt, unchanged until the coach) -----------------------
+// ---- Practice (the coach, docs/ui-design.md §11b) ---------------------------------
 
+/// New Practice session on the Map's picked ideas (none: the scheduler
+/// picks). `format` is `stream` (default) or `set`.
 #[tauri::command]
-async fn send_message(
+async fn start_practice(
     h: H<'_>,
-    session_id: Option<String>,
-    mode: Mode,
+    targets: Option<Vec<String>>,
+    format: Option<String>,
+    size: Option<u32>,
+) -> Result<SessionSummary> {
+    h.start_practice(
+        targets.as_deref().unwrap_or_default(),
+        format.as_deref().unwrap_or("stream"),
+        size,
+    )
+    .await
+    .map_err(err)
+}
+
+/// What the learner may see of a Practice session.
+#[tauri::command]
+async fn practice_state(h: H<'_>, session_id: String) -> Result<harness::PracticeView> {
+    blocking(&h, move |h| h.practice_state(&session_id)).await
+}
+
+/// One submission: working, a question or a claimed answer.
+#[tauri::command]
+async fn practice_submit(
+    h: H<'_>,
+    session_id: String,
     text: String,
+    confidence: Option<u8>,
     attachments: Option<Vec<harness::Attachment>>,
-    on_event: Channel,
-) -> Result<StoredMessage> {
-    h.send_with(
-        session_id.as_deref(),
-        mode,
+) -> Result<()> {
+    h.practice_submit(
+        &session_id,
         &text,
+        confidence,
         attachments.as_deref().unwrap_or_default(),
-        &mut forward(&on_event),
     )
     .await
     .map_err(err)
 }
 
 #[tauri::command]
-async fn retry_reply(h: H<'_>, session_id: String, on_event: Channel) -> Result<StoredMessage> {
-    h.retry(&session_id, &mut forward(&on_event))
+async fn practice_hint(h: H<'_>, session_id: String) -> Result<()> {
+    h.practice_hint(&session_id).await.map_err(err)
+}
+
+#[tauri::command]
+async fn practice_dismiss(h: H<'_>, session_id: String) -> Result<()> {
+    h.practice_dismiss(&session_id).await.map_err(err)
+}
+
+#[tauri::command]
+async fn practice_next(h: H<'_>, session_id: String) -> Result<()> {
+    h.practice_next(&session_id).await.map_err(err)
+}
+
+#[tauri::command]
+async fn practice_submit_set(
+    h: H<'_>,
+    session_id: String,
+    answers: Vec<harness::practice::SetAnswer>,
+) -> Result<()> {
+    h.practice_submit_set(&session_id, answers)
         .await
         .map_err(err)
+}
+
+#[tauri::command]
+async fn practice_end(h: H<'_>, session_id: String, skip_retests: Option<bool>) -> Result<()> {
+    h.practice_end(&session_id, skip_retests.unwrap_or(false))
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn practice_resume(h: H<'_>, session_id: String) -> Result<()> {
+    h.practice_resume(&session_id).await.map_err(err)
+}
+
+// ---- Exam mode (docs/ui-design.md §11c) -------------------------------------------
+
+/// The exam goal's ranked plan, the day's sitting, the mix and the score estimate.
+#[tauri::command]
+async fn exam_plan(h: H<'_>, session_id: String) -> Result<harness::exam::ExamPlan> {
+    blocking(&h, move |h| h.exam_plan(&session_id)).await
+}
+
+/// New timed exam paper from the exam goal's session; returns when the whole
+/// paper is posed (the clock starts then).
+#[tauri::command]
+async fn start_exam(
+    h: H<'_>,
+    goal_session_id: String,
+    budget_min: u32,
+    size: Option<u32>,
+) -> Result<SessionSummary> {
+    h.start_exam(&goal_session_id, budget_min, size)
+        .await
+        .map_err(err)
+}
+
+/// Save the answers typed so far; the deadline hands in the latest save.
+#[tauri::command]
+async fn practice_exam_save(
+    h: H<'_>,
+    session_id: String,
+    answers: Vec<harness::practice::SetAnswer>,
+) -> Result<()> {
+    blocking(&h, move |h| h.practice_exam_save(&session_id, answers)).await
 }
 
 #[tauri::command]
@@ -1083,8 +1159,18 @@ pub fn run() {
             start_from_frontier,
             resume_turn,
             cancel_job,
-            send_message,
-            retry_reply,
+            start_practice,
+            practice_state,
+            practice_submit,
+            practice_hint,
+            practice_dismiss,
+            practice_next,
+            practice_submit_set,
+            practice_end,
+            practice_resume,
+            exam_plan,
+            start_exam,
+            practice_exam_save,
             cancel_reply,
             get_settings,
             list_providers,

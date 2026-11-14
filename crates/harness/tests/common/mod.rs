@@ -19,6 +19,9 @@ use tokio::sync::Semaphore;
 // Scripted fake provider
 // ---------------------------------------------------------------------------
 
+/// Text and `(id, name, args)` tool calls a [`Reply::Dynamic`] builds.
+pub type DynamicCalls = (String, Vec<(String, String, Value)>);
+
 #[derive(Clone)]
 pub enum Reply {
     Text(&'static str),
@@ -29,6 +32,10 @@ pub enum Reply {
     /// A text reply built from the request body when it arrives, for text
     /// that quotes something only known at run time (e.g. an artifact handle).
     FromRequest(fn(&Value) -> String),
+    /// Text and tool calls built from the request body when it arrives, for
+    /// calls that name something only known at run time (a problem id the
+    /// app made up).
+    Dynamic(Arc<dyn Fn(&Value) -> DynamicCalls + Send + Sync>),
 }
 
 #[derive(Default)]
@@ -62,11 +69,16 @@ impl Script {
 
 pub fn agent_of(body: &Value) -> &'static str {
     let system = body["messages"][0]["content"].as_str().unwrap_or("");
+    // The coach shares the tutor's opening fragments; its base file tells it apart.
+    if system.contains("# Practice coach") {
+        return "coach";
+    }
     match system.lines().next().unwrap_or("") {
         "## Voice" => "tutor",
         "## Accuracy" => "planner",
         "# Researcher" => "researcher",
         "# Graph builder" => "graph",
+        "# Problem checker" => "checker",
         "Session title" => "title",
         "# Compaction turn" => "compaction",
         _ => "practice",
@@ -75,14 +87,16 @@ pub fn agent_of(body: &Value) -> &'static str {
 
 pub fn sse(reply: &Reply) -> String {
     match reply {
-        Reply::Text(t) => events(t, &[]),
+        Reply::Text(t) => events::<&str>(t, &[]),
         Reply::Calls(t, c) => events(t, c),
         Reply::Wait(_, inner) => sse(inner),
-        Reply::FromRequest(_) => unreachable!("serve builds FromRequest text itself"),
+        Reply::FromRequest(_) | Reply::Dynamic(_) => {
+            unreachable!("serve builds FromRequest and Dynamic replies itself")
+        }
     }
 }
 
-fn events(text: &str, calls: &[(&'static str, &'static str, Value)]) -> String {
+fn events<S: AsRef<str>>(text: &str, calls: &[(S, S, Value)]) -> String {
     let mut out = String::new();
     let chunk = |delta: Value, finish: &str| {
         format!(
@@ -95,8 +109,8 @@ fn events(text: &str, calls: &[(&'static str, &'static str, Value)]) -> String {
     }
     for (i, (id, name, args)) in calls.iter().enumerate() {
         out.push_str(&chunk(
-            json!({ "tool_calls": [{ "index": i, "id": id, "type": "function",
-                "function": { "name": name, "arguments": args.to_string() } }] }),
+            json!({ "tool_calls": [{ "index": i, "id": id.as_ref(), "type": "function",
+                "function": { "name": name.as_ref(), "arguments": args.to_string() } }] }),
             "",
         ));
     }
@@ -167,7 +181,11 @@ pub async fn serve(script: Arc<Script>, release: Arc<Semaphore>) -> String {
                         gate.acquire().await.unwrap().forget();
                         Some(sse(&inner))
                     }
-                    Some(Reply::FromRequest(build)) => Some(events(&build(&body), &[])),
+                    Some(Reply::FromRequest(build)) => Some(events::<&str>(&build(&body), &[])),
+                    Some(Reply::Dynamic(build)) => {
+                        let (text, calls) = build(&body);
+                        Some(events(&text, &calls))
+                    }
                     Some(reply) => Some(sse(&reply)),
                     None => None,
                 };

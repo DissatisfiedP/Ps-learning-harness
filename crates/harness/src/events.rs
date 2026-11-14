@@ -19,6 +19,8 @@ use crate::SessionSummary;
 pub enum AgentName {
     Tutor,
     Planner,
+    /// The practice coach (`practice/`).
+    Coach,
 }
 
 #[derive(Debug, Clone, Serialize)]

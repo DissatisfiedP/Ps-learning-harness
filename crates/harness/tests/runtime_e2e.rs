@@ -852,25 +852,19 @@ async fn legacy_learn_sessions_are_read_only_and_practice_still_works() {
         .iter()
         .any(|s| s.id == id && s.read_only));
 
-    // Practice keeps its single-prompt path and is never read-only.
-    script.push("practice", Reply::Text("Here is a problem."));
-    let mut seen = Vec::new();
-    let reply = h
-        .send(None, Mode::Practice, "give me a problem", &mut |e| {
-            seen.push(serde_json::to_string(&e).unwrap())
-        })
-        .await
-        .unwrap();
-    assert_eq!(reply.content, "Here is a problem.");
-    // Its prompt is rendered: no template syntax and no tool it doesn't have.
-    let system = script.requests_of("practice")[0]["messages"][0]["content"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(
-        !system.contains("{{") && !system.contains("workspace_write"),
-        "{system}"
-    );
+    // A Practice session from before the coach (plain messages, no `start`
+    // op) opens, reads as legacy and takes no command; it is never
+    // read-only in the Learn sense.
+    let practice_id = format!("{}1", &ulid_like()[..25]);
+    std::fs::write(
+        dir.join(format!("{practice_id}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            json!({"op":"session","opId":"01J00000000000000000000010","at":"2026-01-01T00:00:00.000Z","id":practice_id,"mode":"practice","title":"old practice"}),
+            json!({"op":"message","opId":"01J00000000000000000000011","at":"2026-01-01T00:00:01.000Z","role":"user","content":"give me a problem"}),
+        ),
+    )
+    .unwrap();
     let practice = h
         .list_sessions()
         .unwrap()
@@ -878,8 +872,15 @@ async fn legacy_learn_sessions_are_read_only_and_practice_still_works() {
         .find(|s| s.mode == Mode::Practice)
         .unwrap();
     assert!(!practice.read_only);
-    // Learn turns never go through the Practice path.
-    assert!(h.send(None, Mode::Learn, "x", &mut |_| {}).await.is_err());
+    assert!(h.practice_state(&practice_id).unwrap().legacy);
+    let err = h
+        .practice_submit(&practice_id, "x", None, &[])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("before the coach"), "{err}");
+    // And a Learn session is not a Practice session.
+    assert!(h.practice_state(&id).is_err());
 }
 
 /// A merged or hand-edited file whose `phase` op is not the second line is

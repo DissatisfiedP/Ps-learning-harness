@@ -8,6 +8,7 @@ mod attachments;
 mod branches;
 mod config;
 pub mod events;
+pub mod exam;
 mod extraction;
 mod files;
 mod frontier;
@@ -20,6 +21,7 @@ mod mobile;
 mod models;
 mod pdf;
 pub mod plugins;
+pub mod practice;
 mod prompts;
 pub mod proposals;
 pub mod replay;
@@ -33,7 +35,7 @@ mod workspace;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -42,7 +44,7 @@ use providers::codex_oauth;
 use providers::workbuddy::{self, LoginStart};
 use providers::{
     stream_chat, ChatRequest, Client, ContentBlock, Credential, CredentialKind, Message,
-    ProviderError, ProviderId, Role, StopReason, StreamEvent, ToolSpec, Usage,
+    ProviderError, ProviderId, Role, StreamEvent, ToolSpec, Usage,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -60,6 +62,7 @@ pub use knowledge::{
 };
 pub use library::{ImportOptions, ImportProgress, ImportReport, LibrarySummary};
 pub use plugins::{PluginManifest, PluginSource};
+pub use practice::PracticeView;
 pub use prompts::{Composer, TemplateValues};
 pub use providers;
 pub use sessions::{
@@ -96,23 +99,6 @@ pub enum Error {
     /// The secure store refused a read or write; the message names it.
     #[error("{0}")]
     Secrets(String),
-}
-
-/// Streamed to the UI during a Practice turn (`send`/`retry`). Learn sessions
-/// use [`AgentEvent`]s through the event sink instead.
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ChatEvent<'a> {
-    /// First event when a new session was created.
-    Session {
-        session: &'a SessionSummary,
-    },
-    Text {
-        delta: &'a str,
-    },
-    Thinking {
-        delta: &'a str,
-    },
 }
 
 #[derive(Debug, Serialize)]
@@ -244,6 +230,9 @@ pub struct Harness {
     /// Held across a subscription refresh: a rotated refresh token is
     /// single-use, so a second caller waits and takes the first one's result.
     pub(crate) refresh_lock: tokio::sync::Mutex<()>,
+    /// Seconds added to the clock exam papers are timed on (see
+    /// [`Harness::skew_clock`]); 0 outside tests.
+    pub(crate) clock_skew_secs: AtomicI64,
 }
 
 impl Harness {
@@ -303,6 +292,7 @@ impl Harness {
             sync: Arc::new(sync::Sync::new(repo, config_dir, Arc::clone(&secrets))),
             secrets,
             refresh_lock: tokio::sync::Mutex::new(()),
+            clock_skew_secs: AtomicI64::new(0),
         })
         .inspect(|harness: &Self| {
             // Chips don't survive a restart, so neither do their staged images.
@@ -424,6 +414,9 @@ impl Harness {
     pub fn load_session(&self, id: &str) -> Result<Session, Error> {
         let mut session = self.store.load(id)?;
         self.apply_mobile_lock(&mut session);
+        if session.summary.mode == Mode::Practice {
+            practice::view::learner_session(&mut session);
+        }
         Ok(session)
     }
 
@@ -560,167 +553,11 @@ impl Harness {
         Ok(history)
     }
 
-    /// Practice mode: appends the learner's message (creating the session
-    /// when `session_id` is `None`) and streams the reply from
-    /// `prompts/practice.md`. Learn sessions run through the agent runtime
-    /// ([`Harness::start_teaching`] and friends).
-    pub async fn send(
-        &self,
-        session_id: Option<&str>,
-        mode: Mode,
-        text: &str,
-        on_event: &mut (dyn FnMut(ChatEvent<'_>) + Send),
-    ) -> Result<StoredMessage, Error> {
-        self.send_with(session_id, mode, text, &[], on_event).await
-    }
-
-    /// As [`send`], with attachments (W3).
-    pub async fn send_with(
-        &self,
-        session_id: Option<&str>,
-        mode: Mode,
-        text: &str,
-        attachments: &[Attachment],
-        on_event: &mut (dyn FnMut(ChatEvent<'_>) + Send),
-    ) -> Result<StoredMessage, Error> {
-        if mode != Mode::Practice {
-            return Err(Error::Invalid(
-                "Learn sessions run through the tutor; use start_teaching".into(),
-            ));
-        }
-        let text = text.trim();
-        if text.is_empty() {
-            return Err(Error::Invalid("message is empty".into()));
-        }
-        // Practice has no file tools: it takes images only (ui-design §7.3).
-        if attachments.iter().any(|a| a.kind != "image") {
-            return Err(Error::Invalid(
-                "Practice can't read files or folders; attach images only".into(),
-            ));
-        }
-        if !attachments.is_empty() && self.role_vision(ModelRole::Tutor) == Some(false) {
-            return Err(Error::Invalid(
-                "this model can't see images; send without them or choose another Tutor model"
-                    .into(),
-            ));
-        }
-        // Fail before writing anything if no model is usable.
-        self.model_choice()?;
-        let id = match session_id {
-            Some(id) => {
-                if self.store.load(id)?.summary.mode != Mode::Practice {
-                    return Err(Error::Invalid("this is not a Practice session".into()));
-                }
-                id.to_owned()
-            }
-            None => {
-                let summary = self.store.create(mode, text)?;
-                on_event(ChatEvent::Session { session: &summary });
-                summary.id
-            }
-        };
-        self.commit_attachments(attachments)?;
-        let mut message = sessions::new_message(Role::User, text.to_owned());
-        message.attachments = attachments.to_vec();
-        self.store.append(&id, &message)?;
-        self.reply(&id, on_event).await
-    }
-
-    /// Practice mode: re-runs the reply after a failed turn (last message
-    /// must be the learner's).
-    pub async fn retry(
-        &self,
-        session_id: &str,
-        on_event: &mut (dyn FnMut(ChatEvent<'_>) + Send),
-    ) -> Result<StoredMessage, Error> {
-        let session = self.store.load(session_id)?;
-        if session.summary.mode != Mode::Practice {
-            return Err(Error::Invalid(
-                "Learn sessions resume with resume_turn".into(),
-            ));
-        }
-        if session.messages.last().map(|m| m.role) != Some(Role::User) {
-            return Err(Error::Invalid("nothing to retry".into()));
-        }
-        self.reply(session_id, on_event).await
-    }
-
     /// Stops a running turn; the partial reply is kept as interrupted.
     pub fn cancel(&self, session_id: &str) {
         if let Some(stop) = lock(&self.running).remove(session_id) {
             let _ = stop.send(());
         }
-    }
-
-    async fn reply(
-        &self,
-        session_id: &str,
-        on_event: &mut (dyn FnMut(ChatEvent<'_>) + Send),
-    ) -> Result<StoredMessage, Error> {
-        let session = self.store.load(session_id)?;
-        let choice = self.model_choice()?;
-        let system = practice_prompt(&self.repo)?;
-        let history: Vec<Message> = replay::conversation_with(
-            &session.ops,
-            Some(&self.repo),
-            self.role_vision(ModelRole::Tutor) != Some(false),
-            false,
-        );
-        let req = ChatRequest {
-            model: &choice.model,
-            system: &system,
-            messages: &history,
-            max_tokens: self.max_tokens(choice.provider, &choice.model),
-            effort: choice.effort.as_deref(),
-            tools: &[],
-            cache_key: Some(session_id),
-        };
-
-        let (stop_tx, mut stop_rx) = oneshot::channel();
-        if lock(&self.running)
-            .insert(session_id.to_owned(), stop_tx)
-            .is_some()
-        {
-            return Err(Error::Invalid(
-                "a reply is already running in this session".into(),
-            ));
-        }
-        let mut text = String::new();
-        let mut thinking = String::new();
-        let mut on_delta = |ev: StreamEvent<'_>| match ev {
-            StreamEvent::Text(d) => {
-                text.push_str(d);
-                on_event(ChatEvent::Text { delta: d });
-            }
-            StreamEvent::Thinking(d) => {
-                thinking.push_str(d);
-                on_event(ChatEvent::Thinking { delta: d });
-            }
-        };
-        let outcome = tokio::select! {
-            r = self.stream_with_refresh(choice.provider, session_id, &req, &mut on_delta) => Some(r),
-            _ = &mut stop_rx => None,
-        };
-        lock(&self.running).remove(session_id);
-
-        let ending = match outcome {
-            Some(Ok(done)) => {
-                self.add_usage(ModelRole::Tutor, &done.usage);
-                match done.stop {
-                    StopReason::End | StopReason::ToolUse => None,
-                    StopReason::MaxTokens => Some(Ending::MaxTokens),
-                    StopReason::Refusal => Some(Ending::Refusal),
-                }
-            }
-            Some(Err(e)) => return Err(e),
-            None => Some(Ending::Interrupted),
-        };
-        let mut message = sessions::new_message(Role::Assistant, text);
-        message.thinking = thinking;
-        message.model = Some(format!("{}/{}", choice.provider.spec().name, choice.model));
-        message.ending = ending;
-        self.store.append(session_id, &message)?;
-        Ok(message)
     }
 
     /// WorkBuddy sessions are refreshed ahead of expiry and once more if the
@@ -1324,13 +1161,6 @@ pub(crate) fn sanitize_view_state(summary: &str) -> String {
         .collect::<String>()
         .trim()
         .to_owned()
-}
-
-/// The Practice prompt, rendered like every other prompt (unchanged until the
-/// coach is built). A learner override in `<repo>/prompts/practice.md` wins
-/// over the bundled text.
-fn practice_prompt(repo: &Path) -> Result<String, Error> {
-    Composer::new(repo).compose_practice()
 }
 
 /// A poisoned lock only means another command panicked mid-update of plain

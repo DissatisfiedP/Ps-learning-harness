@@ -557,6 +557,12 @@ impl LearnerModel {
         self.nodes.is_empty()
     }
 
+    /// A model of hand-built node states, for tests of what reads one.
+    #[cfg(test)]
+    pub(crate) fn for_tests(nodes: BTreeMap<String, NodeState>) -> Self {
+        Self { nodes }
+    }
+
     pub fn node(&self, id: &str) -> Option<&NodeState> {
         self.nodes.get(id)
     }

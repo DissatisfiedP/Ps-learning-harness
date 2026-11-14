@@ -6,7 +6,7 @@ Every agent prompt in the harness, how each prompt is assembled, which model rol
 - §4.21: research;
 - §4.22: model roles.
 
-**Status.** The tutor (measure, teach, close), the planner, the researcher job and compaction are live: `crates/harness/build.rs` bundles every file here, `src/prompts.rs` composes them as described below, and a file at `<repo>/prompts/<same relative path>` overrides the bundled copy. `practice.md` still drives Practice mode on its own and is deleted when the coach lands. The coach, the other jobs and the native base plugins are the target set (`docs/agent-system-plan.md`, "Not built yet"); the plugin packages that exist today are in `plugins/` (authoring spec: `docs/plugins.md`).
+**Status.** The tutor (measure, teach, close), the planner, the coach (stream, set and exam formats), the problem checker, the researcher job and compaction are live: `crates/harness/build.rs` bundles every file here, `src/prompts.rs` composes them as described below, and a file at `<repo>/prompts/<same relative path>` overrides the bundled copy. The old single-prompt `practice.md` is deleted. Exam mode is built (architecture §4.14): `planner/exam.md` makes the planner write `weight` and `practiceOnly` per node, and the coach's exam format (`coach/base.md`, "Formats") writes timed papers with marks and mark schemes; the app, not a prompt, ranks the nodes daily (`crates/harness/src/exam.rs`), keeps the clock and hands the paper in at the deadline. The other jobs are the target set (`docs/agent-system-plan.md`, "Not built yet"); the plugin packages that exist today are in `plugins/` (authoring spec: `docs/plugins.md`).
 
 ## Principles
 
@@ -102,7 +102,7 @@ The learner picks a model per role in Settings. The harness maps agents to roles
 
 Its **messages** are the session conversation (the same messages the tutor sees, compacted the same way), followed by the request it is answering: the initial plan, a learner change request, or a `plan_change_request`.
 
-**Coach system prompt (target):** `shared/voice.md`, `accuracy.md`, `learner-signals.md`, `formatting.md`, then `coach/base.md` with `{{session_state}}`, then the fragments of the plugins active when the targets were taught. Practice mode today is `practice.md` alone, with no tools.
+**Coach system prompt:** `shared/voice.md`, `accuracy.md`, `learner-signals.md`, `formatting.md`, then `coach/base.md` with `{{session_state}}` (built by code, `practice/coach.rs`: format, targets with layers, R and open misconceptions, the app's `next:` requests with their hosts, host candidates, the open problem **with its committed solution** so compaction can't lose the answer key, held nodes, surfaces used, outcomes so far, the retest list, calibration), then `## Plugins you may use for this problem` with the `practice` fragments of the plugins active when the target was taught (tools scoped `practice` are offered too), then the libraries paragraph. Flags: `mermaid`, `calibration` (when the block exists). The **problem checker** gets `jobs/problem-checker.md` cut at `## Turn 2`: the first half is its system prompt, the second is posted after `audit_submit`, so the target's name is never in the first turn.
 
 **Jobs:** their own file, with `{{task}}` and the other placeholders filled from the job record.
 
@@ -114,7 +114,7 @@ Fragments wrapped in `{{#flag}} … {{/flag}}` are included only when the flag i
 
 | Flag | Set when | Design |
 |---|---|---|
-| `mermaid` | every tutor compose (set in `agent.rs` next to `workspace`): the UI renders Mermaid. The planner never sets it (its text has no Mermaid); Practice renders `practice.md` through the same composer with no flags, so its `{{#workspace}}` block is dropped (Practice has no workspace tools) | arch §4.24 |
+| `mermaid` | every tutor and coach compose: the UI renders Mermaid. The planner never sets it (its text has no Mermaid) | arch §4.24 |
 | `workspace` | per tutor compose: the session has an attached workspace folder (adds `shared/workspace.md`, fills `{{workspace_name}}`) | arch §4.25 |
 | `levels` | target levels are built | `docs/learning-system.md` §2 |
 | `starting_point` | the starting-point setting is built: `tutor/phases/measure.md` asks for it, and `planner/base.md` starts `unprobed`/`new` strands at the field's roots | §3 |
@@ -162,7 +162,7 @@ Tools are scoped by agent and phase. A tool that is absent is never described to
 | `hunt_send` | tutor: teach | `{ sectionId, question, lookAt: [{ kind: forum \| datasheet \| lecture \| video \| paper \| docs \| person, venue?, why }], bringBack: [string] }`; `huntId` is the call id. Refused unless the current section's hunt is available, enabled, not skipped, and has had no `huntSend` yet. Listed in every Teach turn; what the model is *told* about hunts arrives only with `hunt_active` |
 | `debrief_record` | tutor: teach | `{ huntId, claims: [{ claim, source?, verdict: correct \| partial \| wrong \| tip \| offroute, note, attribution?, scope? }] }`; refused without a `huntReturn` for that `huntId`; teaching questions in a hunted section are refused until it's recorded. Listed in every Teach turn, described with `hunt_active` |
 | `frontier_park` | tutor: all phases | `{ topic, why }` → appends `{ op: "frontier", opId, at, topic, why, from: { sessionId, huntId? } }` to `<repo>/frontier.jsonl` (created on first use). Listed in every phase; its instructions reach the model with `hunts` |
-| `problem_commit`, `problem_conclude` | coach | See `coach/base.md` |
+| `problem_commit`, `problem_conclude` | coach | See `coach/base.md`. In an exam paper `problem_commit` also requires `marks` (1–40) and the mark scheme as `rubric`, and `problem_conclude` requires `marksAwarded` (0 to the marks; a correct answer earns all of them, `dontknow` none) |
 | `audit_submit`, `necessity_submit` | problem checker | See `jobs/problem-checker.md` |
 | `web_search`, `page_fetch`, `source_outline`, `source_search`, `source_read`, `source_page_image`, `brief_submit` | researcher | See `jobs/researcher.md`; search via `crates/research-search` (Brave → Wikipedia); `page_fetch` returns a PDF's page-tagged text, and `source_page_image { path \| url, page }` attaches one scanned page's image (≤ 4 per run) |
 | `message_read` | graph builder | `{ from, to? }` (to defaults to the last) or `{ index }` → those messages of the prompt's numbered list, whole, each headed `<n>. <who>:`; a number outside the list is refused with the valid range. The log records "read messages <from>–<to>", not the text |
@@ -182,7 +182,7 @@ What the prompts depend on:
 - **Tools.** In Teach, the active plugins' tools scoped to `tutor` are added to the tool list with the manifest's names and JSON Schemas. A tool name starts with `<id>_` (dashes → underscores), e.g. `circuit_draw`. A plugin error comes back as a tool error starting `plugin error:`; result text is capped at 16 KiB. The call op records the plugin's id and `platforms`. On mobile, a call to a plugin known not to run there is refused with "`<id>` only runs on desktop; teach without it", and the session locks on that device after the turn unless the learner already chose "Continue here anyway" (`docs/sync-build.md`, "Sessions on mobile").
 - **Artifact handles.** A tool declared `artifact = true` stores its figure as an `artifact` op (with the plugin's `platforms`) and its result ends with one line: `artifact: <id> — place it once with ![a short description](artifact:<id>) next to the sentence that refers to it`. The model places it with that Markdown image syntax; `shared/formatting.md` carries the placement rule. An unplaced artifact is appended after the turn's message. A `question_ask` view is refused for an artifact whose plugin doesn't list this device's platform.
 
-Agent scoping today: `tutor` and `practice` are accepted in a manifest. Only the tutor has a tool loop; Practice mode is a single prompt with no tools, so `practice`-scoped tools are validated but never sent until the coach exists. `coach`, `figure-maker`, `demo-builder` and `problem-checker` are reserved: the loader rejects them until those agents are built. The planner never receives plugin tools except its own `plugin_search`.
+Agent scoping today: `tutor` and `practice` are accepted in a manifest; `practice`-scoped tools go to the coach. `coach`, `figure-maker`, `demo-builder` and `problem-checker` are reserved names: the loader rejects them (practice is the manifest's name for the coach). The planner never receives plugin tools except its own `plugin_search`.
 
 Limits the loader and planner enforce:
 
@@ -242,8 +242,8 @@ The learner's attachments are readable through `file_find` / `file_read`: home, 
 | `shared/workspace.md` | 122 | `tutor/modes/mechanism.md` | 460 |
 | `shared/library.md` | 250 | | |
 | `planner/base.md` | 2403 | `tutor/modes/perceptual.md` | 370 |
-| `planner/exam.md` | 351 | `tutor/modes/procedure.md` | 483 |
-| `coach/base.md` | 1676 | `practice.md` | 326 |
+| `planner/exam.md` | 510 | `tutor/modes/procedure.md` | 483 |
+| `coach/base.md` | 1940 | | |
 | `compaction.md` | 288 | `jobs/researcher.md` | 1021 |
 | `jobs/graph-builder.md` | 1902 | `jobs/topic-splitter.md` | 198 |
 | `jobs/problem-checker.md` | 244 | `jobs/demo-builder.md` | 367 (302 + the moved demo brief rules) |
@@ -260,3 +260,5 @@ Raised on 2026-11-11 for branch sessions (architecture §4.26): `planner/base.md
 Raised on 2026-11-11 for learner comments: `tutor/base.md` (a comment or set-aside question comes first; `preference_add` makes how-to-teach instructions standing orders).
 
 Added on 2026-11-11 for reference libraries (architecture §4.27): `shared/library.md` at 250 (239 today; the libraries list itself is generated and not counted).
+
+Raised on 2026-11-14 for exam mode (architecture §4.14): `planner/exam.md` 351 → 510 (how to weight nodes for the app's daily ranking, `practiceOnly` as a starting call, papers are not sections), `coach/base.md` 1676 → 1940 (the exam format: `marks`, the mark scheme as `rubric`, `marksAwarded`, marking by the library's scheme).

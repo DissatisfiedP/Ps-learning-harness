@@ -86,8 +86,8 @@ Parsed with the `toml` crate and validated strictly. **Unknown keys are errors**
 Tools and fragments are scoped per agent:
 
 - `tutor` — the live teaching agent. Plugin tools reach it through the normal tool list, filtered by the section's active plugins.
-- `practice` — accepted by the manifest, but the current Practice mode is a single prompt with no tool loop (`crates/harness/src/lib.rs`, `send`/`reply` pass `tools: &[]`). A `practice`-scoped tool is therefore catalogued and validated but never sent to a model until the Coach lands.
-- `coach`, `figure-maker`, `demo-builder`, `problem-checker` are **reserved**: the manifest documents the future names, the loader rejects them until those agents exist.
+- `practice` — accepted by the manifest and live: the coach (`crates/harness/src/practice/coach.rs`) receives the `practice`-scoped tools and `prompts/practice.md` fragments of the plugins that were active when a problem's target was taught (the scheduler records them in the problem's plan: at most three, installed, enabled and on this platform).
+- `coach`, `figure-maker`, `demo-builder`, `problem-checker` stay **reserved** names: the loader rejects them (`practice` is the manifest's name for the coach; the checker takes no plugin tools).
 
 ## 3. Entry module (`src/main.luau`)
 

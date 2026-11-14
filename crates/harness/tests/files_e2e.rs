@@ -134,7 +134,7 @@ async fn attachments_reach_the_model_and_grant_only_the_picked_outside_file() {
 }
 
 /// Practice has no file tools: a file reference is refused before anything
-/// is written, and a message always needs text.
+/// is written, and a submission always needs text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn practice_takes_images_only() {
     let root = root();
@@ -147,25 +147,13 @@ async fn practice_takes_images_only() {
     let image = h.stage_image(PNG, Some("dot.png")).unwrap();
 
     let err = h
-        .send_with(
-            None,
-            harness::Mode::Practice,
-            "check this",
-            &[file],
-            &mut |_| {},
-        )
+        .practice_submit("none", "check this", None, &[file])
         .await
         .unwrap_err()
         .to_string();
     assert!(err.contains("images only"), "{err}");
     let err = h
-        .send_with(
-            None,
-            harness::Mode::Practice,
-            "  ",
-            std::slice::from_ref(&image),
-            &mut |_| {},
-        )
+        .practice_submit("none", "  ", None, &[])
         .await
         .unwrap_err()
         .to_string();

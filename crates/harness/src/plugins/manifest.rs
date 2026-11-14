@@ -140,6 +140,11 @@ pub fn core_tool_names() -> std::collections::BTreeSet<String> {
     }
     names.extend(tools::planner_tools().into_iter().map(|t| t.name));
     names.extend(tools::researcher_tools().into_iter().map(|t| t.name));
+    names.extend(tools::coach_tools().into_iter().map(|t| t.name));
+    names.extend([
+        tools::checker_audit_tool().name,
+        tools::checker_necessity_tool().name,
+    ]);
     names
 }
 

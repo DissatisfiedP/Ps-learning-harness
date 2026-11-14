@@ -564,6 +564,7 @@ pub enum Op {
     ViewState(ViewStateOp),
     MobileUnlock(MobileUnlockOp),
     Branch(BranchOp),
+    Practice(crate::practice::PracticeOp),
 }
 
 impl Op {
@@ -597,6 +598,7 @@ impl Op {
             Op::ViewState(o) => &o.at,
             Op::MobileUnlock(o) => &o.at,
             Op::Branch(o) => &o.at,
+            Op::Practice(o) => &o.at,
         }
     }
 
@@ -630,6 +632,7 @@ impl Op {
             Op::ViewState(o) => &o.op_id,
             Op::MobileUnlock(o) => &o.op_id,
             Op::Branch(o) => &o.op_id,
+            Op::Practice(o) => &o.op_id,
         }
     }
 
@@ -815,6 +818,7 @@ impl Store {
         self.existing_path(id).is_ok()
     }
 
+    #[cfg(test)]
     pub fn append(&self, id: &str, message: &StoredMessage) -> Result<(), Error> {
         self.append_op(id, &Op::Message(message.clone()))
     }

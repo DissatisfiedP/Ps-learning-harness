@@ -331,10 +331,10 @@ pub fn tutor_tools(phase: Phase, workspace: bool) -> Vec<ToolSpec> {
                     } },
                     "exam": { "type": "object", "properties": {
                         "name": { "type": "string" },
-                        "date": { "type": "string" },
+                        "date": { "type": "string", "description": "The exam date, YYYY-MM-DD: the exam plan counts the days left from it." },
                         "syllabus": { "type": "string" },
                         "pastPapers": { "type": "string" },
-                        "weights": { "type": "string" }
+                        "weights": { "type": "string", "description": "Topic weights, one topic per line as `topic: 30%` (or `topic: 0.3`). The exam plan uses them for the ideas the planner did not weight." }
                     } },
                     "materials": strings(),
                     "outOfScope": strings(),
@@ -422,6 +422,109 @@ static CORE_TUTOR_TOOLS: std::sync::LazyLock<HashSet<String>> = std::sync::LazyL
 /// can only be asked about a name that isn't one of these.
 pub(crate) fn is_core_tutor_tool(name: &str) -> bool {
     CORE_TUTOR_TOOLS.contains(name)
+}
+
+/// The coach's tools (`prompts/coach/base.md`; `problem_commit`'s fields are
+/// the ones that prompt lists, with `problemId` for a set). Plugin tools
+/// scoped `practice` are added by the caller.
+pub fn coach_tools() -> Vec<ToolSpec> {
+    let mut t = vec![
+        tool(
+            "problem_commit",
+            "Commit the problem you wrote. The app checks it (a separate checker reads only the statement; your check script runs); only then does the learner see the statement. A refusal comes back here, privately: revise the problem or write a new one. In a set, give the `problemId` of the plan you are fulfilling.",
+            json!({
+                "problemId": { "type": "string", "description": "A set only: the id of the problem in the app's request that this one fulfils." },
+                "statement": { "type": "string", "description": "What the learner reads. Never names the target (except at cue distance 0)." },
+                "targets": { "type": "array", "items": { "type": "string" }, "description": "Graph node ids the problem exercises; must include the requested target." },
+                "hosts": { "type": "array", "items": { "type": "string" }, "description": "Graph node ids whose world the problem is set in." },
+                "layer": { "type": "string", "enum": ["recall", "discrimination", "composition"] },
+                "level": { "type": "string", "enum": ["explain", "use", "analyze", "design"] },
+                "cueDistance": { "type": "integer", "minimum": 0, "maximum": 3 },
+                "isDistractor": { "type": "boolean" },
+                "type": { "type": "string", "enum": ["standard", "critique", "design"] },
+                "solution": { "type": "array", "items": { "type": "object", "properties": {
+                    "move": { "type": "string" },
+                    "usesNode": { "type": "string" },
+                    "decisionPoint": { "type": "boolean" }
+                }, "required": ["move", "decisionPoint"] } },
+                "finalAnswer": { "type": "string" },
+                "acceptableVariants": strings(),
+                "rubric": { "type": "array", "description": "Required for design problems and for open answers with no single final value.", "items": { "type": "object", "properties": {
+                    "id": { "type": "string" },
+                    "criterion": { "type": "string" },
+                    "essential": { "type": "boolean" }
+                }, "required": ["id", "criterion", "essential"] } },
+                "check": { "type": "object", "description": "A script that computes the final answer on its own and prints it on its last line.", "properties": {
+                    "language": { "type": "string", "enum": ["python"] },
+                    "code": { "type": "string" }
+                }, "required": ["language", "code"] },
+                "surface": { "type": "string", "description": "The world the problem is set in, in a few words; a retest uses another." },
+                "marks": { "type": "integer", "minimum": 1, "maximum": 40, "description": "Exam paper only (required there): what the problem is worth, as on a past paper. The `rubric` is then its mark scheme." }
+            }),
+            &[
+                "statement",
+                "targets",
+                "layer",
+                "level",
+                "cueDistance",
+                "isDistractor",
+                "solution",
+                "finalAnswer",
+                "surface",
+            ],
+        ),
+        tool(
+            "problem_conclude",
+            "End the current problem. Refused before the learner has tried (unless they dismissed it), and when `hintRung` doesn't report the hints they asked for. The app then reveals your committed solution to the learner. In a set review, give the `problemId`.",
+            json!({
+                "problemId": { "type": "string", "description": "A set review only." },
+                "verdict": { "type": "string", "enum": ["correct", "partial", "wrong", "dontknow", "dismissed"] },
+                "hintRung": { "type": ["integer", "null"], "minimum": 0, "maximum": 5, "description": "The highest hint rung (R0–R5) you gave on this problem; null when you gave none." },
+                "missClass": { "type": "string", "enum": ["cue", "discrimination", "execution", "careless", "structural"], "description": "Required for every miss (wrong, partial, dontknow)." },
+                "misconception": { "type": "string", "description": "Required with a structural miss: a short note (at most 200 characters) of what the learner believes wrongly." },
+                "note": { "type": "string", "description": "Your private diagnosis, kept in the session." },
+                "marksAwarded": { "type": "integer", "minimum": 0, "description": "Exam paper only: the marks the answer earns under the mark scheme, at most the problem's `marks`. A correct answer earns all of them." }
+            }),
+            &["verdict", "hintRung", "note"],
+        ),
+        research_request(),
+    ];
+    t.extend(file_tools());
+    t.extend(library_tools());
+    t.extend(graph_read_tools());
+    t
+}
+
+/// The problem checker's turn-1 tool.
+pub fn checker_audit_tool() -> ToolSpec {
+    tool(
+        "audit_submit",
+        "Submit what the wording of the problem suggests, before you are told what it is meant to exercise.",
+        json!({
+            "techniques": { "type": "array", "maxItems": 5, "items": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "The technique, named the way a course would." },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "cuedBy": { "type": "string", "description": "The words in the statement that suggest it." }
+            }, "required": ["name", "confidence", "cuedBy"] } },
+            "firstMove": { "type": "string" },
+            "obviousAfter": { "type": "string", "enum": ["first sentence", "whole statement", "partial work", "not obvious"] }
+        }),
+        &["techniques", "firstMove", "obviousAfter"],
+    )
+}
+
+/// The problem checker's turn-2 tool.
+pub fn checker_necessity_tool() -> ToolSpec {
+    tool(
+        "necessity_submit",
+        "Submit whether the problem can be solved without the target, and how.",
+        json!({
+            "solvedWithout": { "type": "boolean" },
+            "route": { "type": "string", "description": "How you solved it without the target, or why every route needs it." },
+            "answer": { "type": "string" }
+        }),
+        &["solvedWithout", "route"],
+    )
 }
 
 pub fn planner_tools() -> Vec<ToolSpec> {

@@ -219,14 +219,26 @@ impl Composer {
         render(&self.load("compaction.md")?, values, flags)
     }
 
-    /// The Practice system prompt. Practice has no tools, so no flag is set
-    /// (its `{{#workspace}}` line is for when `workspace_write` reaches it).
-    pub fn compose_practice(&self) -> Result<String, Error> {
-        render(
-            &self.load("practice.md")?,
-            &TemplateValues::new(),
-            &HashSet::new(),
-        )
+    /// The coach's system prompt: the shared fragments it needs, then
+    /// `coach/base.md` with `{{session_state}}` (`practice::coach`). The
+    /// active plugins' `practice` fragments and the libraries paragraph are
+    /// appended by the caller.
+    pub fn compose_coach(
+        &self,
+        values: &TemplateValues,
+        flags: &HashSet<String>,
+    ) -> Result<String, Error> {
+        let mut parts = Vec::new();
+        for p in [
+            "shared/voice.md",
+            "shared/accuracy.md",
+            "shared/learner-signals.md",
+            "shared/formatting.md",
+            "coach/base.md",
+        ] {
+            parts.push(self.load(p)?);
+        }
+        render(&parts.join("\n\n"), values, flags)
     }
 
     /// Compact Markdown view of the pinned session state (architecture §4.15).
@@ -806,7 +818,9 @@ mod tests {
             "compaction".to_owned(),
             c.compose_compaction(&cv, f).unwrap(),
         ));
-        out.push(("practice".to_owned(), c.compose_practice().unwrap()));
+        let mut coach = TemplateValues::new();
+        coach.set("session_state", "- Format: stream\n");
+        out.push(("coach".to_owned(), c.compose_coach(&coach, f).unwrap()));
         out
     }
 
@@ -874,7 +888,9 @@ mod tests {
         assert!(text("jobs/researcher").contains("Research"));
         assert!(!text("jobs/researcher").contains("Where the field lives"));
         assert!(text("compaction").contains("earlier turns"));
-        assert!(text("practice").contains("practice coach"));
+        let coach = text("coach");
+        assert!(coach.contains("# Practice coach") && coach.contains("- Format: stream"));
+        assert!(coach.contains("problem_commit"));
     }
 
     /// The other half of §9: with every learning-system flag on, nothing is

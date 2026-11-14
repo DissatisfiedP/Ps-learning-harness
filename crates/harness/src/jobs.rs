@@ -338,6 +338,14 @@ impl Harness {
             tracing::warn!("delivery failed: {e}");
             return;
         }
+        // A practice session wakes its coach, not the tutor.
+        let practice = crate::practice::PracticeState::replay(&ops);
+        if practice.started {
+            if !practice.ended {
+                let _ = self.coach_turn(sid).await;
+            }
+            return;
+        }
         if matches!(state.phase, Phase::Measure | Phase::Teach | Phase::Close) && !state.ended {
             // Errors are reported to the UI by the turn's TurnEnd event.
             let _ = self.tutor_turn(sid).await;
@@ -1517,7 +1525,11 @@ fn message_list(items: &[replay::TranscriptItem]) -> String {
         .join("\n")
 }
 
-fn assistant_message(text: &str, native: &[ContentBlock], calls: &[ToolCall]) -> Message {
+pub(crate) fn assistant_message(
+    text: &str,
+    native: &[ContentBlock],
+    calls: &[ToolCall],
+) -> Message {
     let mut content: Vec<ContentBlock> = native.to_vec();
     if !text.is_empty() {
         content.push(ContentBlock::Text {

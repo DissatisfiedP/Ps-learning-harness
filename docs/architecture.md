@@ -575,6 +575,8 @@ Practice formats:
 | Imported bank only (textbook, past papers) | Authentic, exam-aligned | Finite; can't target a specific weak node; usually labeled by chapter |
 | **Constrained pipeline + imported-first** (chosen) | Disguised targets, verified answers, exam-aligned when papers exist | 3–5 model calls per problem; needs the cost measured |
 
+**Built (2026-11-14, stream, set and exam formats; `crates/harness/src/practice/`).** The pipeline above runs as code around the coach: the scheduler picks T, layer, level, cue distance, hosts and distractors (`scheduler.rs`); `problem_commit` is validated (`commit.rs`); the answer script runs first (step 7, `answer.rs`: `cas` with python3 + SymPy, plain python3 when SymPy is missing, skipped and said so when neither runs); then the checker job runs its two turns in one conversation (steps 5–6, `checker.rs`: named on sight caps the cue at 1; solvable without T rejects; a distractor that needs T rejects). A rejection goes back to the coach as a private tool result. The **exam sim** is built as a set the app times (§4.14, `paper.rs`): papers come from the exam goal's session (`start_exam`), the targets are the best-ranked practice-mode nodes of its plan, every problem carries `marks` and its mark scheme as the rubric, there are no hints, and the clock, the deadline hand-in and the marking gate are code. Not built: imported-first selection beyond the coach's `library_*` tools. The backend contracts are `docs/ui-design.md` §11b and §11c.
+
 ### 4.12 Question formats and grading
 
 **Chosen:**
@@ -599,6 +601,8 @@ Grader order of preference (most objective first):
 | **Per-kind grader + commit first** (chosen) | Honest verdicts; objective where possible | More machinery per mode |
 
 Multiple-choice construction rule (kept from LH, own words): write the correct option first, then mutate it into each distractor so all options share skeleton, length and register; each distractor is the answer a specific misconception would give.
+
+**Built (2026-11-14).** Practice problems are graded by the coach against the committed key or rubric; code gates the conclusion (a learner attempt first, the hints the learner asked for reported, every miss classed, a structural miss with its misconception) and writes the `learner::Outcome` itself. Graders recorded: `committed` (answer key) and `rubric` (design and open answers).
 
 ### 4.13 Scheduling
 
@@ -627,6 +631,8 @@ Mapping a verdict to an FSRS rating:
 | SM-2 (classic Anki) | Proven | Older model; FSRS was built to improve on it (Ye et al. 2022) |
 | LLM decides when to review | Contextual | Unreliable, uncalibrated, costs calls |
 | **FSRS on outcomes, reviews as fresh problems** (chosen) | Models forgetting; reviews also train transfer | Parameters were fit on flashcards; varied problems may behave differently **[inference]**. Mitigation: refit on the learner's own log once there is enough data (FSRS supports optimizing on review history) |
+
+**Built (2026-11-14).** Every concluded practice problem appends its outcome with the rating inputs (verdict, hint rung, confidence, duration from pose to the last submission, 0 in a set) and updates every target. The next target comes from the scheduler (class order: open misconception, due, weak, undemonstrated layer, new; load-bearing first, then lowest R; a target waits a turn after use and two misses in a row park it). The retest list (misses, R3+ hints, dismissed) is kept by `practice::state`; each original is retested once, on a fresh surface, when the learner ends the session.
 
 ### 4.14 Planning and exam mode
 
@@ -658,6 +664,14 @@ Priority per node, recomputed daily:
 | Fixed syllabus order | Matches the course | Re-teaches what's known; ignores weakness |
 | Learner-authored plan | Control | Logistics burden |
 | **Minimal tree (learning) / weighted coverage (exam)** (chosen) | Fits each goal | Two planners to maintain |
+
+**Built (2026-11-14; `crates/harness/src/exam.rs`, `practice/paper.rs`; contract `docs/ui-design.md` §11c).**
+- **Coverage.** The planner writes `weight` (0–1) and `practiceOnly` per plan node (`plan_write`, `planner/exam.md`). A node without a weight takes the weight a line of the goal's `exam.weights` gives it (`topic: 30%`, parsed by `exam::parse_weights`), else 0.5. A plan node maps to the graph node named by its `graphNode`, else the one with its id, else the live node with its title or alias; plan nodes the graph does not hold are listed, not ranked.
+- **Priority.** `priority = weight × (1 − R) × (layerGap + 1)` exactly as above, from `learner::LearnerModel` (R is retrievability now, 0 without evidence; `layerGap` counts the layers not shown, 3 without evidence), recomputed on every `exam_plan` call (the Tauri command; `Harness::exam_plan`), so it moves daily with R. **Teaching is reserved for** nodes with an open misconception or two or more recorded structural misses; all others are `practice`. The day's sitting is teaching when such a node ranks in the top three, a timed paper in the last 7 days when none was sat in the last 3, else practice on the top three. The mix divides the days left (one sitting a day) in proportion to the priority held by nodes that need teaching.
+- **Simulation.** The plan returns the weight-averaged retrievability now and on the exam day (each node's FSRS curve carried to the date with no more practice), per topic and overall, and the five nodes whose one clean review today raises the exam-day figure most. It is labelled an **estimate** in the data (`label`, `note`): FSRS's parameters were fit on flashcards, not exam answers, and an exam answer needs more than recall **[inference]**; a node with no answers counts as 0.
+- **Papers.** `start_exam({ goalSessionId, budgetMin })` ranks the plan and writes a set (`format: exam`) with one problem per target, cycling through the best-ranked practice-mode nodes; problems are past-paper style (cue distance 1, no distractors, no hosts), each with `marks` and its mark scheme as the rubric. The coach is told which past papers the reference libraries hold (`question-bank` files) and which have a mark scheme (a file of the same library whose name adds a mark-scheme word), reads them with `library_read` and marks by the library's scheme when there is one. `problem_conclude` carries `marksAwarded`, gated by code against the verdict.
+- **The clock is the app's.** It starts when the last problem is posed (an `examOpen` op with the deadline); the UI saves the learner's draft (`practice_exam_save`); at the deadline plus 2 s of grace the app's timer hands in the saved draft (the same hand-in runs lazily when a late command, or `practice_resume` after a restart, finds the deadline passed), and answers sent after that are refused. Papers refuse hints, skipping, next and single answers. Outcomes are written as in a set with `format: "exam"` and `durationSec` = the paper's elapsed seconds ÷ its problems; ratings, layers and misconceptions follow as for any outcome.
+- **Not built.** Importing a past paper's questions as problems (the coach reads the papers for style and marks; its problems are its own), a per-question mapping from paper questions to nodes, refitting FSRS on exam outcomes, and a timer that survives an app restart (the deadline is enforced on the next command or `practice_resume` instead).
 
 ### 4.15 Context management (what the model sees each turn)
 
