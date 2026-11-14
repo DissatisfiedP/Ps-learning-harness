@@ -22,6 +22,7 @@ pub mod plugins;
 mod prompts;
 pub mod proposals;
 pub mod replay;
+pub mod secrets;
 mod sessions;
 pub mod state;
 pub mod sync;
@@ -91,6 +92,9 @@ pub enum Error {
     Prompt(String),
     #[error("{0}")]
     Sync(String),
+    /// The secure store refused a read or write; the message names it.
+    #[error("{0}")]
+    Secrets(String),
 }
 
 /// Streamed to the UI during a Practice turn (`send`/`retry`). Learn sessions
@@ -220,12 +224,32 @@ pub struct Harness {
     pub(crate) session_locks: Mutex<Option<mobile::LockCache>>,
     /// Git sync of the data repo (device-local settings + one run at a time).
     pub(crate) sync: Arc<sync::Sync>,
+    /// Keys, sign-in sessions and the sync token (`secrets.rs`).
+    pub(crate) secrets: Arc<secrets::SecretStore>,
+    /// Held across a subscription refresh: a rotated refresh token is
+    /// single-use, so a second caller waits and takes the first one's result.
+    pub(crate) refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl Harness {
     /// `repo` is the synced data repo; `config_dir` is device-local. Cheap:
-    /// no session is read and no prompt composed until first use.
+    /// no session is read and no prompt composed until first use. Secrets go
+    /// to the platform's secure store ([`secrets::SecretStore::open`]).
     pub fn open(repo: &Path, config_dir: &Path) -> Result<Self, Error> {
+        Self::open_with_secrets(
+            repo,
+            config_dir,
+            Arc::new(secrets::SecretStore::open(config_dir)),
+        )
+    }
+
+    /// [`Self::open`] with a given secret store (tests pass
+    /// [`secrets::SecretStore::memory`]).
+    pub fn open_with_secrets(
+        repo: &Path,
+        config_dir: &Path,
+        secrets: Arc<secrets::SecretStore>,
+    ) -> Result<Self, Error> {
         std::fs::create_dir_all(repo)?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(20))
@@ -235,7 +259,7 @@ impl Harness {
             repo: repo.to_owned(),
             client,
             store: sessions::Store::new(repo, config_dir),
-            config: Mutex::new(config::Config::load(config_dir)?),
+            config: Mutex::new(config::Config::load(config_dir, Arc::clone(&secrets))?),
             running: Mutex::new(HashMap::new()),
             login_cancelled: AtomicBool::new(false),
             pending_claude_login: Mutex::new(None),
@@ -259,7 +283,9 @@ impl Harness {
             sink: Arc::new(Mutex::new(None)),
             view_states: Mutex::new(HashMap::new()),
             session_locks: Mutex::new(None),
-            sync: Arc::new(sync::Sync::new(repo, config_dir)),
+            sync: Arc::new(sync::Sync::new(repo, config_dir, Arc::clone(&secrets))),
+            secrets,
+            refresh_lock: tokio::sync::Mutex::new(()),
         })
         .inspect(|harness: &Self| {
             // Chips don't survive a restart, so neither do their staged images.
@@ -757,22 +783,26 @@ impl Harness {
         if key.is_empty() {
             return Err(Error::Invalid("key is empty".into()));
         }
-        let mut config = lock(&self.config);
-        config.credentials.insert(
+        lock(&self.config).set_credential(
             provider,
             Credential::ApiKey {
                 key: key.to_owned(),
             },
-        );
-        config.save_credentials()
+        )
     }
 
     pub fn remove_credential(&self, provider: ProviderId) -> Result<(), Error> {
-        let mut config = lock(&self.config);
-        if config.credentials.remove(&provider).is_some() {
-            config.save_credentials()?;
-        }
-        Ok(())
+        lock(&self.config).remove_credential(provider)
+    }
+
+    /// Where keys and tokens are kept, for Settings.
+    pub fn secret_storage(&self) -> secrets::StorageStatus {
+        self.secrets.status()
+    }
+
+    /// The credential saved for `provider` (not the environment's).
+    pub fn saved_credential(&self, provider: ProviderId) -> Option<Credential> {
+        lock(&self.config).credentials.get(&provider).cloned()
     }
 
     pub fn set_base_url(&self, provider: ProviderId, url: Option<&str>) -> Result<(), Error> {
@@ -912,11 +942,8 @@ impl Harness {
                 workbuddy::poll_login(&self.client, &base, state, unix_now()).await?
             {
                 let account = session.account.clone();
-                let mut config = lock(&self.config);
-                config
-                    .credentials
-                    .insert(ProviderId::Workbuddy, Credential::Workbuddy(session));
-                config.save_credentials()?;
+                lock(&self.config)
+                    .set_credential(ProviderId::Workbuddy, Credential::Workbuddy(session))?;
                 return Ok(account);
             }
         }
@@ -945,11 +972,8 @@ impl Harness {
             .ok_or_else(|| Error::Invalid("start sign-in again".into()))?;
         let session = pending.exchange(&self.client, pasted).await?;
         let account = session.account.clone();
-        let mut config = lock(&self.config);
-        config
-            .credentials
-            .insert(ProviderId::ClaudeCode, Credential::ClaudeCode(session));
-        config.save_credentials()?;
+        lock(&self.config)
+            .set_credential(ProviderId::ClaudeCode, Credential::ClaudeCode(session))?;
         Ok(account)
     }
 
@@ -979,11 +1003,7 @@ impl Harness {
             .finish(&self.client, &self.codex_login_cancelled)
             .await?;
         let account = session.account.clone();
-        let mut config = lock(&self.config);
-        config
-            .credentials
-            .insert(ProviderId::OpenaiCodex, Credential::Codex(session));
-        config.save_credentials()?;
+        lock(&self.config).set_credential(ProviderId::OpenaiCodex, Credential::Codex(session))?;
         Ok(account)
     }
 
@@ -1173,45 +1193,64 @@ impl Harness {
             .unwrap_or_else(|| workbuddy::HOST.to_owned())
     }
 
+    /// The saved credential, if it is no longer `stale`: another caller
+    /// refreshed it (or the learner signed in again) while this one waited.
+    fn replaced(&self, provider: ProviderId, stale: &Credential) -> Option<Credential> {
+        lock(&self.config)
+            .credentials
+            .get(&provider)
+            .filter(|saved| *saved != stale)
+            .cloned()
+    }
+
+    /// Save a refreshed grant. The old refresh token is spent, so a store
+    /// that refuses the write must not lose the new one: it is kept for this
+    /// run and the store's status tells Settings why it was not saved.
+    fn keep_refreshed(&self, provider: ProviderId, credential: Credential) -> Credential {
+        let mut config = lock(&self.config);
+        if let Err(e) = config.set_credential(provider, credential.clone()) {
+            tracing::warn!("a refreshed sign-in could not be saved: {e}");
+            config.credentials.insert(provider, credential.clone());
+        }
+        credential
+    }
+
     async fn refresh_workbuddy(&self, session: &workbuddy::Session) -> Result<Credential, Error> {
+        let _refreshing = self.refresh_lock.lock().await;
+        let stale = Credential::Workbuddy(session.clone());
+        if let Some(current) = self.replaced(ProviderId::Workbuddy, &stale) {
+            return Ok(current);
+        }
         let base = self.workbuddy_base();
         let mut fresh = workbuddy::refresh(&self.client, &base, session, unix_now()).await?;
         if fresh.account.is_none() {
             fresh.account.clone_from(&session.account);
         }
-        let credential = Credential::Workbuddy(fresh);
-        let mut config = lock(&self.config);
-        config
-            .credentials
-            .insert(ProviderId::Workbuddy, credential.clone());
-        config.save_credentials()?;
-        Ok(credential)
+        Ok(self.keep_refreshed(ProviderId::Workbuddy, Credential::Workbuddy(fresh)))
     }
 
     /// Rotate a Claude subscription grant and persist it. A failed refresh
     /// surfaces `Unauthorized` so the UI can ask the learner to sign in again.
     async fn refresh_claude(&self, session: &claude_oauth::Session) -> Result<Credential, Error> {
+        let _refreshing = self.refresh_lock.lock().await;
+        let stale = Credential::ClaudeCode(session.clone());
+        if let Some(current) = self.replaced(ProviderId::ClaudeCode, &stale) {
+            return Ok(current);
+        }
         let fresh = claude_oauth::refresh(&self.client, session, unix_now()).await?;
-        let credential = Credential::ClaudeCode(fresh);
-        let mut config = lock(&self.config);
-        config
-            .credentials
-            .insert(ProviderId::ClaudeCode, credential.clone());
-        config.save_credentials()?;
-        Ok(credential)
+        Ok(self.keep_refreshed(ProviderId::ClaudeCode, Credential::ClaudeCode(fresh)))
     }
 
     /// Rotate a ChatGPT grant and persist it (including a rotated refresh
     /// token). A failed refresh surfaces `Unauthorized` ("sign in again").
     async fn refresh_codex(&self, session: &codex_oauth::Session) -> Result<Credential, Error> {
+        let _refreshing = self.refresh_lock.lock().await;
+        let stale = Credential::Codex(session.clone());
+        if let Some(current) = self.replaced(ProviderId::OpenaiCodex, &stale) {
+            return Ok(current);
+        }
         let fresh = codex_oauth::refresh(&self.client, session, unix_now()).await?;
-        let credential = Credential::Codex(fresh);
-        let mut config = lock(&self.config);
-        config
-            .credentials
-            .insert(ProviderId::OpenaiCodex, credential.clone());
-        config.save_credentials()?;
-        Ok(credential)
+        Ok(self.keep_refreshed(ProviderId::OpenaiCodex, Credential::Codex(fresh)))
     }
 }
 

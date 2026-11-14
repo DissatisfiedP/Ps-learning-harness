@@ -28,6 +28,25 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # Sync (docs/sync-build.md): libgit2 from source so no system libgit2 is needed;
 # HTTPS goes through OpenSSL, and SSH is out of scope.
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https"] }
+# Secrets (secrets.rs): one keyring-core facade over each platform's own
+# secure store. Linux and the BSDs talk to the Secret Service over D-Bus
+# (pure Rust zbus, already in the build through the shell); its session
+# encryption uses RustCrypto, so no libsecret or OpenSSL is linked.
+keyring-core = "1"
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-async-io-crypto-rust"] }
+
+# macOS: the login keychain (the app is not sandboxed); iOS has only the
+# data-protection keychain.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["protected"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1"
 
 # git2's HTTPS transport pulls in openssl-sys on every Unix. Android and iOS
 # have no system OpenSSL to link, and on macOS the one found is Homebrew's,
@@ -44,6 +63,10 @@ openssl-sys = { version = "0.9", features = ["vendored"] }
 [target.'cfg(target_os = "android")'.dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+# Secrets: SharedPreferences encrypted with an AES key that lives in the
+# Android Keystore. It reaches the app's Context through ndk-context, which
+# Tauri's runtime (tao) initialises before the app's code runs.
+android-native-keyring-store = "1"
 
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

@@ -477,14 +477,16 @@ async fn a_pending_question_survives_restart_and_resumes() {
     let script = Arc::new(Script::default());
     let base = serve(Arc::clone(&script), Arc::new(Semaphore::new(0))).await;
     let (repo, config) = temp_dirs("restart");
+    // One store for both runs: a real one persists the saved key.
+    let secrets = Arc::new(harness::secrets::SecretStore::memory());
     let id = {
-        let h = harness(&repo, &config, &base).await;
+        let h = harness_with_secrets(&repo, &config, &base, Arc::clone(&secrets)).await;
         script.push("tutor", Reply::Calls("Before we start:", vec![("c1", "choice_ask", json!({
             "question": "Which is closest?", "options": ["DC circuits", "An exam"], "recommended": "DC circuits" }))]));
         h.start_teaching("circuits").await.unwrap().id
     };
     // A new process: nothing in memory, the pending call comes from the ops.
-    let h = Arc::new(Harness::open(&repo, &config).unwrap());
+    let h = Arc::new(Harness::open_with_secrets(&repo, &config, secrets).unwrap());
     let st = h.session_state(&id).unwrap();
     assert_eq!(st.pending_call.as_ref().unwrap().name, "choice_ask");
     assert!(

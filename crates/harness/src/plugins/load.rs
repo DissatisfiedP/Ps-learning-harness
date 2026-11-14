@@ -691,7 +691,14 @@ mod registry_tests {
     #[test]
     fn the_default_registry_is_listed_until_removed_and_returns_when_re_added() {
         let dir = std::env::temp_dir().join(format!("lh-registries-{}", ulid::Ulid::new()));
-        let open = || Harness::open(&dir.join("repo"), &dir.join("config")).unwrap();
+        let open = || {
+            Harness::open_with_secrets(
+                &dir.join("repo"),
+                &dir.join("config"),
+                std::sync::Arc::new(crate::secrets::SecretStore::memory()),
+            )
+            .unwrap()
+        };
         let urls = |h: &Harness| {
             h.registries()
                 .into_iter()

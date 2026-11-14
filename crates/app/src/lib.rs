@@ -661,6 +661,13 @@ fn list_providers(h: H<'_>) -> Vec<ProviderStatus> {
     h.providers()
 }
 
+/// Where keys and tokens are kept (OS secure store or the 0600 fallback),
+/// with any notice Settings should show.
+#[tauri::command]
+fn secret_storage(h: H<'_>) -> harness::secrets::StorageStatus {
+    h.secret_storage()
+}
+
 #[tauri::command]
 async fn list_models(h: H<'_>, provider: ProviderId, refresh: bool) -> Result<Vec<ModelInfo>> {
     h.models(provider, refresh).await.map_err(err)
@@ -1038,6 +1045,7 @@ pub fn run() {
             cancel_reply,
             get_settings,
             list_providers,
+            secret_storage,
             list_models,
             save_api_key,
             remove_credential,

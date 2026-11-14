@@ -31,7 +31,7 @@ pub enum CredentialKind {
     ClaudeSubscription,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Credential {
     ApiKey { key: String },

@@ -2,7 +2,10 @@
 //! keys and tokens never enter the repo).
 //!
 //! - `settings.json`: per-role model choices, per-provider base URL overrides.
-//! - `credentials.json`: API keys and WorkBuddy sessions, mode 0600.
+//! - credentials (API keys, WorkBuddy, Claude and ChatGPT sessions): in the
+//!   OS secure store through [`SecretStore`], one item per provider. A
+//!   `credentials.json` left by an older version is moved there on load and
+//!   deleted once every entry is in.
 //! - `models-cache.json`: the model list each provider last returned, plus the
 //!   public metadata that fills the fields a listing leaves out.
 
@@ -10,11 +13,16 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use providers::{Credential, ModelInfo, ProviderId};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+use crate::secrets::{credential_item, SecretStore};
 use crate::Error;
+
+/// Where credentials lived before the secure store (mode 0600).
+const LEGACY_CREDENTIALS: &str = "credentials.json";
 
 /// The five model roles from architecture §4.22. The harness maps agents to
 /// roles; only Tutor is required, every other unset role falls back to Tutor.
@@ -214,19 +222,25 @@ impl Settings {
 
 pub struct Config {
     dir: PathBuf,
+    secrets: Arc<SecretStore>,
     pub settings: Settings,
+    /// What the store holds, read once at load; changed only through
+    /// [`Config::set_credential`] and [`Config::remove_credential`], which
+    /// write the store first.
     pub credentials: BTreeMap<ProviderId, Credential>,
 }
 
 impl Config {
-    pub fn load(dir: &Path) -> Result<Self, Error> {
+    pub fn load(dir: &Path, secrets: Arc<SecretStore>) -> Result<Self, Error> {
         fs::create_dir_all(dir)?;
         let mut settings: Settings = read_json(&dir.join("settings.json"))?;
         settings.migrate();
+        let credentials = load_credentials(dir, &secrets)?;
         Ok(Self {
             dir: dir.to_owned(),
+            secrets,
             settings,
-            credentials: read_json(&dir.join("credentials.json"))?,
+            credentials,
         })
     }
 
@@ -234,8 +248,25 @@ impl Config {
         write_json(&self.dir.join("settings.json"), &self.settings, false)
     }
 
-    pub fn save_credentials(&self) -> Result<(), Error> {
-        write_json(&self.dir.join("credentials.json"), &self.credentials, true)
+    /// Save a provider's credential: the store first, so a refused write
+    /// leaves the previous credential in use.
+    pub fn set_credential(
+        &mut self,
+        provider: ProviderId,
+        credential: Credential,
+    ) -> Result<(), Error> {
+        self.secrets.set(
+            &credential_item(provider),
+            &serde_json::to_string(&credential)?,
+        )?;
+        self.credentials.insert(provider, credential);
+        Ok(())
+    }
+
+    pub fn remove_credential(&mut self, provider: ProviderId) -> Result<(), Error> {
+        self.secrets.delete(&credential_item(provider))?;
+        self.credentials.remove(&provider);
+        Ok(())
     }
 
     /// Resolve a role to a usable model choice. An unset role falls back to
@@ -251,6 +282,61 @@ impl Config {
             .clone()
             .ok_or_else(|| Error::Invalid("choose a Tutor model in Settings".into()))
     }
+}
+
+/// The saved credentials, moving a `credentials.json` from an older version
+/// into the store. The store's copy wins: the file outlives the move only
+/// when the store refused an entry, and anything saved since went to the
+/// store. A refused entry is still used, from the file, and the file stays
+/// until every entry is in.
+fn load_credentials(
+    dir: &Path,
+    secrets: &SecretStore,
+) -> Result<BTreeMap<ProviderId, Credential>, Error> {
+    let mut credentials = BTreeMap::new();
+    for provider in ProviderId::ALL {
+        match secrets.get(&credential_item(provider)) {
+            Ok(Some(json)) => match serde_json::from_str(&json) {
+                Ok(credential) => {
+                    credentials.insert(provider, credential);
+                }
+                Err(e) => tracing::warn!(
+                    "the saved {} credential is unreadable: {e}",
+                    provider.spec().name
+                ),
+            },
+            Ok(None) => {}
+            // The store keeps the failure for Settings; the provider reads
+            // as not connected.
+            Err(e) => tracing::warn!("{e}"),
+        }
+    }
+    let path = dir.join(LEGACY_CREDENTIALS);
+    let legacy: BTreeMap<ProviderId, Credential> = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| Error::Corrupt(format!("{}: {e}", path.display())))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(credentials),
+        Err(e) => return Err(e.into()),
+    };
+    let mut moved = true;
+    for (provider, credential) in legacy {
+        if credentials.contains_key(&provider) {
+            continue;
+        }
+        let json = serde_json::to_string(&credential)?;
+        if let Err(e) = secrets.set(&credential_item(provider), &json) {
+            tracing::warn!(
+                "the {} credential stays in {LEGACY_CREDENTIALS}: {e}",
+                provider.spec().name
+            );
+            moved = false;
+        }
+        credentials.insert(provider, credential);
+    }
+    if moved {
+        fs::remove_file(&path)?;
+    }
+    Ok(credentials)
 }
 
 /// The model list one provider last returned, and the base URL it came from.
@@ -397,7 +483,7 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_tutor_and_errors_without_it() {
         let dir = std::env::temp_dir().join(format!("lh-cfg-{}", ulid::Ulid::new()));
-        let mut cfg = Config::load(&dir).unwrap();
+        let mut cfg = Config::load(&dir, Arc::new(SecretStore::memory())).unwrap();
         // No roles: error names the Tutor setting.
         assert!(cfg
             .resolve(ModelRole::Reader)
@@ -417,5 +503,80 @@ mod tests {
         });
         assert_eq!(cfg.resolve(ModelRole::Planner).unwrap().model, "p");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn legacy_dir(entries: serde_json::Value) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lh-cfg-{}", ulid::Ulid::new()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(LEGACY_CREDENTIALS), entries.to_string()).unwrap();
+        dir
+    }
+
+    fn key(credential: Option<&Credential>) -> Option<&str> {
+        match credential {
+            Some(Credential::ApiKey { key }) => Some(key),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn credentials_json_moves_into_the_store_and_is_deleted() {
+        let dir = legacy_dir(serde_json::json!({
+            "openai": { "type": "apiKey", "key": "sk-old" },
+            "deepseek": { "type": "apiKey", "key": "sk-deep" },
+            "openai-codex": { "type": "codex", "accessToken": "a", "refreshToken": "r",
+                              "expiresAt": 1, "accountId": null, "account": "me@x" },
+        }));
+        let secrets = Arc::new(SecretStore::memory());
+        // Saved since a refused move: the store's copy is newer and wins.
+        secrets
+            .set(
+                &credential_item(ProviderId::Openai),
+                r#"{"type":"apiKey","key":"sk-new"}"#,
+            )
+            .unwrap();
+
+        let cfg = Config::load(&dir, Arc::clone(&secrets)).unwrap();
+        assert!(!dir.join(LEGACY_CREDENTIALS).exists());
+        assert_eq!(
+            key(cfg.credentials.get(&ProviderId::Openai)),
+            Some("sk-new")
+        );
+        assert_eq!(
+            key(cfg.credentials.get(&ProviderId::Deepseek)),
+            Some("sk-deep")
+        );
+
+        // The next launch reads everything from the store alone.
+        let mut again = Config::load(&dir, Arc::clone(&secrets)).unwrap();
+        assert_eq!(again.credentials, cfg.credentials);
+        assert!(matches!(
+            again.credentials.get(&ProviderId::OpenaiCodex),
+            Some(Credential::Codex(s)) if s.refresh_token == "r"
+        ));
+        again.remove_credential(ProviderId::Deepseek).unwrap();
+        let after = Config::load(&dir, secrets).unwrap();
+        assert!(!after.credentials.contains_key(&ProviderId::Deepseek));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_move_keeps_credentials_json_and_still_uses_it() {
+        let dir = legacy_dir(serde_json::json!({
+            "deepseek": { "type": "apiKey", "key": "sk-deep" },
+        }));
+        let mut cfg = Config::load(&dir, Arc::new(SecretStore::refusing("locked"))).unwrap();
+        assert!(dir.join(LEGACY_CREDENTIALS).exists(), "nothing is lost");
+        assert_eq!(
+            key(cfg.credentials.get(&ProviderId::Deepseek)),
+            Some("sk-deep")
+        );
+        // A new key the store refuses is reported and not kept.
+        let error = cfg
+            .set_credential(ProviderId::Openai, Credential::ApiKey { key: "sk".into() })
+            .unwrap_err();
+        assert!(error.to_string().contains("locked"), "{error}");
+        assert!(!cfg.credentials.contains_key(&ProviderId::Openai));
+        let _ = fs::remove_dir_all(dir);
     }
 }

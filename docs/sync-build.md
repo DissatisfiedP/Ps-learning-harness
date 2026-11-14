@@ -17,7 +17,7 @@ This file fixes the interfaces.
 
 The data repo (`$LEARNING_HARNESS_REPO`, default `<app data dir>/repo`) is already a plain-file store of append-only
 op logs. Sync makes it a git repository with app-controlled merges, so one learner's devices stay consistent through
-any host. **Device-local state never syncs**: `settings.json`, `credentials.json`, `models-cache.json`,
+any host. **Device-local state never syncs**: `settings.json`, the secrets (OS secure store, `secret-store.json`), `models-cache.json`,
 `workspace*.json`, `session-index.json`, `plugins/<id>/<sha256>/`, `page-images/`, staged images, and the reference
 libraries' device-local half (`<config>/library/<slug>/`: the copied originals and `local.json` with the source folder).
 
@@ -46,8 +46,11 @@ sync.
   certificate: UnknownIssuer)". Desktop keeps libgit2's verdict from the system OpenSSL. This is the same trust
   WebDAV and the model clients use on the phone; certificates the learner installed on the phone are not
   trusted. `sync/tls.rs` tests it offline against a rustls server on 127.0.0.1 with a test CA (`testdata/`).
-- Remote: an HTTPS URL plus a personal access token, stored **device-locally** in `<config>/sync.json` (mode 0600,
-  never in the repo, never synced): `{ remote, token, branch, lastSyncAt, lastError }`. SSH keys are out of scope.
+- Remote: an HTTPS URL plus a personal access token, both **device-local** and never synced: the URL in
+  `<config>/sync.json` (mode 0600) as `{ remote, branch, lastSyncAt, lastError }`, the token in the OS secure store
+  (`secrets.rs`, item `sync/git-token`; `secrets.json`, mode 0600, on Linux without a Secret Service). A token an older
+  version wrote into `sync.json` moves to the store at launch and stays in the file only while the store refuses it.
+  SSH keys are out of scope.
 - The repo's `.gitattributes` is written on first use when missing: `*.jsonl merge=union` (sessions, graph ops,
   frontier) so a learner running `git` by hand still gets sane merges.
 
@@ -200,8 +203,8 @@ configured, and the other way round.
 ### Settings
 
 `sync.json` (mode 0600, never synced) gains a `webdav` object next to the git fields:
-`{ url, username, password, lastSyncAt, lastError }` (absent in older files, which still load). The password is an
-app password, stored like the git token and never logged; `WebdavConfig`'s `Debug` hides it and every stored or
+`{ url, username, lastSyncAt, lastError }` (absent in older files, which still load). The password is an
+app password, kept in the secure store like the git token (`sync/webdav-password`) and never logged; `WebdavConfig`'s `Debug` hides it and every stored or
 returned message is scrubbed of it. Only `https://` URLs are accepted, plus `http://` on `localhost`, `127.0.0.1`
 and `[::1]` (any port) for a local test server; a URL with a username or password in it is refused with a sentence.
 The URL is saved normalised (no query or fragment, ending with `/`). The data lives under one folder at that URL,

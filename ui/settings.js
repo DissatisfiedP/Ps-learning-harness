@@ -174,12 +174,33 @@ async function reload() {
     usage = [];
   }
   renderProviders();
+  renderSecretStorage();
   renderModelForm();
   renderStartingPoint();
   hooks.changed({ providers, settings });
 }
 
 const connected = () => providers.filter((p) => p.source);
+
+/** The Providers help line names where keys are kept; a fallback or an unreachable store adds a notice. */
+async function renderSecretStorage() {
+  const line = document.getElementById('secret-storage');
+  const notice = document.getElementById('secret-storage-notice');
+  let storage;
+  try {
+    storage = await call('secret_storage');
+  } catch {
+    return; // keep the static line
+  }
+  line.textContent =
+    storage.backend === 'os'
+      ? `Keys stay on this device, in ${storage.label}.`
+      : storage.backend === 'file'
+        ? 'Keys stay on this device, in a file only your account can read.'
+        : 'Keys stay on this device.';
+  notice.textContent = storage.notice ?? '';
+  notice.hidden = !storage.notice;
+}
 
 function statusEl(map, key) {
   const p = document.createElement('p');

@@ -201,7 +201,24 @@ pub fn temp_dirs(name: &str) -> (PathBuf, PathBuf) {
 /// A harness whose only configured role is Tutor (role fallback), pointed at
 /// the fake provider.
 pub async fn harness(repo: &Path, config: &Path, base: &str) -> Arc<Harness> {
-    let h = Arc::new(Harness::open(repo, config).unwrap());
+    harness_with_secrets(
+        repo,
+        config,
+        base,
+        Arc::new(harness::secrets::SecretStore::memory()),
+    )
+    .await
+}
+
+/// [`harness`] over a given secret store, so a test that reopens the app
+/// keeps the credentials the first run saved (a real store persists them).
+pub async fn harness_with_secrets(
+    repo: &Path,
+    config: &Path,
+    base: &str,
+    secrets: Arc<harness::secrets::SecretStore>,
+) -> Arc<Harness> {
+    let h = Arc::new(Harness::open_with_secrets(repo, config, secrets).unwrap());
     h.set_base_url(ProviderId::Deepseek, Some(base)).unwrap();
     h.save_api_key(ProviderId::Deepseek, "sk-test-secret-key-0123456789")
         .unwrap();

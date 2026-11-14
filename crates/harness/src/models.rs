@@ -266,7 +266,12 @@ mod tests {
         let base = ProviderId::Openai.base_url(None);
         let proxy = "http://127.0.0.1:8080/v1".to_owned();
         // A provider we never fetched from has nothing cached.
-        let harness = Harness::open(&dir.join("repo"), &dir).unwrap();
+        let harness = Harness::open_with_secrets(
+            &dir.join("repo"),
+            &dir,
+            std::sync::Arc::new(crate::secrets::SecretStore::memory()),
+        )
+        .unwrap();
         assert!(harness
             .cached_list(ProviderId::Openai, &base, 1_000)
             .is_none());
@@ -298,7 +303,12 @@ mod tests {
         );
         // A second harness reads the file back.
         drop(harness);
-        let reopened = Harness::open(&dir.join("repo"), &dir).unwrap();
+        let reopened = Harness::open_with_secrets(
+            &dir.join("repo"),
+            &dir,
+            std::sync::Arc::new(crate::secrets::SecretStore::memory()),
+        )
+        .unwrap();
         assert!(reopened
             .stored_list(ProviderId::Openai, &base)
             .is_some_and(|models| models.len() == 1));

@@ -1032,7 +1032,11 @@ fn sync_before_exit_gives_up_at_its_deadline() {
 fn the_periodic_timer_syncs_progress_and_stops_with_the_engine() {
     let (_remote_root, remote) = bare("timer");
     let device = Device::new("timer-a");
-    let engine = Arc::new(Sync::new(&device.repo, &device.config));
+    let engine = Arc::new(Sync::new(
+        &device.repo,
+        &device.config,
+        Arc::clone(&device.secrets),
+    ));
     engine
         .set(Some(remote.to_str().unwrap()), None, None)
         .unwrap();

@@ -620,7 +620,7 @@ fn write_atomic(path: &Path, text: &str) -> Res<()> {
 // ---- model access ----------------------------------------------------------
 
 /// `$XDG_CONFIG_HOME/com.pslearningharness.app`, else `~/.config/...` — where
-/// the app keeps `settings.json` and `credentials.json`.
+/// the app keeps `settings.json` (its keys are in the OS secure store).
 fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
         if !dir.is_empty() {
@@ -639,15 +639,12 @@ fn settings(repo: &Path) -> Res<Settings> {
     Ok(harness::Harness::open(repo, &config_dir())?.settings())
 }
 
-fn saved_credentials(dir: &Path) -> Res<BTreeMap<ProviderId, Credential>> {
-    let path = dir.join("credentials.json");
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(|e| Fail(format!("{}: {e}", path.display())))
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-        Err(e) => Err(e.into()),
-    }
+/// Whether the app saved a credential for `provider`, through the same
+/// secure store the app uses.
+fn has_saved_credential(provider: ProviderId, repo: &Path, dir: &Path) -> bool {
+    harness::Harness::open(repo, dir)
+        .map(|h| h.saved_credential(provider).is_some())
+        .unwrap_or(false)
 }
 
 fn model_for(role: ModelRole, settings: &Settings) -> Res<ModelChoice> {
@@ -665,11 +662,9 @@ fn model_for(role: ModelRole, settings: &Settings) -> Res<ModelChoice> {
         })
 }
 
-fn credential_state(provider: ProviderId, dir: &Path) -> String {
+fn credential_state(provider: ProviderId, repo: &Path, dir: &Path) -> String {
     let spec = provider.spec();
-    let saved = saved_credentials(dir)
-        .map(|creds| creds.contains_key(&provider))
-        .unwrap_or(false);
+    let saved = has_saved_credential(provider, repo, dir);
     if saved {
         format!("{} credential saved", spec.name)
     } else if provider.credential_from_env().is_some() {
@@ -700,9 +695,8 @@ impl Access {
         let harness = harness::Harness::open(repo, dir)?;
         let settings = harness.settings();
         let choice = model_for(role, &settings)?;
-        let credential = saved_credentials(dir)?
-            .get(&choice.provider)
-            .cloned()
+        let credential = harness
+            .saved_credential(choice.provider)
             .or_else(|| choice.provider.credential_from_env())
             .ok_or_else(|| {
                 Fail(format!(
@@ -838,7 +832,10 @@ fn dry_run(args: &Args, map: &KnowledgeMap) -> Res<()> {
         Ok(s) => match model_for(args.role, &s) {
             Ok(choice) => {
                 println!("model: {} ({})", choice.model, choice.provider.spec().name);
-                println!("credential: {}", credential_state(choice.provider, &dir));
+                println!(
+                    "credential: {}",
+                    credential_state(choice.provider, &args.repo, &dir)
+                );
             }
             Err(e) => println!("model: unset — {e}"),
         },

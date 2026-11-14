@@ -179,7 +179,12 @@ async fn a_planned_circuit_draws_and_its_artifacts_replay_without_the_plugin() {
     h.remove_plugin("circuit").unwrap();
     h.set_plugin_enabled("sketch", false).unwrap();
     drop(h);
-    let h = Harness::open(&repo, &config).unwrap();
+    let h = Harness::open_with_secrets(
+        &repo,
+        &config,
+        std::sync::Arc::new(harness::secrets::SecretStore::memory()),
+    )
+    .unwrap();
     assert!(h.plugins().iter().all(|p| p.id != "circuit"));
     assert!(h.plugins().iter().all(|p| p.id != "sketch" || !p.enabled));
     assert_eq!(artifacts(&h, &id), made);
@@ -492,7 +497,12 @@ async fn answer_mode_grades_through_the_view_and_never_records_a_verdict() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn view_bridge_calls_are_allow_listed_and_solve_fits_the_budget() {
     let (repo, config) = temp_dirs("plugin-bridge");
-    let h = Harness::open(&repo, &config).unwrap();
+    let h = Harness::open_with_secrets(
+        &repo,
+        &config,
+        std::sync::Arc::new(harness::secrets::SecretStore::memory()),
+    )
+    .unwrap();
     h.add_folder_plugin(circuit_dir().to_str().unwrap())
         .unwrap();
     for r2 in [1000.0, 3000.0] {
@@ -568,7 +578,12 @@ calls = ["count"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_folder_plugin_reloads_when_its_files_change() {
     let (repo, config) = temp_dirs("plugin-folder");
-    let h = Harness::open(&repo, &config).unwrap();
+    let h = Harness::open_with_secrets(
+        &repo,
+        &config,
+        std::sync::Arc::new(harness::secrets::SecretStore::memory()),
+    )
+    .unwrap();
     let root = repo.parent().unwrap().to_owned();
     let dir = tally_plugin(&root, "Counts things.", 1);
     h.add_folder_plugin(dir.to_str().unwrap()).unwrap();
@@ -885,7 +900,14 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
     // Two installed versions side by side: a restart loads the locked one.
     let version_after_restart = |h: Arc<Harness>| {
         drop(h);
-        let h = Arc::new(Harness::open(&repo, &config).unwrap());
+        let h = Arc::new(
+            Harness::open_with_secrets(
+                &repo,
+                &config,
+                std::sync::Arc::new(harness::secrets::SecretStore::memory()),
+            )
+            .unwrap(),
+        );
         let info = h.plugins().into_iter().find(|p| p.id == "circuit").unwrap();
         (h, info.version)
     };
@@ -912,7 +934,12 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
         .unwrap();
     std::fs::remove_dir_all(config.join("plugins").join("circuit")).unwrap();
     drop(h);
-    let h = Harness::open(&repo, &config).unwrap();
+    let h = Harness::open_with_secrets(
+        &repo,
+        &config,
+        std::sync::Arc::new(harness::secrets::SecretStore::memory()),
+    )
+    .unwrap();
     assert!(h.plugins().is_empty());
     let missing = h.missing_locked().unwrap();
     assert_eq!(missing.len(), 1);
@@ -929,7 +956,12 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_view_returns_metadata_and_document_is_served_separately() {
     let (repo, config) = temp_dirs("view-payload");
-    let h = Harness::open(&repo, &config).unwrap();
+    let h = Harness::open_with_secrets(
+        &repo,
+        &config,
+        std::sync::Arc::new(harness::secrets::SecretStore::memory()),
+    )
+    .unwrap();
     let root = repo.parent().unwrap().to_owned();
     let dir = tally_plugin(&root, "Counts things.", 1);
     h.add_folder_plugin(dir.to_str().unwrap()).unwrap();

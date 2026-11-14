@@ -150,12 +150,15 @@
     { id: 'openai', name: 'OpenAI', source: null, keyUrl: 'https://platform.openai.com/api-keys', defaultBaseUrl: 'https://api.openai.com/v1' },
   ];
   const settings = { roles: {} };
+  // Where keys are kept; run.js switches it to the 0600-file fallback.
+  const secretStorage = { backend: 'os', label: 'the Secret Service (desktop keyring)', secure: true, notice: null };
   let finishLogin = null;
   let libraries = [];
   const appHandlers = {
     subscribe_events: () => null,
     list_sessions: () => [],
     list_providers: () => structuredClone(providers),
+    secret_storage: () => structuredClone(secretStorage),
     get_settings: () => structuredClone(settings),
     list_models: ({ provider }) => [{ id: `${provider}-model`, name: `${provider} model` }],
     set_role_model: ({ role, choice }) => {
@@ -363,7 +366,7 @@
     }
   }
 
-  window.__bridge = { log, forbidden, sync, finishLogin: (account) => finishLogin?.(account) };
+  window.__bridge = { log, forbidden, sync, secretStorage, finishLogin: (account) => finishLogin?.(account) };
   window.__TAURI__ = { core: { invoke, Channel: class {} } };
   window.__TAURI_INTERNALS__ = { invoke };
   window.ipc = { postMessage: (message) => forbidden.push({ via: 'window.ipc', message: String(message) }) };

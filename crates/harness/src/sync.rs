@@ -6,10 +6,13 @@
 //! commit local changes, fetch, merge, resolve conflicts by file type, commit
 //! the merge, push.
 //!
-//! Device-local state never enters the repo: the remote URL and the personal
-//! access token live in `<config>/sync.json` (mode 0600) and are handed to
+//! Device-local state never enters the repo: the remote URL lives in
+//! `<config>/sync.json` (mode 0600) and the personal access token in the
+//! secure store (`secrets.rs`, item `sync/git-token`); the token is handed to
 //! libgit2 through its credentials callback, so neither a commit message nor
-//! `.git/config` nor a log line ever carries the token.
+//! `.git/config` nor a log line ever carries it. A token or WebDAV password
+//! an older version wrote into `sync.json` moves to the store at load and
+//! stays in the file only while the store refuses it.
 //!
 //! A run is single-flight. Triggers (launch, after a session ends, the
 //! `sync_now` command) are best effort: a second trigger while one is running
@@ -50,6 +53,7 @@ use git2::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::secrets::{SecretStore, GIT_TOKEN, WEBDAV_PASSWORD};
 use crate::{lock, now_iso, Error};
 
 /// Device-local sync settings, `<config>/sync.json` (mode 0600).
@@ -214,14 +218,20 @@ pub struct Sync {
     /// Called after a run that changed files on this device (pulled commits,
     /// downloaded or deleted files), so open views re-read them.
     on_change: OnceLock<Box<dyn Fn() + Send + std::marker::Sync>>,
+    /// The git token and the WebDAV password.
+    secrets: Arc<SecretStore>,
+    /// An older `sync.json` held the token (or the password) and the store
+    /// refused it, so the file keeps it until a later write gets it in.
+    token_in_file: AtomicBool,
+    password_in_file: AtomicBool,
 }
 
 impl Sync {
-    /// Loads `sync.json`; cheap, and never touches the network. A corrupt or
-    /// unreadable file leaves sync unconfigured with a readable `lastError`
-    /// instead of blocking the app from opening.
-    pub fn new(repo: &Path, config_dir: &Path) -> Self {
-        let state: SyncConfig = match crate::config::read_json(&config_dir.join(CONFIG_FILE)) {
+    /// Loads `sync.json` and the secrets; cheap, and never touches the
+    /// network. A corrupt or unreadable file leaves sync unconfigured with a
+    /// readable `lastError` instead of blocking the app from opening.
+    pub fn new(repo: &Path, config_dir: &Path, secrets: Arc<SecretStore>) -> Self {
+        let mut state: SyncConfig = match crate::config::read_json(&config_dir.join(CONFIG_FILE)) {
             Ok(state) => state,
             Err(e) => {
                 tracing::warn!("sync settings unreadable: {e}");
@@ -233,15 +243,32 @@ impl Sync {
                 }
             }
         };
-        Self {
+        let legacy_token = state.token.take().filter(|t| !t.is_empty());
+        let legacy_password = state.webdav.password.take().filter(|p| !p.is_empty());
+        let had_legacy = legacy_token.is_some() || legacy_password.is_some();
+        let (token, token_in_file) = load_secret(&secrets, GIT_TOKEN, legacy_token);
+        let (password, password_in_file) = load_secret(&secrets, WEBDAV_PASSWORD, legacy_password);
+        state.token = token;
+        state.webdav.password = password;
+        let engine = Self {
             repo: repo.to_owned(),
             config_dir: config_dir.to_owned(),
-            state: Mutex::new(state),
+            state: Mutex::new(state.clone()),
             running: AtomicBool::new(false),
             stage: AtomicU8::new(STAGE_IDLE),
             ticker: OnceLock::new(),
             on_change: OnceLock::new(),
+            secrets,
+            token_in_file: AtomicBool::new(token_in_file),
+            password_in_file: AtomicBool::new(password_in_file),
+        };
+        if had_legacy {
+            // Rewrite without what moved to the store.
+            if let Err(e) = engine.save(&state) {
+                tracing::warn!("could not rewrite {CONFIG_FILE}: {e}");
+            }
         }
+        engine
     }
 
     /// Install the hook [`Sync`] calls after a run changed local files. A
@@ -254,23 +281,68 @@ impl Sync {
         lock(&self.state).clone()
     }
 
+    /// Writes `sync.json` without the secrets, unless one is still waiting
+    /// to move into the store.
     fn save(&self, config: &SyncConfig) -> Result<(), Error> {
-        crate::config::write_json(&self.config_dir.join(CONFIG_FILE), config, true)
+        let mut on_disk = config.clone();
+        if !self.token_in_file.load(Ordering::SeqCst) {
+            on_disk.token = None;
+        }
+        if !self.password_in_file.load(Ordering::SeqCst) {
+            on_disk.webdav.password = None;
+        }
+        crate::config::write_json(&self.config_dir.join(CONFIG_FILE), &on_disk, true)
     }
 
-    /// Change the settings under the lock, then write the result. Mutating in
-    /// place (rather than replacing a stale clone) keeps a background run from
-    /// dropping a token the learner just saved.
+    /// Change the settings under the lock and write the result, all while
+    /// holding it, so writes land in order and a background run can't drop
+    /// a token the learner just saved. A changed secret goes to the store
+    /// first; if the store refuses it, nothing changes and the error says
+    /// why.
     fn update<F>(&self, change: F) -> Result<(), Error>
     where
         F: FnOnce(&mut SyncConfig),
     {
-        let snapshot = {
-            let mut config = lock(&self.state);
-            change(&mut config);
-            config.clone()
+        let mut config = lock(&self.state);
+        let mut next = config.clone();
+        change(&mut next);
+        self.store_secret(GIT_TOKEN, &config.token, &next.token, &self.token_in_file)?;
+        self.store_secret(
+            WEBDAV_PASSWORD,
+            &config.webdav.password,
+            &next.webdav.password,
+            &self.password_in_file,
+        )?;
+        *config = next;
+        self.save(&config)
+    }
+
+    /// Writes (or deletes) a secret that changed, or one still waiting in
+    /// the file. Only a change the store refuses is an error: a waiting one
+    /// just keeps waiting.
+    fn store_secret(
+        &self,
+        item: &str,
+        before: &Option<String>,
+        after: &Option<String>,
+        in_file: &AtomicBool,
+    ) -> Result<(), Error> {
+        let changed = before != after;
+        if !changed && !in_file.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let result = match after.as_deref().filter(|s| !s.is_empty()) {
+            Some(value) => self.secrets.set(item, value),
+            None => self.secrets.delete(item),
         };
-        self.save(&snapshot)
+        match result {
+            Ok(()) => {
+                in_file.store(false, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(e) if changed => Err(e),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Save the device-local settings. An empty remote disconnects sync.
@@ -1511,6 +1583,35 @@ fn reset_index(repo: &Repository) -> Result<(), Error> {
 
 // ---- credentials and messages ----------------------------------------------
 
+/// A sync secret from the store, moving one an older `sync.json` held
+/// (`legacy`) into it. Returns the value and whether it must stay in the
+/// file because the store refused it. The store's copy wins: anything saved
+/// since a refused move went there.
+fn load_secret(
+    secrets: &SecretStore,
+    item: &str,
+    legacy: Option<String>,
+) -> (Option<String>, bool) {
+    let stored = match secrets.get(item) {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!("{e}");
+            None
+        }
+    };
+    match (stored, legacy) {
+        (Some(stored), _) => (Some(stored), false),
+        (None, None) => (None, false),
+        (None, Some(legacy)) => match secrets.set(item, &legacy) {
+            Ok(()) => (Some(legacy), false),
+            Err(e) => {
+                tracing::warn!("{item} stays in {CONFIG_FILE}: {e}");
+                (Some(legacy), true)
+            }
+        },
+    }
+}
+
 /// Split a remote URL into the URL to store and the token to keep locally.
 ///
 /// `https://user:token@host/repo` becomes `https://user@host/repo` plus the
@@ -1639,6 +1740,8 @@ mod tests {
         _root: Tmp,
         pub(super) repo: PathBuf,
         pub(super) config: PathBuf,
+        /// The device's secrets, kept so a reloaded engine reads them back.
+        pub(super) secrets: Arc<SecretStore>,
         pub(super) sync: Arc<Sync>,
     }
 
@@ -1649,11 +1752,13 @@ mod tests {
             let config = root.path().join("config");
             fs::create_dir_all(&repo).unwrap();
             fs::create_dir_all(&config).unwrap();
-            let sync = Arc::new(Sync::new(&repo, &config));
+            let secrets = Arc::new(SecretStore::memory());
+            let sync = Arc::new(Sync::new(&repo, &config, Arc::clone(&secrets)));
             Self {
                 _root: root,
                 repo,
                 config,
+                secrets,
                 sync,
             }
         }
@@ -2044,7 +2149,7 @@ mod tests {
         assert_eq!(status.needs_attention, vec!["graph/topics.json".to_owned()]);
         assert!(!status.unsynced, "the merge left a clean tree");
 
-        let reloaded = Sync::new(&b.repo, &b.config);
+        let reloaded = Sync::new(&b.repo, &b.config, Arc::clone(&b.secrets));
         assert_eq!(reloaded.status().unwrap().needs_attention.len(), 1);
         b.sync.acknowledge().unwrap();
         assert!(b.sync.status().unwrap().needs_attention.is_empty());
@@ -2148,13 +2253,17 @@ mod tests {
             "the token is never in a message"
         );
 
-        // Nowhere but the device-local file: not the repo config, not any file
-        // in the repo, not the stored error.
+        // Nowhere but the device's secure store: not sync.json, not the repo
+        // config, not any file in the repo, not the stored error.
         let settings = fs::read_to_string(device.config.join("sync.json")).unwrap();
-        assert!(
-            settings.contains("sekret-token"),
-            "the token is kept locally"
+        assert!(!settings.contains("sekret-token"), "{settings}");
+        assert_eq!(
+            device.secrets.get(GIT_TOKEN).unwrap().as_deref(),
+            Some("sekret-token"),
+            "the token is kept in the store"
         );
+        let reloaded = Sync::new(&device.repo, &device.config, Arc::clone(&device.secrets));
+        assert_eq!(reloaded.config().token.as_deref(), Some("sekret-token"));
         assert!(
             !format!("{:?}", device.sync.config()).contains("sekret-token"),
             "Debug output hides the token"
@@ -2194,7 +2303,12 @@ mod tests {
         let config_dir = root.path().join("config");
         fs::create_dir_all(&repo_dir).unwrap();
         fs::create_dir_all(&config_dir).unwrap();
-        let harness = crate::Harness::open(&repo_dir, &config_dir).unwrap();
+        let harness = crate::Harness::open_with_secrets(
+            &repo_dir,
+            &config_dir,
+            Arc::new(SecretStore::memory()),
+        )
+        .unwrap();
 
         let unconfigured = harness.sync_status().unwrap();
         assert!(!unconfigured.configured);
@@ -2321,10 +2435,62 @@ mod tests {
         fs::create_dir_all(&config).unwrap();
         fs::write(config.join("sync.json"), "{ this is not json").unwrap();
 
-        let engine = Sync::new(&repo, &config);
+        let engine = Sync::new(&repo, &config, Arc::new(SecretStore::memory()));
         let status = engine.status().unwrap();
         assert!(!status.configured);
         assert!(status.last_error.unwrap().contains("could not be read"));
+    }
+
+    #[test]
+    fn secrets_in_an_older_sync_json_move_to_the_store() {
+        let root = Tmp::new("legacy-secrets");
+        let repo = root.path().join("repo");
+        let config = root.path().join("config");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&config).unwrap();
+        let legacy = r#"{ "remote": "https://example.com/r.git", "token": "ghp_old",
+            "branch": "main", "webdav": { "url": "https://dav.example.com/x/",
+            "username": "al", "password": "dav-pass" } }"#;
+        fs::write(config.join("sync.json"), legacy).unwrap();
+
+        // A store that refuses: nothing is lost, the file keeps both, and a
+        // later unrelated write still keeps them there.
+        let refusing = Arc::new(SecretStore::refusing("locked"));
+        let engine = Sync::new(&repo, &config, Arc::clone(&refusing));
+        assert_eq!(engine.config().token.as_deref(), Some("ghp_old"));
+        let remote = "https://example.com/r.git";
+        engine.set(Some(remote), None, Some("dev")).unwrap();
+        let file = fs::read_to_string(config.join("sync.json")).unwrap();
+        assert!(
+            file.contains("ghp_old") && file.contains("dav-pass"),
+            "{file}"
+        );
+        // A new token the store refuses is an error and changes nothing.
+        let error = engine.set(Some(remote), Some("ghp_new"), None).unwrap_err();
+        assert!(error.to_string().contains("locked"), "{error}");
+        assert_eq!(engine.config().token.as_deref(), Some("ghp_old"));
+
+        // A working store takes both and the file loses them.
+        let secrets = Arc::new(SecretStore::memory());
+        let engine = Sync::new(&repo, &config, Arc::clone(&secrets));
+        let file = fs::read_to_string(config.join("sync.json")).unwrap();
+        assert!(
+            !file.contains("ghp_old") && !file.contains("dav-pass"),
+            "{file}"
+        );
+        assert!(file.contains(remote) && file.contains("\"dev\""), "{file}");
+        assert_eq!(secrets.get(GIT_TOKEN).unwrap().as_deref(), Some("ghp_old"));
+        assert_eq!(
+            secrets.get(WEBDAV_PASSWORD).unwrap().as_deref(),
+            Some("dav-pass")
+        );
+        let config_now = engine.config();
+        assert_eq!(config_now.token.as_deref(), Some("ghp_old"));
+        assert_eq!(config_now.webdav.password.as_deref(), Some("dav-pass"));
+
+        // Disconnecting forgets the token in the store too.
+        engine.set(None, None, None).unwrap();
+        assert_eq!(secrets.get(GIT_TOKEN).unwrap(), None);
     }
 
     #[test]

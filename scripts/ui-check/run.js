@@ -576,6 +576,18 @@ async function sync() {
   await page.evaluate(click('providers-toggle'));
   const signedIn = await page.evaluate(`({ status: ${workbuddy}.querySelector('.status').textContent, state: ${workbuddy}.querySelector('.provider-state').textContent, tutor: ${lastCall('set_role_model')}?.choice?.provider })`);
   expect(signedIn.status === 'Signed in as learner@example.com.' && signedIn.state === 'Signed in as learner@example.com' && signedIn.tutor === 'workbuddy', `WorkBuddy sign-in result: ${JSON.stringify(signedIn)}`);
+  // The Providers help line names where keys are kept; the 0600-file
+  // fallback (no Secret Service) says so in a notice.
+  const STORAGE = `({ line: document.getElementById('secret-storage').textContent, notice: document.getElementById('secret-storage-notice').textContent, noticeShown: !document.getElementById('secret-storage-notice').hidden })`;
+  let storage = await page.evaluate(STORAGE);
+  expect(storage.line === 'Keys stay on this device, in the Secret Service (desktop keyring).' && !storage.noticeShown, `secure storage line: ${JSON.stringify(storage)}`);
+  const fallback = 'The Secret Service (desktop keyring) could not be used (no daemon), so keys are kept in /home/l/.config/app/secrets.json, readable only by your account.';
+  await page.evaluate(`Object.assign(window.__bridge.secretStorage, { backend: 'file', label: '/home/l/.config/app/secrets.json', secure: false, notice: ${JSON.stringify(fallback)} })`);
+  await page.evaluate(closeSettings);
+  await page.evaluate(click('open-settings'));
+  await until('the key storage notice', () => page.evaluate(`!document.getElementById('secret-storage-notice').hidden`));
+  storage = await page.evaluate(STORAGE);
+  expect(storage.line === 'Keys stay on this device, in a file only your account can read.' && storage.notice === fallback, `fallback storage line: ${JSON.stringify(storage)}`);
   await page.evaluate(closeSettings);
   expect(await page.evaluate(`document.getElementById('setup-notice').hidden`), 'the setup notice still shows after signing in');
 
