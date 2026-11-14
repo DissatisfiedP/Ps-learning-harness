@@ -1395,7 +1395,10 @@ async fn a_submission_can_carry_a_photo_and_a_file_and_the_coach_reads_both() {
     // The file was readable through its grant.
     let read = raw_results(&r.repo, &id, "file_read");
     assert!(read[0].contains("R1 = 4.7k, R2 = 10k"), "{read:?}");
-    assert_eq!(r.h.session_state(&id).unwrap().file_grants, [sheet.clone()]);
+    assert_eq!(
+        r.h.session_state(&id).unwrap().file_grants,
+        std::slice::from_ref(&sheet)
+    );
 
     // The learner's own page shows both attachments on the submission.
     let view = serde_json::to_value(r.h.practice_state(&id).unwrap()).unwrap();
