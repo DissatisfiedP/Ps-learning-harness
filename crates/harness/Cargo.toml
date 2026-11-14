@@ -25,6 +25,12 @@ toml = "1"
 pdf-extract = "0.12.1"
 lopdf = "0.42.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+# Reference libraries (library/office.rs): Office/OpenDocument/EPUB files are
+# zip archives of XML. Only the stored and deflate methods are read (what
+# every Office and EPUB writer emits); the crypto and other codecs stay off.
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
+# RTF `\'hh` bytes in the document's code page; already built for lopdf.
+encoding_rs = "0.8"
 # Sync (docs/sync-build.md): libgit2 from source so no system libgit2 is needed;
 # HTTPS goes through OpenSSL, and SSH is out of scope.
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https"] }

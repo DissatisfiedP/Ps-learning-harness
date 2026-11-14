@@ -76,11 +76,7 @@ fn mib(bytes: usize) -> String {
 }
 
 /// Load a document, refusing what this module can't read. Every error is a
-/// sentence for the model.
-fn document(bytes: &[u8]) -> Result<Document, String> {
-    document_capped(bytes, MAX_PDF_BYTES)
-}
-
+/// sentence for the model. `max_bytes` is the caller's input cap.
 fn document_capped(bytes: &[u8], max_bytes: usize) -> Result<Document, String> {
     if bytes.is_empty() {
         return Err("the PDF is empty".into());
@@ -278,8 +274,20 @@ fn name(dict: &Dictionary, key: &[u8]) -> Option<String> {
 /// 8-bit `FlateDecode` DeviceRGB/DeviceGray samples are re-encoded as PNG.
 /// Every other encoding (JPX, CCITT, JBIG2, indexed or CMYK samples) is
 /// refused by name: showing it wrong would be worse than saying so.
+#[cfg(test)]
 pub fn page_image(bytes: &[u8], page: u32) -> Result<PageImage, String> {
-    let doc = document(bytes)?;
+    page_image_capped(bytes, page, MAX_PDF_BYTES)
+}
+
+/// [`page_image`] with the caller's input cap instead of [`MAX_PDF_BYTES`]:
+/// a reference library's original may be as large as the library's
+/// per-file cap (`library.rs`).
+pub(crate) fn page_image_capped(
+    bytes: &[u8],
+    page: u32,
+    max_bytes: usize,
+) -> Result<PageImage, String> {
+    let doc = document_capped(bytes, max_bytes)?;
     let by_number: BTreeMap<u32, ObjectId> = doc.get_pages();
     let count = by_number.len() as u32;
     if page == 0 {

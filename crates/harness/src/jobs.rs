@@ -558,6 +558,7 @@ impl Harness {
                 }
             }
             "source_page_image" => self.source_page_image(args, page_images).await,
+            "library_page_image" => self.library_page_image(args, page_images).await,
             "library_list" | "library_search" | "library_read" => {
                 match self.library_tool(&call.name, args).await {
                     Exec::Done { content, is_error } => ResearchStep::Result(content, is_error),
@@ -581,12 +582,7 @@ impl Harness {
     /// most [`MAX_PAGE_IMAGES_PER_RUN`] images reach one run.
     async fn source_page_image(&self, args: &Value, page_images: &mut usize) -> ResearchStep {
         let fail = |e: String| ResearchStep::Result(format!("source_page_image failed: {e}"), true);
-        let page = match args.get("page") {
-            Some(Value::Number(n)) => n.as_u64().and_then(|p| u32::try_from(p).ok()),
-            Some(Value::String(s)) => s.trim().parse().ok(),
-            _ => None,
-        };
-        let Some(page) = page.filter(|p| *p > 0) else {
+        let Some(page) = page_arg(args) else {
             return fail("`page` must be a page number of 1 or more".into());
         };
         let (path, url) = (opt_str(args, "path"), opt_str(args, "url"));
@@ -609,11 +605,11 @@ impl Harness {
             },
             _ => return fail("give exactly one of `path` and `url`".into()),
         };
-        let bytes = std::sync::Arc::new(bytes);
+        let bytes = Arc::new(bytes);
         // The page's text layer decides what to do, and rendering the image is
         // CPU work, so both run off the async runtime.
         let scanned = {
-            let bytes = std::sync::Arc::clone(&bytes);
+            let bytes = Arc::clone(&bytes);
             let read = tokio::task::spawn_blocking(move || {
                 crate::pdf::pages_in(&bytes, page, page).map(|(pages, _)| pages[0].scanned)
             })
@@ -624,11 +620,90 @@ impl Harness {
                 Err(e) => return fail(e.to_string()),
             }
         };
-        match page_decision(scanned, self.role_vision(ModelRole::Reader)) {
-            PageDecision::TextLayer => ResearchStep::Result(
-                format!("page {page} has a text layer; read it with source_read pages:\"{page}\""),
+        let source = path.or(url).unwrap_or_default();
+        self.page_image_step(
+            PageShot {
+                tool: "source_page_image",
+                bytes,
+                page,
+                max_bytes: crate::pdf::MAX_PDF_BYTES,
+                scanned,
+                text_hint: format!(
+                    "page {page} has a text layer; read it with source_read pages:\"{page}\""
+                ),
+                caption: format!("page {page} of {source} (image attached)"),
+            },
+            page_images,
+        )
+        .await
+    }
+
+    /// `library_page_image { path, page }`: one page of a reference library's
+    /// PDF as an image, read from this device's copy of the original (the
+    /// synced library holds only text). The index and the page-tagged text
+    /// decide whether the page is a scan, so nothing is re-extracted; the
+    /// rest is [`Self::source_page_image`]'s path, sharing its per-run cap.
+    async fn library_page_image(&self, args: &Value, page_images: &mut usize) -> ResearchStep {
+        let fail =
+            |e: String| ResearchStep::Result(format!("library_page_image failed: {e}"), true);
+        let Some(page) = page_arg(args) else {
+            return fail("`page` must be a page number of 1 or more".into());
+        };
+        let Ok(path) = req_str(args, "path") else {
+            return fail(
+                "missing `path`: `<library>/<file>`, as library_list and library_search print it"
+                    .into(),
+            );
+        };
+        let (repo, config, wanted) = (self.repo.clone(), self.config_dir.clone(), path.to_owned());
+        let found = tokio::task::spawn_blocking(move || {
+            crate::library::page_source(&repo, &config, &wanted, page)
+        })
+        .await;
+        match found {
+            Ok(Ok(crate::library::PageSource::Text { line })) => ResearchStep::Result(
+                format!(
+                    "page {page} of {path} has a text layer; read it with library_read {{ path: \"{path}\", from: {line} }}"
+                ),
                 false,
             ),
+            Ok(Ok(crate::library::PageSource::Scan { bytes, max_bytes })) => {
+                self.page_image_step(
+                    PageShot {
+                        tool: "library_page_image",
+                        bytes: Arc::new(bytes),
+                        page,
+                        max_bytes,
+                        scanned: true,
+                        text_hint: String::new(),
+                        caption: format!("page {page} of {path} (image attached)"),
+                    },
+                    page_images,
+                )
+                .await
+            }
+            Ok(Err(e)) => fail(e),
+            Err(e) => fail(e.to_string()),
+        }
+    }
+
+    /// What a page-image tool does once it knows whether the page is a scan:
+    /// a page with a text layer is sent back as a hint to read it as text, a
+    /// model that can't see images gets words saying so, and at most
+    /// [`MAX_PAGE_IMAGES_PER_RUN`] images reach one run.
+    async fn page_image_step(&self, shot: PageShot, page_images: &mut usize) -> ResearchStep {
+        let PageShot {
+            tool,
+            bytes,
+            page,
+            max_bytes,
+            scanned,
+            text_hint,
+            caption,
+        } = shot;
+        let fail = |e: String| ResearchStep::Result(format!("{tool} failed: {e}"), true);
+        match page_decision(scanned, self.role_vision(ModelRole::Reader)) {
+            PageDecision::TextLayer => ResearchStep::Result(text_hint, false),
             PageDecision::NoVision => ResearchStep::Result(
                 format!(
                     "page {page} has no text layer and this Reader model can't see images, so the page can't be read here; say in the brief that page {page} needs a text copy"
@@ -641,9 +716,8 @@ impl Harness {
                         "only {MAX_PAGE_IMAGES_PER_RUN} page images can be looked at in one research run and all of them are used; work from the text you have"
                     ));
                 }
-                let bytes = std::sync::Arc::clone(&bytes);
                 let image = match tokio::task::spawn_blocking(move || {
-                    crate::pdf::page_image(&bytes, page)
+                    crate::pdf::page_image_capped(&bytes, page, max_bytes)
                 })
                 .await
                 {
@@ -659,11 +733,6 @@ impl Harness {
                     ));
                 }
                 use base64::Engine as _;
-                let caption = match (path, url) {
-                    (Some(path), _) => format!("page {page} of {path} (image attached)"),
-                    (None, Some(url)) => format!("page {page} of {url} (image attached)"),
-                    _ => format!("page {page} (image attached)"),
-                };
                 *page_images += 1;
                 ResearchStep::Image {
                     text: format!("page {page} is a scan; its image is attached"),
@@ -1328,6 +1397,31 @@ impl Harness {
 
 /// Most page images one researcher run may see.
 const MAX_PAGE_IMAGES_PER_RUN: usize = 4;
+
+/// One page-image call, once its PDF is loaded and the page's text layer
+/// looked at (`source_page_image`, `library_page_image`).
+struct PageShot {
+    tool: &'static str,
+    bytes: Arc<Vec<u8>>,
+    page: u32,
+    /// The PDF input cap for this source: the tool cap for a learner file or
+    /// URL, the library's per-file cap for a library original.
+    max_bytes: usize,
+    scanned: bool,
+    /// The answer when the page has a text layer.
+    text_hint: String,
+    caption: String,
+}
+
+/// A page-image call's `page`: a number (or numeric string) of 1 or more.
+fn page_arg(args: &Value) -> Option<u32> {
+    let page = match args.get("page") {
+        Some(Value::Number(n)) => n.as_u64().and_then(|p| u32::try_from(p).ok()),
+        Some(Value::String(s)) => s.trim().parse().ok(),
+        _ => None,
+    };
+    page.filter(|p| *p > 0)
+}
 
 /// One tool result of the researcher's loop.
 enum ResearchStep {

@@ -30,6 +30,9 @@
 //! question banks) the shape of the text: `question-guide`,
 //! `question-bank`, `guide`, `notes`, `reference`.
 
+mod index;
+mod office;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
@@ -70,6 +73,10 @@ const MAX_LIST_BYTES: usize = 64 * 1024;
 const MAX_PROMPT_LIBRARIES: usize = 12;
 /// Example paths kept per skip reason.
 const MAX_SKIP_SAMPLES: usize = 5;
+/// The version of [`classify`]'s heuristics. Bump it when they change: a
+/// refresh then re-sorts every unchanged file from its synced text (an
+/// index written before versions existed reads as 0).
+const CLASSIFIER_VERSION: u32 = 1;
 
 const DIR: &str = "library";
 const INDEX: &str = "library.json";
@@ -199,11 +206,9 @@ const NO_TEXT_EXT: &[&str] = &[
     "tfrecord",
 ];
 
-/// Formats that hold text this module can't extract (no zip reader).
-const UNSUPPORTED_EXT: &[&str] = &[
-    "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "doc", "xls", "ppt", "rtf", "pages",
-    "key", "numbers",
-];
+/// Formats that hold text this module can't extract: the binary Office
+/// formats and Apple's iWork packages.
+const UNSUPPORTED_EXT: &[&str] = &["doc", "xls", "ppt", "pages", "key", "numbers"];
 
 /// Extensions read as plain text without sniffing.
 const TEXT_EXT: &[&str] = &[
@@ -403,6 +408,9 @@ pub struct Library {
     /// Skip reason → a few relative paths, so the learner sees what was left out.
     #[serde(default)]
     pub skipped_samples: BTreeMap<String, Vec<String>>,
+    /// The [`CLASSIFIER_VERSION`] the kinds were decided with.
+    #[serde(default)]
+    pub classifier: u32,
 }
 
 /// `<config>/library/<slug>/local.json`: this device's link to the source.
@@ -455,6 +463,8 @@ pub struct ImportReport {
     pub changed: usize,
     pub unchanged: usize,
     pub removed: usize,
+    /// Unchanged files whose kind a newer classifier changed.
+    pub reclassified: usize,
 }
 
 /// Streamed while an import runs: `scan`, then `extract` once per file,
@@ -709,6 +719,14 @@ enum Format {
     Html,
     Notebook,
     Text,
+    Docx,
+    Pptx,
+    Xlsx,
+    Odt,
+    Ods,
+    Odp,
+    Epub,
+    Rtf,
 }
 
 impl Format {
@@ -719,6 +737,14 @@ impl Format {
             Format::Html => "html",
             Format::Notebook => "notebook",
             Format::Text => "text",
+            Format::Docx => "docx",
+            Format::Pptx => "pptx",
+            Format::Xlsx => "xlsx",
+            Format::Odt => "odt",
+            Format::Ods => "ods",
+            Format::Odp => "odp",
+            Format::Epub => "epub",
+            Format::Rtf => "rtf",
         }
     }
 }
@@ -736,6 +762,14 @@ fn format_of(name: &str) -> Result<Option<Format>, &'static str> {
         "md" | "markdown" | "mdx" => Format::Markdown,
         "html" | "htm" | "xhtml" => Format::Html,
         "ipynb" => Format::Notebook,
+        "docx" | "docm" => Format::Docx,
+        "pptx" | "pptm" => Format::Pptx,
+        "xlsx" | "xlsm" => Format::Xlsx,
+        "odt" => Format::Odt,
+        "ods" => Format::Ods,
+        "odp" => Format::Odp,
+        "epub" => Format::Epub,
+        "rtf" => Format::Rtf,
         e if TEXT_EXT.contains(&e) => Format::Text,
         e if NO_TEXT_EXT.contains(&e) => return Err("no-text-type"),
         e if UNSUPPORTED_EXT.contains(&e) => return Err("unsupported"),
@@ -1256,6 +1290,31 @@ fn extract(format: Format, bytes: &[u8], rel: &str, max_file_bytes: u64) -> Extr
         Format::Markdown | Format::Text => plain(lossy_text(bytes)),
         Format::Html => plain(crate::web::html_to_text(&lossy_text(bytes))),
         Format::Notebook => plain(notebook_text(&lossy_text(bytes))),
+        Format::Docx
+        | Format::Pptx
+        | Format::Xlsx
+        | Format::Odt
+        | Format::Ods
+        | Format::Odp
+        | Format::Epub
+        | Format::Rtf => match office::extract(format, bytes) {
+            Ok(doc) => {
+                let mut ex = plain(doc.text);
+                if let Some(title) = doc.title {
+                    ex.title = clip_chars(&title, 120);
+                }
+                ex.pages = doc.pages;
+                ex
+            }
+            Err(e) => Extracted {
+                text: None,
+                title: title_of("", rel),
+                pages: None,
+                scanned_pages: 0,
+                status: Status::Failed,
+                note: Some(e),
+            },
+        },
         Format::Pdf => {
             let cap = (max_file_bytes as usize).max(bytes.len());
             match crate::pdf::extract_lenient(bytes, cap, MAX_PDF_PAGES) {
@@ -1285,10 +1344,7 @@ fn extract(format: Format, bytes: &[u8], rel: &str, max_file_bytes: u64) -> Extr
                     let mut text = String::new();
                     for p in &pages {
                         if p.scanned {
-                            text.push_str(&format!(
-                                "[p.{}] (no text layer on this page: a scan)\n",
-                                p.number
-                            ));
+                            text.push_str(&format!("[p.{}] {SCAN_PAGE}\n", p.number));
                         } else {
                             text.push_str(&format!("[p.{}] {}\n", p.number, p.text.trim_end()));
                         }
@@ -1395,6 +1451,7 @@ fn import_into(
         files: Vec::new(),
         skipped: BTreeMap::new(),
         skipped_samples: BTreeMap::new(),
+        classifier: CLASSIFIER_VERSION,
     });
     if let Some(name) = meta.name.filter(|n| !n.trim().is_empty()) {
         lib.name = clip_chars(name.trim(), 120);
@@ -1429,9 +1486,14 @@ fn import_into(
         Status::Ok | Status::Truncated => text_path(repo, slug, &f.path).is_file(),
         Status::NoText | Status::Failed => true,
     };
-    let mut files = Vec::with_capacity(total);
+    let mut files: Vec<LibraryFile> = Vec::with_capacity(total);
+    // Files kept from the index without extraction: their kinds are as old
+    // as the index's classifier.
+    let mut reused: Vec<usize> = Vec::new();
     let mut stamps = BTreeMap::new();
     let (mut added, mut changed, mut unchanged) = (0, 0, 0);
+    // Files whose text was rewritten: their index entries are stale.
+    let mut extracted: Vec<String> = Vec::new();
     let candidates = std::mem::take(&mut found.files);
     for (i, c) in candidates.iter().enumerate() {
         tell(progress, "extract", i, total, Some(c.rel.clone()));
@@ -1443,6 +1505,7 @@ fn import_into(
             .is_some_and(|s| *s == c.stamp);
         if let Some(p) = prev {
             if same_stamp && has_text(p) && original.is_file() {
+                reused.push(files.len());
                 files.push(p.clone());
                 stamps.insert(c.rel.clone(), c.stamp);
                 unchanged += 1;
@@ -1466,11 +1529,13 @@ fn import_into(
             Some(p) => {
                 let mut f = p.clone();
                 f.bytes = c.stamp.bytes;
+                reused.push(files.len());
                 files.push(f);
                 unchanged += 1;
             }
             None => {
                 let f = import_file(repo, slug, c, &bytes, hash, lib.max_file_bytes)?;
+                extracted.push(c.rel.clone());
                 if prev.is_some() {
                     changed += 1;
                 } else {
@@ -1481,6 +1546,25 @@ fn import_into(
         }
         stamps.insert(c.rel.clone(), c.stamp);
     }
+
+    let mut reclassified = 0;
+    if lib.classifier < CLASSIFIER_VERSION {
+        for &i in &reused {
+            let f = &mut files[i];
+            let text = match f.status {
+                Status::Ok | Status::Truncated => {
+                    fs::read_to_string(text_path(repo, slug, &f.path)).unwrap_or_default()
+                }
+                Status::NoText | Status::Failed => String::new(),
+            };
+            let kind = classify(&f.path, &f.title, &text);
+            if kind != f.kind {
+                f.kind = kind;
+                reclassified += 1;
+            }
+        }
+    }
+    lib.classifier = CLASSIFIER_VERSION;
 
     // Files gone from the folder (or now skipped) leave the library.
     let kept: HashSet<&str> = files.iter().map(|f| f.path.as_str()).collect();
@@ -1501,6 +1585,7 @@ fn import_into(
     lib.skipped_samples = found.samples;
     lib.updated = now_iso();
     save(repo, &lib)?;
+    index::update(config, repo, &lib, &extracted);
     save_local(
         config,
         slug,
@@ -1516,6 +1601,7 @@ fn import_into(
         changed,
         unchanged,
         removed,
+        reclassified,
     })
 }
 
@@ -1779,13 +1865,84 @@ struct Hit {
     snippet: String,
 }
 
+/// How one lowercased line scores against the query, before the file's
+/// name bonus: how many distinct terms it holds (squared), how often, and
+/// whether it holds the whole query as a phrase; with the first term it
+/// holds. `None` when it holds none.
+fn score_line<'t>(lower: &str, terms: &'t [String], phrase: &str) -> Option<(u32, &'t str)> {
+    let mut distinct = 0u32;
+    let mut total = 0u32;
+    let mut first: Option<&str> = None;
+    for t in terms {
+        let n = lower.matches(t.as_str()).count() as u32;
+        if n > 0 {
+            distinct += 1;
+            total += n;
+            first.get_or_insert(t.as_str());
+        }
+    }
+    let first = first?;
+    let mut score = distinct * distinct * 10 + total.min(5);
+    if terms.len() > 1 && lower.contains(phrase) {
+        score += 25;
+    }
+    Some((score, first))
+}
+
+/// Every query term found in the file's path or title adds this much.
+const NAME_BONUS: u32 = 3;
+
+fn name_bonus(f: &LibraryFile, terms: &[String]) -> u32 {
+    let named = format!("{} {}", f.path, f.title).to_lowercase();
+    terms.iter().filter(|t| named.contains(t.as_str())).count() as u32 * NAME_BONUS
+}
+
+/// Search order: best score first, then library, file and line.
+fn rank(a: &Hit, b: &Hit) -> std::cmp::Ordering {
+    b.score
+        .cmp(&a.score)
+        .then_with(|| a.slug.cmp(&b.slug))
+        .then_with(|| a.path.cmp(&b.path))
+        .then(a.line.cmp(&b.line))
+}
+
+/// One block of one file that the index says may match.
+struct Work<'a> {
+    lib: &'a Library,
+    file: &'a LibraryFile,
+    block: index::Block,
+    name_bonus: u32,
+    /// The most any of its lines can score.
+    bound: u32,
+}
+
+/// The lines of a candidate block, read from its text file (kept open
+/// while consecutive blocks come from the same file).
+fn block_text(
+    open: &mut Option<(PathBuf, fs::File)>,
+    path: PathBuf,
+    block: &index::Block,
+) -> Option<String> {
+    if open.as_ref().is_none_or(|(p, _)| *p != path) {
+        *open = Some((path.clone(), fs::File::open(&path).ok()?));
+    }
+    let (_, file) = open.as_mut()?;
+    index::read_block(file, block)
+}
+
 /// `library_search { query, library?, kind? }`: every query word is a
 /// case-insensitive term; a line scores by how many distinct terms it holds
 /// (squared), how often, whether it holds the whole query as a phrase, and
 /// whether the file's path or title names the terms. Best lines first, at
 /// most three per file, each with its line number and PDF page.
+///
+/// The library's index ([`index`]) names the blocks of text that can hold a
+/// term; only those are read, best possible score first, and a block that
+/// can't beat the 20th hit found so far is skipped. The result is the one a
+/// scan of every line would give.
 pub(crate) fn search(
     repo: &Path,
+    config: &Path,
     query: &str,
     library: Option<&str>,
     kind: Option<&str>,
@@ -1797,62 +1954,123 @@ pub(crate) fn search(
     }
     let phrase = query.trim().to_lowercase();
     let libs = scope(repo, library)?;
-    let mut hits: Vec<Hit> = Vec::new();
+    let mut work: Vec<Work> = Vec::new();
     for lib in &libs {
-        for f in &lib.files {
-            if kind.is_some_and(|k| k != f.kind)
-                || !matches!(f.status, Status::Ok | Status::Truncated)
-            {
+        index::with_index(config, repo, lib, |idx| {
+            let q = idx.query(&terms);
+            for f in &lib.files {
+                if kind.is_some_and(|k| k != f.kind)
+                    || !matches!(f.status, Status::Ok | Status::Truncated)
+                {
+                    continue;
+                }
+                let bonus = name_bonus(f, &terms);
+                for (block, held) in idx.candidates(&f.path, &q) {
+                    let d = held.count_ones();
+                    let phrase_bonus = if terms.len() > 1 && d as usize == terms.len() {
+                        25
+                    } else {
+                        0
+                    };
+                    work.push(Work {
+                        lib,
+                        file: f,
+                        block,
+                        name_bonus: bonus,
+                        bound: d * d * 10 + 5 + bonus + phrase_bonus,
+                    });
+                }
+            }
+        });
+    }
+    // Best bound first and, among equal bounds, in result order: a block
+    // that could at best tie the 20th hit and sorts after it can't enter.
+    work.sort_by(|a, b| {
+        b.bound
+            .cmp(&a.bound)
+            .then_with(|| a.lib.slug.cmp(&b.lib.slug))
+            .then_with(|| a.file.path.cmp(&b.file.path))
+            .then(a.block.line.cmp(&b.block.line))
+    });
+    // Every file's best three hits, in result order.
+    let mut hits: Vec<Hit> = Vec::new();
+    // Per file: its kept hits' (score, line), best first.
+    let mut per_file: HashMap<(&str, &str), Vec<(u32, usize)>> = HashMap::new();
+    let mut skipped: Vec<&Work> = Vec::new();
+    let mut open = None;
+    for w in &work {
+        if let Some(last) = hits.get(MAX_HITS - 1) {
+            let first_line = w.block.line as usize + 1;
+            let after = (w.lib.slug.as_str(), w.file.path.as_str(), first_line)
+                > (last.slug.as_str(), last.path.as_str(), last.line);
+            if w.bound < last.score || (w.bound == last.score && after) {
+                skipped.push(w);
                 continue;
             }
-            let Ok(text) = fs::read_to_string(text_path(repo, &lib.slug, &f.path)) else {
+        }
+        let path = text_path(repo, &w.lib.slug, &w.file.path);
+        let Some(text) = block_text(&mut open, path, &w.block) else {
+            continue;
+        };
+        let key = (w.lib.slug.as_str(), w.file.path.as_str());
+        let mut page = w.block.page;
+        for (i, line) in text.lines().enumerate() {
+            if let Some(p) = page_tag(line) {
+                page = Some(p);
+            }
+            let lower = line.to_lowercase();
+            let Some((score, first)) = score_line(&lower, &terms, &phrase) else {
                 continue;
             };
-            let lower_all = text.to_lowercase();
-            if !terms.iter().any(|t| lower_all.contains(t.as_str())) {
-                continue;
+            let score = score + w.name_bonus;
+            let line_no = w.block.line as usize + i + 1;
+            let kept = per_file.entry(key).or_default();
+            let better = |a: (u32, usize), b: (u32, usize)| a.0 > b.0 || (a.0 == b.0 && a.1 < b.1);
+            if kept.len() == MAX_HITS_PER_FILE {
+                let worst = kept[MAX_HITS_PER_FILE - 1];
+                if !better((score, line_no), worst) {
+                    continue;
+                }
+                kept.pop();
+                if let Some(at) = hits
+                    .iter()
+                    .position(|h| h.slug == key.0 && h.path == key.1 && h.line == worst.1)
+                {
+                    hits.remove(at);
+                }
             }
-            let named = format!("{} {}", f.path, f.title).to_lowercase();
-            let name_bonus = terms.iter().filter(|t| named.contains(t.as_str())).count() as u32 * 3;
-            let mut page = None;
-            let mut file_hits: Vec<Hit> = Vec::new();
-            // Lowercasing never adds or removes a line break, so the lines
-            // of the two strings pair up.
-            for (i, (line, lower)) in text.lines().zip(lower_all.lines()).enumerate() {
-                if let Some(p) = page_tag(line) {
-                    page = Some(p);
-                }
-                let mut distinct = 0u32;
-                let mut total = 0u32;
-                let mut first: Option<&str> = None;
-                for t in &terms {
-                    let n = lower.matches(t.as_str()).count() as u32;
-                    if n > 0 {
-                        distinct += 1;
-                        total += n;
-                        first.get_or_insert(t.as_str());
-                    }
-                }
-                let Some(first) = first else { continue };
-                let mut score = distinct * distinct * 10 + total.min(5) + name_bonus;
-                if terms.len() > 1 && lower.contains(&phrase) {
-                    score += 25;
-                }
-                file_hits.push(Hit {
-                    score,
-                    slug: lib.slug.clone(),
-                    path: f.path.clone(),
-                    kind: f.kind,
-                    line: i + 1,
-                    page,
-                    snippet: snippet(line, lower, first),
-                });
-            }
-            file_hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.line.cmp(&b.line)));
-            file_hits.truncate(MAX_HITS_PER_FILE);
-            hits.extend(file_hits);
+            let at = kept.partition_point(|k| better(*k, (score, line_no)));
+            kept.insert(at, (score, line_no));
+            let hit = Hit {
+                score,
+                slug: w.lib.slug.clone(),
+                path: w.file.path.clone(),
+                kind: w.file.kind,
+                line: line_no,
+                page,
+                snippet: snippet(line, &lower, first),
+            };
+            let at = hits.partition_point(|h| rank(h, &hit).is_lt());
+            hits.insert(at, hit);
         }
     }
+    // A skipped block can't place a hit in the first 20, but a hit of it in
+    // a file with fewer than three would make the count pass 20.
+    let more = hits.len() > MAX_HITS
+        || (hits.len() == MAX_HITS
+            && skipped.iter().any(|w| {
+                let key = (w.lib.slug.as_str(), w.file.path.as_str());
+                per_file.get(&key).map_or(0, Vec::len) < MAX_HITS_PER_FILE
+                    && block_text(
+                        &mut open,
+                        text_path(repo, &w.lib.slug, &w.file.path),
+                        &w.block,
+                    )
+                    .is_some_and(|text| {
+                        text.lines()
+                            .any(|l| score_line(&l.to_lowercase(), &terms, &phrase).is_some())
+                    })
+            }));
     let where_ = match library.map(str::trim).filter(|l| !l.is_empty()) {
         Some(l) => format!("library `{l}`"),
         None => "the libraries".to_owned(),
@@ -1864,14 +2082,6 @@ pub(crate) fn search(
             kind.map_or(String::new(), |k| format!(" ({})", k.as_str()))
         ));
     }
-    hits.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| a.slug.cmp(&b.slug))
-            .then_with(|| a.path.cmp(&b.path))
-            .then(a.line.cmp(&b.line))
-    });
-    let more = hits.len() > MAX_HITS;
     hits.truncate(MAX_HITS);
     let mut out = format!(
         "Best matches for \"{}\" in {where_}, best first (read around one with library_read {{ path, from, to }}):\n",
@@ -1926,7 +2136,7 @@ pub(crate) fn read(
     match f.status {
         Status::NoText => {
             return Err(format!(
-                "`{slug}/{rel}` has no text: {}. Its original stays on the device that imported the library",
+                "`{slug}/{rel}` has no text: {}. Its original stays on the device that imported the library, where the researcher's library_page_image shows its pages as images",
                 f.note.as_deref().unwrap_or("a scan with no text layer, and there is no OCR")
             ))
         }
@@ -1987,6 +2197,95 @@ pub(crate) fn read(
     Ok(out)
 }
 
+/// The text a library PDF's scanned page stands in for, after its `[p.N]`.
+const SCAN_PAGE: &str = "(no text layer on this page: a scan)";
+
+/// What `library_page_image` found for one page of a library PDF.
+#[derive(Debug)]
+pub(crate) enum PageSource {
+    /// The page has a text layer, starting at this 1-based line of the
+    /// file's extracted text.
+    Text { line: usize },
+    /// A scan: the original's bytes, and the input cap to read them with.
+    Scan { bytes: Vec<u8>, max_bytes: usize },
+}
+
+/// One page of a library PDF for the researcher's `library_page_image`.
+/// The synced text says whether the page is a scan (its `[p.N]` line), so
+/// nothing is extracted again; only a page past a truncated text is looked
+/// up in the original. The original is device-local: on a device that
+/// didn't import the library it is absent, and the error says so.
+pub(crate) fn page_source(
+    repo: &Path,
+    config: &Path,
+    path: &str,
+    page: u32,
+) -> Result<PageSource, String> {
+    let (slug, rel) = split_path(path)?;
+    let lib = load(repo, slug)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no library `{slug}`; library_list shows the libraries"))?;
+    let f = lib.files.iter().find(|f| f.path == rel).ok_or_else(|| {
+        format!("`{rel}` is not in library `{slug}`; library_list shows its files")
+    })?;
+    if f.format != Format::Pdf.as_str() {
+        return Err(format!(
+            "`{slug}/{rel}` is a {} file, not a PDF: page images come from PDFs; read its text with library_read",
+            f.format
+        ));
+    }
+    if f.status == Status::Failed {
+        return Err(format!(
+            "`{slug}/{rel}` couldn't be read at import: {}",
+            f.note.as_deref().unwrap_or("unknown error")
+        ));
+    }
+    if let Some(count) = f.pages.filter(|n| page > *n) {
+        return Err(format!(
+            "page {page} doesn't exist: `{slug}/{rel}` has {count} pages"
+        ));
+    }
+    let mut known_scan = f.status == Status::NoText;
+    if !known_scan {
+        if let Ok(text) = fs::read_to_string(text_path(repo, slug, rel)) {
+            let tagged = text
+                .lines()
+                .enumerate()
+                .find(|(_, l)| page_tag(l) == Some(page));
+            if let Some((i, line)) = tagged {
+                if !line.contains(SCAN_PAGE) {
+                    return Ok(PageSource::Text { line: i + 1 });
+                }
+                known_scan = true;
+            }
+        }
+    }
+    let original = original_path(config, slug, rel);
+    let bytes = fs::read(&original).map_err(|_| {
+        format!(
+            "the original PDF of `{slug}/{rel}` is kept only on the device that imported library `{slug}`, and this device doesn't have it, so its page images can be read only there; work from its text, or say in the brief which pages need a text copy"
+        )
+    })?;
+    let max_bytes = (lib.max_file_bytes as usize).max(bytes.len());
+    if !known_scan {
+        // A page past a truncated text (or text not synced here yet): the
+        // original decides.
+        let pages = crate::pdf::extract_lenient(&bytes, max_bytes, MAX_PDF_PAGES)?;
+        let p = pages.iter().find(|p| p.number == page).ok_or_else(|| {
+            format!(
+                "page {page} doesn't exist: `{slug}/{rel}` has {} pages",
+                pages.len()
+            )
+        })?;
+        if !p.scanned {
+            return Err(format!(
+                "page {page} of `{slug}/{rel}` has a text layer, but it lies past the part of the text the library keeps (2 MiB); it can't be shown as an image or read here"
+            ));
+        }
+    }
+    Ok(PageSource::Scan { bytes, max_bytes })
+}
+
 fn line_arg(args: &Value, key: &str) -> Result<Option<usize>, String> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -2008,12 +2307,18 @@ fn line_arg(args: &Value, key: &str) -> Result<Option<usize>, String> {
 }
 
 /// Run one library tool (blocking file IO).
-pub(crate) fn run_tool(repo: &Path, name: &str, args: &Value) -> Result<String, String> {
+pub(crate) fn run_tool(
+    repo: &Path,
+    config: &Path,
+    name: &str,
+    args: &Value,
+) -> Result<String, String> {
     use crate::tools::{opt_str, req_str};
     match name {
         "library_list" => list(repo, opt_str(args, "library"), opt_str(args, "kind")),
         "library_search" => search(
             repo,
+            config,
             req_str(args, "query")?,
             opt_str(args, "library"),
             opt_str(args, "kind"),
@@ -2121,9 +2426,10 @@ impl Harness {
     /// workers.
     pub(crate) async fn library_tool(&self, name: &str, args: &Value) -> Exec {
         let repo = self.repo.clone();
+        let config = self.config_dir.clone();
         let tool = name.to_owned();
         let args = args.clone();
-        match tokio::task::spawn_blocking(move || run_tool(&repo, &tool, &args)).await {
+        match tokio::task::spawn_blocking(move || run_tool(&repo, &config, &tool, &args)).await {
             Ok(Ok(text)) => done(text),
             Ok(Err(e)) => refuse(name, e),
             Err(e) => refuse(name, format!("internal error ({e})")),
@@ -2263,6 +2569,7 @@ impl Harness {
         if local.exists() {
             fs::remove_dir_all(&local)?;
         }
+        index::forget(&self.config_dir, slug);
         self.sync_in_background();
         Ok(())
     }
@@ -2379,7 +2686,7 @@ mod tests {
         put(&src, "work/__pycache__/x.pyc", b"\0\0");
         put(&src, "video.mp4", b"\0\0\0 ftyp");
         put(&src, "bundle.zip", b"PK\x03\x04");
-        put(&src, "slides.docx", b"PK\x03\x04");
+        put(&src, "slides.ppt", b"PK\x03\x04");
         put(&src, "blob.unknownext", b"\0\x01\x02binary");
         put(&src, "big.txt", &vec![b'x'; 200 * 1024]);
         src
@@ -2482,6 +2789,191 @@ mod tests {
         assert_eq!(summary.kinds["question-bank"], 1);
     }
 
+    /// What a scan of every line of every file would answer: the reference
+    /// the index must reproduce (`path:line` of the best 20, in order).
+    fn naive_hits(repo: &Path, query: &str, kind: Option<Kind>) -> Vec<String> {
+        let terms = search_terms(query);
+        let phrase = query.trim().to_lowercase();
+        let mut hits: Vec<Hit> = Vec::new();
+        for lib in load_all(repo) {
+            for f in &lib.files {
+                if kind.is_some_and(|k| k != f.kind)
+                    || !matches!(f.status, Status::Ok | Status::Truncated)
+                {
+                    continue;
+                }
+                let text = fs::read_to_string(text_path(repo, &lib.slug, &f.path)).unwrap();
+                let bonus = name_bonus(f, &terms);
+                let mut own: Vec<Hit> = Vec::new();
+                let mut page = None;
+                for (i, line) in text.lines().enumerate() {
+                    if let Some(p) = page_tag(line) {
+                        page = Some(p);
+                    }
+                    let lower = line.to_lowercase();
+                    if let Some((score, first)) = score_line(&lower, &terms, &phrase) {
+                        own.push(Hit {
+                            score: score + bonus,
+                            slug: lib.slug.clone(),
+                            path: f.path.clone(),
+                            kind: f.kind,
+                            line: i + 1,
+                            page,
+                            snippet: snippet(line, &lower, first),
+                        });
+                    }
+                }
+                own.sort_by(rank);
+                own.truncate(MAX_HITS_PER_FILE);
+                hits.extend(own);
+            }
+        }
+        hits.sort_by(rank);
+        hits.truncate(MAX_HITS);
+        hits.iter()
+            .map(|h| format!("{}/{}:{}", h.slug, h.path, h.line))
+            .collect()
+    }
+
+    /// The `slug/path:line` of each result line of a `search` answer.
+    fn answered(out: &str) -> Vec<String> {
+        out.lines()
+            .filter_map(|l| l.split_once(". "))
+            .filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit()))
+            .map(|(_, rest)| {
+                let head = rest.split(' ').next().unwrap();
+                head.to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_index_answers_exactly_what_a_full_scan_would() {
+        let (src, repo, config) = (fixture(), temp("repo"), temp("config"));
+        // Enough repeated, varied text that blocks, ties and the per-file
+        // limit all come into play.
+        let mut big = String::new();
+        for i in 0..6000 {
+            big.push_str(&format!(
+                "line {i} object storage bucket {} versioning ospfv3 area-{}\n",
+                if i % 7 == 0 {
+                    "replication"
+                } else {
+                    "lifecycle"
+                },
+                i % 13
+            ));
+        }
+        put(&src, "notes/big-notes.md", big.as_bytes());
+        import(&repo, &config, &src, 8 * 1024 * 1024);
+        for (query, kind) in [
+            ("object storage", None),
+            ("storage replication", None),
+            ("ospf", None),
+            ("ospfv3 area-3", None),
+            ("bucket versioning lifecycle", Some(Kind::Notes)),
+            ("service stores objects", Some(Kind::QuestionBank)),
+            ("networking", None),
+            ("no-such-term-anywhere", None),
+        ] {
+            let out = search(&repo, &config, query, None, kind.map(Kind::as_str)).unwrap();
+            assert_eq!(
+                answered(&out),
+                naive_hits(&repo, query, kind),
+                "{query}: {out}"
+            );
+        }
+        // A second search after the index is on disk, and after a change
+        // that made the index stale, still equals the scan.
+        put(
+            &src,
+            "notes/big-notes.md",
+            format!("{big}fresh object storage line\n").as_bytes(),
+        );
+        import(&repo, &config, &src, 8 * 1024 * 1024);
+        let out = search(&repo, &config, "fresh object", None, None).unwrap();
+        assert_eq!(
+            answered(&out),
+            naive_hits(&repo, "fresh object", None),
+            "{out}"
+        );
+        assert!(out.contains("big-notes.md:6001"), "{out}");
+    }
+
+    #[test]
+    fn a_refresh_re_sorts_unchanged_files_when_the_classifier_changed() {
+        let (src, repo, config) = (fixture(), temp("repo"), temp("config"));
+        import(&repo, &config, &src, CAP);
+        // An index written before classifier versions existed, whose kinds
+        // were decided by older heuristics.
+        let mut lib = load(&repo, "cloud-refs").unwrap().unwrap();
+        lib.classifier = 0;
+        for f in &mut lib.files {
+            if f.path == "drills/set1.md" || f.path == "notes/digest.md" {
+                f.kind = Kind::Reference;
+            }
+        }
+        save(&repo, &lib).unwrap();
+        let report = import(&repo, &config, &src, CAP);
+        assert_eq!(report.reclassified, 2, "{report:?}");
+        let lib = load(&repo, "cloud-refs").unwrap().unwrap();
+        let kind = |p: &str| lib.files.iter().find(|f| f.path == p).unwrap().kind;
+        assert_eq!(kind("drills/set1.md"), Kind::QuestionBank);
+        assert_eq!(kind("notes/digest.md"), Kind::Notes);
+        assert_eq!(lib.classifier, CLASSIFIER_VERSION);
+        // A second refresh has nothing left to relabel.
+        assert_eq!(import(&repo, &config, &src, CAP).reclassified, 0);
+    }
+
+    /// Timing on a corpus of ~80 MB of text: not an assertion on speed in
+    /// CI, but the answer must still equal the scan's and the second search
+    /// (index loaded) must not read the whole corpus. Run with
+    /// `cargo test -p harness --lib large_corpus -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "generates ~80 MB; run by hand for the numbers"]
+    fn large_corpus_search_is_fast_and_exact() {
+        let (src, repo, config) = (temp("src"), temp("repo"), temp("config"));
+        for f in 0..40 {
+            let mut s = String::new();
+            for i in 0..30_000 {
+                s.push_str(&format!(
+                    "f{f} l{i} routing switching vlan{} subnet{} gateway ospfv{} acl-{}\n",
+                    i % 97,
+                    i % 251,
+                    i % 3,
+                    i % 31
+                ));
+            }
+            put(&src, &format!("book{f}/chapter.md"), s.as_bytes());
+        }
+        let mut rare = String::new();
+        for i in 0..30_000 {
+            rare.push_str(&format!(
+                "f7 l{i} routing switching vlan{} gateway\n",
+                i % 97
+            ));
+        }
+        rare.push_str("the only line about quarantine-vlan999 here\n");
+        put(&src, "book7/chapter.md", rare.as_bytes());
+        let t = std::time::Instant::now();
+        import(&repo, &config, &src, 200 * 1024 * 1024);
+        eprintln!("import + index: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let rare = search(&repo, &config, "quarantine-vlan999", None, None).unwrap();
+        eprintln!("rare term, first search: {:?}", t.elapsed());
+        assert!(rare.contains("book7/chapter.md:30001"), "{rare}");
+        let t = std::time::Instant::now();
+        let common = search(&repo, &config, "routing switching vlan5", None, None).unwrap();
+        eprintln!("common terms: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let _ = search(&repo, &config, "quarantine-vlan999", None, None).unwrap();
+        eprintln!("rare term, second search: {:?}", t.elapsed());
+        assert_eq!(
+            answered(&common),
+            naive_hits(&repo, "routing switching vlan5", None)
+        );
+    }
+
     #[test]
     fn refresh_re_extracts_only_what_changed() {
         let (src, repo, config) = (fixture(), temp("repo"), temp("config"));
@@ -2553,7 +3045,7 @@ mod tests {
     fn search_ranks_lines_with_more_terms_first_and_cites_pages() {
         let (src, repo, config) = (fixture(), temp("repo"), temp("config"));
         import(&repo, &config, &src, CAP);
-        let out = search(&repo, "object storage", None, None).unwrap();
+        let out = search(&repo, &config, "object storage", None, None).unwrap();
         let first = out.lines().nth(1).unwrap();
         // Both terms as a phrase beat a line with one of them.
         assert!(
@@ -2565,25 +3057,25 @@ mod tests {
             "{out}"
         );
 
-        let pdf = search(&repo, "networking", None, None).unwrap();
+        let pdf = search(&repo, &config, "networking", None, None).unwrap();
         assert!(
             pdf.contains("cloud-refs/2026-exam-guide.pdf:") && pdf.contains("[p.2] (guide)"),
             "{pdf}"
         );
 
-        let banks = search(&repo, "service", None, Some("question-bank")).unwrap();
+        let banks = search(&repo, &config, "service", None, Some("question-bank")).unwrap();
         assert!(
             banks.contains("cloud-refs/drills/set1.md:3 (question-bank)"),
             "{banks}"
         );
         assert!(!banks.contains("glossary"), "{banks}");
-        assert!(search(&repo, "nothing-like-this", None, None)
+        assert!(search(&repo, &config, "nothing-like-this", None, None)
             .unwrap()
             .starts_with("No matches"));
-        assert!(search(&repo, "storage", Some("nope"), None)
+        assert!(search(&repo, &config, "storage", Some("nope"), None)
             .unwrap_err()
             .contains("cloud-refs"));
-        assert!(search(&repo, "storage", None, Some("bogus")).is_err());
+        assert!(search(&repo, &config, "storage", None, Some("bogus")).is_err());
     }
 
     #[test]
@@ -2617,12 +3109,15 @@ mod tests {
     fn tools_dispatch_by_name_and_validate_arguments() {
         let (src, repo, config) = (fixture(), temp("repo"), temp("config"));
         let empty = temp("empty");
-        assert!(run_tool(&empty, "library_list", &serde_json::json!({}))
-            .unwrap_err()
-            .contains("no reference libraries"));
+        assert!(
+            run_tool(&empty, &config, "library_list", &serde_json::json!({}))
+                .unwrap_err()
+                .contains("no reference libraries")
+        );
         import(&repo, &config, &src, CAP);
         let list = run_tool(
             &repo,
+            &config,
             "library_list",
             &serde_json::json!({ "kind": "question-guide" }),
         )
@@ -2635,6 +3130,7 @@ mod tests {
         assert!(!list.contains("glossary"), "{list}");
         let read = run_tool(
             &repo,
+            &config,
             "library_read",
             &serde_json::json!({ "path": "cloud-refs/notes/digest.md", "from": "3", "to": 3 }),
         )
@@ -2642,13 +3138,16 @@ mod tests {
         assert!(read.contains("Object storage keeps buckets."), "{read}");
         assert!(run_tool(
             &repo,
+            &config,
             "library_read",
             &serde_json::json!({ "path": "cloud-refs/notes/digest.md", "from": 0 })
         )
         .is_err());
-        assert!(run_tool(&repo, "library_search", &serde_json::json!({}))
-            .unwrap_err()
-            .contains("query"));
+        assert!(
+            run_tool(&repo, &config, "library_search", &serde_json::json!({}))
+                .unwrap_err()
+                .contains("query")
+        );
     }
 
     #[test]
@@ -2664,6 +3163,7 @@ mod tests {
             files: Vec::new(),
             skipped: BTreeMap::new(),
             skipped_samples: BTreeMap::new(),
+            classifier: CLASSIFIER_VERSION,
         };
         let libs = [lib("alpha", "Alpha"), lib("beta", "Beta")];
         let text = prompt_lines(&libs, &["beta".into()]);

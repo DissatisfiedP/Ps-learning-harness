@@ -692,6 +692,15 @@ pub fn researcher_tools() -> Vec<ToolSpec> {
         ),
     ];
     t.extend(library_tools());
+    t.push(tool(
+        "library_page_image",
+        "Look at one page of a reference library's PDF as an image: the way to read a scanned page (library_read says which pages are scans). Works only on the device that imported the library, which keeps the original; a page with a text layer is refused — read it with library_read.",
+        json!({
+            "path": { "type": "string", "description": "`<library>/<file>`, as library_list and library_search print it." },
+            "page": { "type": "integer", "description": "1-based page number." }
+        }),
+        &["path", "page"],
+    ));
     t
 }
 
