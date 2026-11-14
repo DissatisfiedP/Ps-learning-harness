@@ -989,6 +989,26 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     return parts.join(' · ');
   }
 
+  /**
+   * What the learner model says about one idea (`learner_nodes`): whether it
+   * is held or due, the layers shown, and any open misconception. Words and
+   * percentages, derived from the evidence log; nothing here is stored.
+   */
+  function memoryLines(key) {
+    const m = learn?.memory?.[key];
+    if (!m) return [];
+    const lines = [];
+    const r = `${Math.round((Number(m.retrievability) || 0) * 100)}% recalled now`;
+    const shown = ['recall', 'discrimination', 'composition'].filter((l) => m.layers?.[l]);
+    const layers = shown.length ? `shown: ${shown.join(', ')}` : 'nothing shown yet';
+    const state = m.held ? 'Held' : shown.includes('recall') ? 'Due for review' : 'Not yet recalled';
+    lines.push(`${state} · ${r} · ${layers}`);
+    for (const note of m.misconceptions ?? []) {
+      lines.push(`Misconception (${String(note.at ?? '').slice(0, 10)}): ${note.text}`);
+    }
+    return lines;
+  }
+
   /** The newest session's confidence line and parked frontier. */
   function renderLearning() {
     learning.replaceChildren();
@@ -1558,6 +1578,7 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     );
     card.replaceChildren(title, meta);
     if (level) card.append(h('p', 'map-card-level', level));
+    for (const line of memoryLines(n.key)) card.append(h('p', 'map-card-memory', line));
     card.append(statement);
     // A contrast is a note, not a relationship with a direction: it never gets
     // a "Depends on"/"Leads to" label or an arrow.

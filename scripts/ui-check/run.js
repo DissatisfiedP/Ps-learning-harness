@@ -925,6 +925,14 @@ async function map() {
   expect(/^From “Derivatives” · .*Chain rule is what the lesson rests on\.$/.test(origin[0]) && /^Merged with “Differentiating a composition”: the same claim/.test(origin[1]),
     `chain's record: ${JSON.stringify(origin)}`);
   await page.shot('map-card-provenance');
+  // The learner model's memory on the card, with the open misconception.
+  const memory = await page.evaluate(`[...document.querySelectorAll('#map-page .map-card-memory')].map((p) => p.textContent)`);
+  expect(memory.length === 2 && memory[0] === 'Due for review · 62% recalled now · shown: recall'
+    && memory[1] === 'Misconception (2026-11-10): differentiates the outer function only', `chain's memory: ${JSON.stringify(memory)}`);
+  await locate(page, 'limit', 'Limit of a function');
+  const held = await page.evaluate(`[...document.querySelectorAll('#map-page .map-card-memory')].map((p) => p.textContent)`);
+  expect(held.length === 1 && held[0] === 'Held · 97% recalled now · shown: recall, discrimination', `limit's memory: ${JSON.stringify(held)}`);
+  await locate(page, 'chain', 'Chain rule');
 
   // Without a pointer: the hidden list's "Move …" opens the same dialog.
   await page.evaluate(`(() => { const b = [...document.querySelectorAll('#map-page .map-a11y button')].find((x) => x.textContent === 'Move “Chain rule” to another topic…'); b.focus(); b.click(); })()`);

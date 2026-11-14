@@ -8,34 +8,57 @@
 //! - `graph_read { id }` — one node (statement, home, prerequisites,
 //!   dependents, evidence) or one topic (path, subtopics, nodes);
 //! - [`learner_state`] — the compact `## Learner state` block of the pinned
-//!   session state: topic tree with counts, then the nodes matching the goal.
+//!   session state: topic tree with counts, the nodes matching the goal, then
+//!   the learner model's nodes (misconceptions, held, due).
+//!
+//! The learner's evidence on a node is the graph's own check counts plus the
+//! learner model's note ([`crate::learner::LearnerModel::note`]): `held`,
+//! `due for review`, `not yet recalled`, and an open misconception.
 //!
 //! Writing stays the graph builder's (`graph_submit`). An empty graph answers
 //! both tools with [`EMPTY`] rather than an empty list, so the model can tell
 //! "nothing recorded" from "no match".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::knowledge::{KnowledgeMap, KnowledgeNode, KnowledgeTopic};
+use crate::learner::LearnerModel;
 
 /// What `graph_search` and `graph_read` return when the graph holds nothing.
 pub const EMPTY: &str = "The knowledge graph is empty: no earlier session has recorded anything this learner holds. Measure and plan from the conversation.";
 
-/// Ceiling on the `## Learner state` block (about 400 tokens): the tools are
+/// Ceiling on the `## Learner state` block (about 600 tokens): the tools are
 /// for depth.
-pub const MAX_LEARNER_STATE_CHARS: usize = 1600;
-/// Share of [`MAX_LEARNER_STATE_CHARS`] the topic tree may use; the rest is
-/// for the nodes matching the goal.
+pub const MAX_LEARNER_STATE_CHARS: usize = 2400;
+/// Share of [`MAX_LEARNER_STATE_CHARS`] the topic tree may use.
 const MAX_TOPIC_CHARS: usize = 800;
+/// Where the goal-matching nodes stop; the rest is the learner model's.
+const MAX_GOAL_CHARS: usize = 1600;
 /// Most goal-matching nodes the block lists.
 const MAX_GOAL_NODES: usize = 8;
+/// Most learner-model nodes the block lists beyond the goal's.
+const MAX_MEMORY_NODES: usize = 8;
 /// Most nodes, dependents or subtopics one `graph_read` lists per heading.
 const MAX_READ_LIST: usize = 40;
 /// Ceiling on one `graph_read` result.
 const MAX_READ_CHARS: usize = 8000;
+
+/// The learner model, read at one moment (R depends on the time).
+#[derive(Clone, Copy)]
+pub struct Memory<'a> {
+    pub model: &'a LearnerModel,
+    pub now: DateTime<Utc>,
+}
+
+impl Memory<'_> {
+    fn note(&self, id: &str) -> String {
+        self.model.note(id, self.now)
+    }
+}
 
 /// Whether the graph holds no topic and no node.
 pub fn is_empty(map: &KnowledgeMap) -> bool {
@@ -43,42 +66,54 @@ pub fn is_empty(map: &KnowledgeMap) -> bool {
 }
 
 /// Execute `graph_search` or `graph_read` for the tutor or planner against
-/// the graph in `repo`. `Err` is the refusal text for the model; an
-/// unreadable graph is a refusal, never a failed turn.
+/// the graph and learner model in `repo`. `Err` is the refusal text for the
+/// model; an unreadable graph is a refusal, never a failed turn.
 pub fn run(repo: &Path, name: &str, args: &Value) -> Result<String, String> {
     let map = crate::knowledge::load(repo)
         .map_err(|e| format!("the knowledge graph couldn't be read: {e}"))?;
-    lookup(&map, name, args)
+    let model = crate::learner::load_with(repo, &map)
+        .map_err(|e| format!("the learner's outcomes couldn't be read: {e}"))?;
+    let memory = Memory {
+        model: &model,
+        now: Utc::now(),
+    };
+    lookup(&map, memory, name, args)
 }
 
-/// [`run`] on an already loaded map.
-pub fn lookup(map: &KnowledgeMap, name: &str, args: &Value) -> Result<String, String> {
+/// [`run`] on an already loaded map and learner model.
+pub fn lookup(
+    map: &KnowledgeMap,
+    memory: Memory<'_>,
+    name: &str,
+    args: &Value,
+) -> Result<String, String> {
     match name {
         "graph_search" => {
             let query = crate::tools::req_str(args, "query")?;
             if is_empty(map) {
                 return Ok(EMPTY.to_owned());
             }
-            Ok(super::search_with(map, query, evidence))
+            Ok(super::search_with(map, query, |n| evidence(n, memory)))
         }
         "graph_read" => {
             let id = crate::tools::req_str(args, "id")?;
             if is_empty(map) {
                 return Ok(EMPTY.to_owned());
             }
-            Ok(read(map, id.trim()))
+            Ok(read(map, memory, id.trim()))
         }
         other => Err(format!("`{other}` is not a graph read tool")),
     }
 }
 
-/// The learner's record on a node, as a suffix: ` · checks 3✓ 1✗ · session
-/// 2026-10-02`. Empty when the node carries neither.
-fn evidence(node: &KnowledgeNode) -> String {
+/// The learner's record on a node, as a suffix: ` · checks 3✓ 1✗ · held (R
+/// 0.97; shown recall) · session 2026-10-02`. Empty when there is none.
+fn evidence(node: &KnowledgeNode, memory: Memory<'_>) -> String {
     let mut out = String::new();
     if node.correct + node.missed > 0 {
         out.push_str(&format!(" · checks {}✓ {}✗", node.correct, node.missed));
     }
+    out.push_str(&memory.note(&node.id));
     if let Some(recorded) = recorded(node) {
         out.push_str(" · ");
         out.push_str(&recorded);
@@ -144,13 +179,13 @@ fn push_line(out: &mut String, line: &str, cap: usize) -> bool {
 }
 
 /// `graph_read`: one node or topic in full, or why there is none.
-pub fn read(map: &KnowledgeMap, id: &str) -> String {
+pub fn read(map: &KnowledgeMap, memory: Memory<'_>, id: &str) -> String {
     let canon = map.canonical(id);
     if let Some(node) = map.nodes.iter().find(|n| n.id == canon) {
-        return read_node(map, node, id);
+        return read_node(map, memory, node, id);
     }
     if let Some(topic) = map.topics.iter().find(|t| t.id == id) {
-        return read_topic(map, topic);
+        return read_topic(map, memory, topic);
     }
     if map.is_tombstoned(id) {
         return format!("`{id}` was removed from the graph.");
@@ -158,7 +193,48 @@ pub fn read(map: &KnowledgeMap, id: &str) -> String {
     format!("No node or topic has the id `{id}`. Find ids with graph_search.")
 }
 
-fn read_node(map: &KnowledgeMap, node: &KnowledgeNode, asked: &str) -> String {
+/// The learner model's line of a node's `graph_read`, or `None` without
+/// graded answers on it.
+fn memory_line(memory: Memory<'_>, id: &str) -> Option<String> {
+    let s = memory.model.node(id)?;
+    let now = memory.now;
+    let r = s.retrievability(now);
+    let mut out = format!(
+        "learner model: {} (R {r:.2} now, stability {:.1} days, next review {}); {} graded answer(s), {} lapse(s); layers shown:",
+        if s.held(now) { "held" } else if r < crate::learner::DESIRED_RETENTION { "due for review" } else { "not held" },
+        s.fsrs.stability,
+        s.due().format("%Y-%m-%d"),
+        s.reviews,
+        s.lapses,
+    );
+    let mut layers = Vec::new();
+    if s.layers.recall {
+        layers.push("recall");
+    }
+    if s.layers.discrimination {
+        layers.push("discrimination");
+    }
+    if s.layers.composition {
+        layers.push("composition");
+    }
+    out.push_str(&if layers.is_empty() {
+        " none".to_owned()
+    } else {
+        format!(" {}", layers.join(", "))
+    });
+    out.push('\n');
+    for m in s.open_misconceptions() {
+        out.push_str(&format!(
+            "open misconception ({}, session {}): {}\n",
+            m.at.get(..10).unwrap_or(&m.at),
+            m.session_id,
+            m.text
+        ));
+    }
+    Some(out)
+}
+
+fn read_node(map: &KnowledgeMap, memory: Memory<'_>, node: &KnowledgeNode, asked: &str) -> String {
     let mut out = format!("node {} — {}\n", node.id, node.title);
     if asked != node.id {
         out.push_str(&format!("(`{asked}` was merged into this node)\n"));
@@ -256,13 +332,16 @@ fn read_node(map: &KnowledgeMap, node: &KnowledgeNode, asked: &str) -> String {
         out.push_str(" none recorded");
     }
     out.push('\n');
+    if let Some(line) = memory_line(memory, &node.id) {
+        out.push_str(&line);
+    }
     if !node.aliases.is_empty() {
         out.push_str(&format!("also known as: {}\n", node.aliases.join(", ")));
     }
     cap(out)
 }
 
-fn read_topic(map: &KnowledgeMap, topic: &KnowledgeTopic) -> String {
+fn read_topic(map: &KnowledgeMap, memory: Memory<'_>, topic: &KnowledgeTopic) -> String {
     let mut out = format!("topic {} — {}\n", topic.id, topic.title);
     out.push_str(&format!("path: {}\n", topic_path(map, &topic.id)));
     if let Some(c) = map.topic_checks.get(&topic.id) {
@@ -294,7 +373,7 @@ fn read_topic(map: &KnowledgeMap, topic: &KnowledgeTopic) -> String {
     } else {
         out.push('\n');
         for n in nodes.iter().take(MAX_READ_LIST) {
-            out.push_str(&format!("- {} {}{}\n", n.id, n.title, evidence(n)));
+            out.push_str(&format!("- {} {}{}\n", n.id, n.title, evidence(n, memory)));
         }
         if nodes.len() > MAX_READ_LIST {
             out.push_str(&format!(
@@ -322,8 +401,10 @@ fn cap(mut out: String) -> String {
 }
 
 /// The goal record's words worth matching: `goal` and `successLooksLike`,
-/// lowercased, at least three letters, without the filler every goal has.
-fn goal_words(goal: &Value) -> Vec<String> {
+/// lowercased, at least three letters, without the filler every goal has;
+/// plus the scope brief's strand names, so the strands the probe measures find
+/// their nodes.
+fn goal_words(goal: Option<&Value>, brief: Option<&Value>) -> Vec<String> {
     const FILLER: &[&str] = &[
         "the",
         "and",
@@ -370,14 +451,29 @@ fn goal_words(goal: &Value) -> Vec<String> {
         "you",
     ];
     let mut text = goal
-        .get("goal")
+        .and_then(|g| g.get("goal"))
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    if let Some(items) = goal.get("successLooksLike").and_then(Value::as_array) {
+    if let Some(items) = goal
+        .and_then(|g| g.get("successLooksLike"))
+        .and_then(Value::as_array)
+    {
         for item in items.iter().filter_map(Value::as_str) {
             text.push(' ');
             text.push_str(item);
+        }
+    }
+    if let Some(strands) = brief
+        .and_then(|b| b.get("strands"))
+        .and_then(Value::as_array)
+    {
+        for name in strands
+            .iter()
+            .filter_map(|s| s.get("name").and_then(Value::as_str))
+        {
+            text.push(' ');
+            text.push_str(name);
         }
     }
     let mut words: Vec<String> = text
@@ -398,10 +494,18 @@ fn goal_words(goal: &Value) -> Vec<String> {
 }
 
 /// The `## Learner state` block (architecture §4.15): the topic tree with
-/// node counts, then up to [`MAX_GOAL_NODES`] nodes matching the goal record,
-/// with the learner's evidence, within [`MAX_LEARNER_STATE_CHARS`]. Empty for
-/// an empty graph (the block then reads "no graph yet").
-pub fn learner_state(map: &KnowledgeMap, goal: Option<&Value>) -> String {
+/// node counts, then up to [`MAX_GOAL_NODES`] nodes matching the goal record
+/// and the scope brief's strands, then up to [`MAX_MEMORY_NODES`] more nodes
+/// from the learner model (open misconceptions first, then held, then the
+/// rest; goal matches and recent reviews first within each), each with the
+/// learner's evidence, within [`MAX_LEARNER_STATE_CHARS`]. Empty for an empty
+/// graph (the block then reads "no graph yet").
+pub fn learner_state(
+    map: &KnowledgeMap,
+    memory: Memory<'_>,
+    goal: Option<&Value>,
+    brief: Option<&Value>,
+) -> String {
     if is_empty(map) {
         return String::new();
     }
@@ -458,59 +562,116 @@ pub fn learner_state(map: &KnowledgeMap, goal: Option<&Value>) -> String {
         out.push_str(&format!("- … {} more topics\n", map.topics.len() - shown));
     }
 
-    let words = goal.map(goal_words).unwrap_or_default();
-    if words.is_empty() {
-        return out;
-    }
+    let words = goal_words(goal, brief);
     let titles: HashMap<&str, String> = map
         .topics
         .iter()
         .map(|t| (t.id.as_str(), t.title.to_lowercase()))
         .collect();
-    let mut matches: Vec<(usize, &KnowledgeNode)> = map
-        .nodes
-        .iter()
-        .filter_map(|n| {
-            let hay = format!(
-                "{} {} {} {}",
-                n.id,
-                n.title,
-                n.statement,
-                titles.get(n.home.as_str()).map_or("", String::as_str)
-            )
-            .to_lowercase();
-            let score = words.iter().filter(|w| hay.contains(w.as_str())).count();
-            (score > 0).then_some((score, n))
+    let score = |n: &KnowledgeNode| {
+        let hay = format!(
+            "{} {} {} {}",
+            n.id,
+            n.title,
+            n.statement,
+            titles.get(n.home.as_str()).map_or("", String::as_str)
+        )
+        .to_lowercase();
+        words.iter().filter(|w| hay.contains(w.as_str())).count()
+    };
+    let mut listed: HashSet<&str> = HashSet::new();
+    if !words.is_empty() {
+        let mut matches: Vec<(usize, &KnowledgeNode)> = map
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                let s = score(n);
+                (s > 0).then_some((s, n))
+            })
+            .collect();
+        matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        if matches.is_empty() {
+            push_line(
+                &mut out,
+                "No node matches the goal's words; graph_search before treating it as new.",
+                MAX_GOAL_CHARS,
+            );
+        } else if push_line(&mut out, "Nodes matching the goal:", MAX_GOAL_CHARS) {
+            for (_, n) in matches.iter().take(MAX_GOAL_NODES) {
+                let line = format!("- {} [{}] {}{}", n.id, n.home, n.title, evidence(n, memory));
+                if !push_line(&mut out, &line, MAX_GOAL_CHARS) {
+                    break;
+                }
+                listed.insert(n.id.as_str());
+            }
+            if matches.len() > listed.len() {
+                push_line(
+                    &mut out,
+                    &format!("- … {} more matches", matches.len() - listed.len()),
+                    MAX_GOAL_CHARS,
+                );
+            }
+        }
+    }
+
+    // The learner model: what graded answers say, beyond the goal's nodes.
+    let now = memory.now;
+    let mut known: Vec<(u8, usize, chrono::DateTime<chrono::Utc>, &KnowledgeNode)> = memory
+        .model
+        .nodes()
+        .filter_map(|(id, s)| {
+            let n = map.node(id).filter(|n| !map.is_tombstoned(&n.id))?;
+            let group = if s.open_misconceptions().next().is_some() {
+                0
+            } else if s.held(now) {
+                1
+            } else {
+                2
+            };
+            Some((group, score(n), s.fsrs.last_review, n))
         })
         .collect();
-    matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
-    if matches.is_empty() {
-        push_line(
-            &mut out,
-            "No node matches the goal's words; graph_search before treating it as new.",
-            MAX_LEARNER_STATE_CHARS,
-        );
+    if known.is_empty() {
         return out;
     }
-    if !push_line(
-        &mut out,
-        "Nodes matching the goal:",
-        MAX_LEARNER_STATE_CHARS,
-    ) {
+    let count = |g: u8| known.iter().filter(|k| k.0 == g).count();
+    let due = known
+        .iter()
+        .filter(|k| {
+            memory
+                .model
+                .node(&k.3.id)
+                .is_some_and(|s| s.retrievability(now) < crate::learner::DESIRED_RETENTION)
+        })
+        .count();
+    let header = format!(
+        "Learner model (from graded answers; R = chance of recall now): {} held, {} due for review, {} with an open misconception.",
+        count(1),
+        due,
+        count(0)
+    );
+    if !push_line(&mut out, &header, MAX_LEARNER_STATE_CHARS) {
         return out;
     }
-    let mut listed = 0usize;
-    for (_, n) in matches.iter().take(MAX_GOAL_NODES) {
-        let line = format!("- {} [{}] {}{}", n.id, n.home, n.title, evidence(n));
+    known.retain(|k| !listed.contains(k.3.id.as_str()));
+    known.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(b.1.cmp(&a.1))
+            .then(b.2.cmp(&a.2))
+            .then_with(|| a.3.id.cmp(&b.3.id))
+    });
+    let mut shown = 0usize;
+    for (_, _, _, n) in known.iter().take(MAX_MEMORY_NODES) {
+        let line = format!("- {} [{}] {}{}", n.id, n.home, n.title, evidence(n, memory));
         if !push_line(&mut out, &line, MAX_LEARNER_STATE_CHARS) {
             break;
         }
-        listed += 1;
+        shown += 1;
     }
-    if matches.len() > listed {
+    if known.len() > shown {
         push_line(
             &mut out,
-            &format!("- … {} more matches", matches.len() - listed),
+            &format!("- … {} more with graded answers", known.len() - shown),
             MAX_LEARNER_STATE_CHARS,
         );
     }
@@ -521,6 +682,7 @@ pub fn learner_state(map: &KnowledgeMap, goal: Option<&Value>) -> String {
 mod tests {
     use super::*;
     use crate::graph::{fold, provenance, GraphOp};
+    use crate::learner::Outcome;
     use crate::state::Kind;
     use serde_json::json;
 
@@ -549,33 +711,100 @@ mod tests {
         ])
     }
 
+    const NOW: &str = "2026-11-10T12:00:00Z";
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(NOW)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn none() -> LearnerModel {
+        LearnerModel::default()
+    }
+
+    fn mem(model: &LearnerModel) -> Memory<'_> {
+        Memory { model, now: now() }
+    }
+
+    /// One graded check on `node` at `at`.
+    fn outcome(
+        id: &str,
+        node: &str,
+        verdict: &str,
+        misconception: Option<&str>,
+        at: &str,
+    ) -> Outcome {
+        let mut o = json!({
+            "opId": id, "at": at, "sessionId": "s-m", "problemId": id,
+            "targets": [node], "layer": "recall", "format": "check",
+            "verdict": verdict, "confidence": 60, "hintRung": null,
+            "grader": "committed", "durationSec": 60
+        });
+        if let Some(m) = misconception {
+            o["missClass"] = json!("structural");
+            o["misconception"] = json!(m);
+        }
+        serde_json::from_value(o).unwrap()
+    }
+
     #[test]
     fn an_empty_graph_says_so_for_both_tools_and_leaves_the_block_empty() {
         let empty = KnowledgeMap::default();
+        let model = none();
         for (name, args) in [
             ("graph_search", json!({"query": "ohm"})),
             ("graph_read", json!({"id": "ohms-law"})),
         ] {
-            assert_eq!(lookup(&empty, name, &args).unwrap(), EMPTY);
+            assert_eq!(lookup(&empty, mem(&model), name, &args).unwrap(), EMPTY);
         }
-        assert!(lookup(&empty, "graph_search", &json!({})).is_err());
+        assert!(lookup(&empty, mem(&model), "graph_search", &json!({})).is_err());
         assert_eq!(
-            learner_state(&empty, Some(&json!({"goal": "dividers"}))),
+            learner_state(
+                &empty,
+                mem(&model),
+                Some(&json!({"goal": "dividers"})),
+                None
+            ),
             ""
         );
     }
 
     #[test]
     fn search_lines_carry_the_learners_evidence() {
-        let text = lookup(&map(), "graph_search", &json!({"query": "divider"})).unwrap();
+        let model = LearnerModel::from_outcomes(
+            &[outcome("o1", "divider-rule", "correct", None, NOW)],
+            str::to_owned,
+        );
+        let text = lookup(
+            &map(),
+            mem(&model),
+            "graph_search",
+            &json!({"query": "divider"}),
+        )
+        .unwrap();
         assert!(text.contains("divider-rule [circuits]"), "{text}");
-        assert!(text.contains("checks 3✓ 1✗"), "{text}");
+        assert!(
+            text.contains("checks 3✓ 1✗ · held (R 1.00; shown recall)"),
+            "{text}"
+        );
     }
 
     #[test]
     fn read_gives_a_nodes_prerequisites_dependents_and_record() {
         let m = map();
-        let node = read(&m, "divider-rule");
+        let model = LearnerModel::from_outcomes(
+            &[outcome(
+                "o1",
+                "ohms-law",
+                "wrong",
+                Some("adds currents in series"),
+                "2026-11-03T09:00:00Z",
+            )],
+            str::to_owned,
+        );
+        let memory = mem(&model);
+        let node = read(&m, memory, "divider-rule");
         assert!(
             node.contains("home: Electronics › Circuits (circuits)"),
             "{node}"
@@ -585,23 +814,41 @@ mod tests {
             "{node}"
         );
         assert!(node.contains("checks on this node 3✓ 1✗"), "{node}");
-        let ohm = read(&m, "ohms-law");
+        assert!(
+            !node.contains("learner model:"),
+            "no graded answers: {node}"
+        );
+        let ohm = read(&m, memory, "ohms-law");
         assert!(ohm.contains("needed by:\n- divider-rule"), "{ohm}");
         assert!(
             ohm.contains("recorded by session 2026-10-02 (session s0)"),
             "{ohm}"
         );
+        assert!(ohm.contains("learner model: due for review (R 0."), "{ohm}");
+        assert!(
+            ohm.contains("1 graded answer(s), 1 lapse(s); layers shown: none"),
+            "{ohm}"
+        );
+        assert!(
+            ohm.contains("open misconception (2026-11-03, session s-m): adds currents in series"),
+            "{ohm}"
+        );
 
-        let topic = read(&m, "circuits");
+        let topic = read(&m, memory, "circuits");
         assert!(topic.contains("nodes (2):"), "{topic}");
-        assert!(read(&m, "ghost").contains("No node or topic"));
+        assert!(
+            topic.contains("misconception 2026-11-03: adds currents"),
+            "{topic}"
+        );
+        assert!(read(&m, memory, "ghost").contains("No node or topic"));
     }
 
     #[test]
     fn learner_state_lists_topics_and_the_nodes_matching_the_goal_within_its_cap() {
         let m = map();
+        let model = none();
         let goal = json!({"goal": "Analyze loaded voltage dividers", "successLooksLike": []});
-        let block = learner_state(&m, Some(&goal));
+        let block = learner_state(&m, mem(&model), Some(&goal), None);
         assert!(
             block.contains("- Electronics (electronics) 0\n  - Circuits (circuits) 2"),
             "{block}"
@@ -614,9 +861,16 @@ mod tests {
             !block.contains("- ohms-law"),
             "ohm's law doesn't match the goal: {block}"
         );
+        assert!(!block.contains("Learner model"), "no outcomes, no section");
+
+        // A brief strand's name finds its node too.
+        let brief = json!({"strands": [{"name": "Ohm's law"}]});
+        let block = learner_state(&m, mem(&model), Some(&goal), Some(&brief));
+        assert!(block.contains("- ohms-law [circuits]"), "{block}");
 
         // A big graph still fits the budget.
         let mut ops = vec![GraphOp::topic("t", "T", None)];
+        let mut log = Vec::new();
         for i in 0..400 {
             ops.push(GraphOp::topic(
                 &format!("t{i}"),
@@ -631,10 +885,88 @@ mod tests {
                 &format!("t{i}"),
                 None,
             ));
+            log.push(outcome(
+                &format!("o{i}"),
+                &format!("divider-{i}"),
+                "wrong",
+                Some("a long note that takes room"),
+                NOW,
+            ));
         }
-        let block = learner_state(&fold(&ops), Some(&goal));
+        let model = LearnerModel::from_outcomes(&log, str::to_owned);
+        let block = learner_state(&fold(&ops), mem(&model), Some(&goal), None);
         assert!(block.len() <= MAX_LEARNER_STATE_CHARS, "{}", block.len());
         assert!(block.contains("more topics"), "{block}");
         assert!(block.contains("more matches"), "{block}");
+        assert!(block.contains("more with graded answers"), "{block}");
+    }
+
+    #[test]
+    fn learner_state_puts_misconceptions_then_held_nodes_after_the_goal() {
+        let mut ops = vec![
+            GraphOp::topic("circuits", "Circuits", None),
+            GraphOp::node(
+                "divider-rule",
+                Some("The voltage divider rule"),
+                "s",
+                Kind::Mechanism,
+                "circuits",
+                None,
+            ),
+        ];
+        for id in ["ohms-law", "kvl", "kcl", "thevenin"] {
+            ops.push(GraphOp::node(
+                id,
+                Some(id),
+                "s",
+                Kind::Fact,
+                "circuits",
+                None,
+            ));
+        }
+        let m = fold(&ops);
+        let model = LearnerModel::from_outcomes(
+            &[
+                outcome("o1", "kcl", "correct", None, "2026-10-01T12:00:00Z"),
+                outcome("o2", "divider-rule", "correct", None, NOW),
+                outcome("o3", "kvl", "correct", None, NOW),
+                outcome(
+                    "o4",
+                    "ohms-law",
+                    "partial",
+                    Some("treats R as fixed under load"),
+                    NOW,
+                ),
+            ],
+            str::to_owned,
+        );
+        let goal = json!({"goal": "dividers"});
+        let block = learner_state(&m, mem(&model), Some(&goal), None);
+        let tail = block.split("Learner model").nth(1).expect(&block);
+        assert!(
+            tail.starts_with(" (from graded answers; R = chance of recall now): 2 held, 1 due for review, 1 with an open misconception.\n"),
+            "{block}"
+        );
+        // The goal's node is listed once, in the goal list, with its note.
+        assert!(
+            block.contains(
+                "- divider-rule [circuits] The voltage divider rule · held (R 1.00; shown recall)"
+            ),
+            "{block}"
+        );
+        assert!(!tail.contains("divider-rule"), "{block}");
+        let order: Vec<&str> = tail
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.strip_prefix("- "))
+            .map(|l| l.split(' ').next().unwrap())
+            .collect();
+        assert_eq!(order, ["ohms-law", "kvl", "kcl"], "{block}");
+        assert!(tail.contains("ohms-law [circuits] ohms-law · not yet recalled (R 1.00) · misconception 2026-11-10: treats R as fixed under load"), "{block}");
+        assert!(
+            tail.contains("kcl [circuits] kcl · due for review (R 0."),
+            "{block}"
+        );
+        assert!(!tail.contains("thevenin"), "no answers, not listed");
     }
 }

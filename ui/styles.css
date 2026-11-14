@@ -1535,6 +1535,7 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
 .map-frontier-why { color: rgba(240 236 228 / 0.62); }
 .map-frontier-start { margin-inline-start: var(--s2); }
 .map-card-level { color: rgba(240 236 228 / 0.72) !important; margin-block-end: var(--s1) !important; }
+.map-card-memory { color: rgba(240 236 228 / 0.72) !important; margin-block-end: var(--s1) !important; font-size: var(--fs-small); }
 
 /* Where the field lives on the Map: a collapsible list of the topics that have
    a venue, under the counts; a row centres that topic's cluster. */

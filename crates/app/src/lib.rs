@@ -133,6 +133,20 @@ async fn knowledge_map(h: H<'_>) -> Result<KnowledgeMap> {
     blocking(&h, |h| h.knowledge_map()).await
 }
 
+/// The learner model per graph node, for the Map's node card (arch §4.8).
+#[tauri::command]
+async fn learner_nodes(
+    h: H<'_>,
+) -> Result<std::collections::BTreeMap<String, harness::learner::NodeView>> {
+    blocking(&h, |h| h.learner_nodes()).await
+}
+
+/// Nodes due for review, most depended-on first (arch §4.13).
+#[tauri::command]
+async fn review_queue(h: H<'_>) -> Result<Vec<harness::learner::ReviewItem>> {
+    blocking(&h, |h| h.review_queue()).await
+}
+
 /// The Map page's review list for `extract_edges` output (ui-design §7.6).
 #[tauri::command]
 async fn edge_proposals(h: H<'_>) -> Result<harness::proposals::Review> {
@@ -1020,6 +1034,8 @@ pub fn run() {
             delete_session,
             session_state,
             knowledge_map,
+            learner_nodes,
+            review_queue,
             edge_proposals,
             decide_edge_proposals,
             graph_build,

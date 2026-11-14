@@ -298,6 +298,20 @@
     vision_capabilities: () => ({}),
     edit_plan: () => null,
     set_hunt: () => null,
+    // The learner model: the chain rule is shaky (an open misconception),
+    // the limit is held.
+    learner_nodes: () => ({
+      chain: {
+        retrievability: 0.62, stability: 2.1, difficulty: 6.2, lastReview: '2026-11-10T09:00:00Z', due: '2026-11-12T09:00:00Z',
+        held: false, layers: { recall: true, discrimination: false, composition: false },
+        misconceptions: [{ text: 'differentiates the outer function only', at: '2026-11-10T09:00:00Z', sessionId: 'L1' }],
+        reviews: 3, lapses: 1,
+      },
+      limit: {
+        retrievability: 0.97, stability: 30, difficulty: 4.1, lastReview: '2026-11-12T09:00:00Z', due: '2026-12-10T09:00:00Z',
+        held: true, layers: { recall: true, discrimination: true, composition: false }, misconceptions: [], reviews: 5, lapses: 0,
+      },
+    }),
     knowledge_map: () => structuredClone(graph),
     edge_proposals: () => ({ proposals: [], titles: {} }),
     graph_splits: () => structuredClone(splitProposals),

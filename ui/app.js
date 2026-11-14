@@ -1975,9 +1975,12 @@ function goHome() {
  */
 async function mapLearning() {
   const newest = sessions.newestLearn();
-  const [st, frontier] = await Promise.all([
+  const [st, frontier, memory] = await Promise.all([
     newest ? call('session_state', { sessionId: newest.id }).catch(() => null) : null,
     call('frontier').catch(() => []),
+    // The learner model (evidence → memory per idea); a failure costs the
+    // card's memory lines, never the map.
+    call('learner_nodes').catch(() => ({})),
   ]);
   const plan = st?.plan ?? null;
   const aimOf = new Map();
@@ -1996,10 +1999,12 @@ async function mapLearning() {
   const items = [...(frontier ?? [])].sort((a, b) => String(b.at).localeCompare(String(a.at)));
   const learning = {
     levels,
+    memory: memory ?? {},
     calibration: st?.calibration ?? null,
     frontier: items,
   };
-  const empty = !Object.keys(levels).length && !learning.calibration && !items.length;
+  const empty =
+    !Object.keys(levels).length && !Object.keys(learning.memory).length && !learning.calibration && !items.length;
   return empty ? null : learning;
 }
 

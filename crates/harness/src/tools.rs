@@ -63,6 +63,7 @@ fn question_ask(roles: &[&str], teach: bool) -> ToolSpec {
             json!({ "type": "string", "description": "A node in the current section." });
     } else {
         props["strand"] = json!({ "type": "string" });
+        props["nodeId"] = json!({ "type": "string", "description": "The learner's graph node this question measures, when the graph has one (find it with graph_search). The graded answer then counts as evidence on that node." });
     }
     let required: &[&str] = if teach {
         &["role", "nodeId", "level", "format", "prompt", "answer"]
@@ -84,7 +85,8 @@ fn verdict_record() -> ToolSpec {
         json!({
             "questionId": { "type": "string" },
             "verdict": { "type": "string", "enum": ["correct", "partial", "wrong"] },
-            "note": { "type": "string", "description": "Your diagnosis for the record, never shown to the learner: what was present, what was missing, which wrong model shows. Read by the planner and your later turns." }
+            "note": { "type": "string", "description": "Your diagnosis for the record, never shown to the learner: what was present, what was missing, which wrong model shows. Read by the planner and your later turns." },
+            "misconception": { "type": "string", "description": "Only on a partial or wrong answer that shows a wrong model (not a slip or a gap): the misconception in one short line (≤ 200 characters), e.g. \"treats the loaded divider as unloaded\". Recorded on the node; the planner re-teaches nodes with an open misconception." }
         }),
         &["questionId", "verdict", "note"],
     )

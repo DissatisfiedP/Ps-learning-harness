@@ -14,6 +14,7 @@ mod frontier;
 pub mod graph;
 mod jobs;
 pub mod knowledge;
+pub mod learner;
 pub mod library;
 mod mobile;
 mod models;
@@ -447,6 +448,27 @@ impl Harness {
     /// read from `<repo>/graph/` (ui-design §7.6, architecture §4.2/§4.5).
     pub fn knowledge_map(&self) -> Result<KnowledgeMap, Error> {
         knowledge::load(&self.repo)
+    }
+
+    /// The learner model per graph node (architecture §4.8), derived from
+    /// `practice/outcomes.jsonl` now: R, stability, difficulty, due date,
+    /// held, demonstrated layers and open misconceptions. Only nodes with
+    /// graded answers appear. The Map's node card shows it.
+    pub fn learner_nodes(&self) -> Result<BTreeMap<String, learner::NodeView>, Error> {
+        let map = knowledge::load(&self.repo)?;
+        Ok(learner::load_with(&self.repo, &map)?.views(chrono::Utc::now()))
+    }
+
+    /// The review queue (architecture §4.13): nodes whose R is below the
+    /// desired retention (0.9), the most depended-on (load-bearing
+    /// `requires` out-degree) first, then lowest R.
+    pub fn review_queue(&self) -> Result<Vec<learner::ReviewItem>, Error> {
+        let map = knowledge::load(&self.repo)?;
+        Ok(learner::load_with(&self.repo, &map)?.review_items(
+            &map,
+            chrono::Utc::now(),
+            learner::DESIRED_RETENTION,
+        ))
     }
 
     /// The Map page's review list: proposed prerequisite edges the extractor

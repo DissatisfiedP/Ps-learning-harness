@@ -129,8 +129,8 @@ async fn the_measuring_tutor_and_the_planner_read_the_graph_before_planning() {
     assert!(!names.iter().any(|n| n == "graph_submit"), "{names:?}");
     let plan_prompt = system_prompt(&planner[0]);
     assert!(
-        plan_prompt
-            .contains("Nodes matching the goal:\n- divider-rule [circuits] The divider rule"),
+        plan_prompt.contains("Nodes matching the goal:")
+            && plan_prompt.contains("- divider-rule [circuits] The divider rule"),
         "{plan_prompt}"
     );
     let read = results(&h, &id, "graph_read");

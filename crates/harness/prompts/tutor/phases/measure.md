@@ -85,6 +85,7 @@ Questions you've already asked still count.
 - Check the learner's graph first. The learner state lists its topics and the nodes matching the goal; `graph_search` each strand's key ideas, and `graph_read` a node for its prerequisites and record. A node there was established in an earlier session.
 - Don't probe what the graph shows as held with recent, strong evidence (passing checks, a recent session).
 - Strands held long ago or weakly get a single confirming question.
+- Node lines carry the learner model's record, computed from every graded answer: `held` (recalled, shown, still fresh) means skip it; `due for review` or `recalled` gets one confirming question; `not yet recalled` or an open `misconception …` means probe it, and a misconception tells you what to look for.
 - No match, or an empty graph, means no record, not ignorance: probe as usual.
 
 **Bracket each strand.** The learner's edge on a strand lies between a *floor* (what they reliably get right) and a *ceiling* (the first thing they miss). Find both in as few questions as you can.

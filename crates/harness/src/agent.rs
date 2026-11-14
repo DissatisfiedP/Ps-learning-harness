@@ -513,17 +513,27 @@ impl Harness {
     }
 
     /// The `## Learner state` block for the tutor and planner: the graph's
-    /// topic tree and the nodes matching the goal (`graph::read`). Empty
-    /// (rendered "no graph yet") when the graph is empty; an unreadable graph
-    /// is logged and read as empty, never a failed turn.
+    /// topic tree, the nodes matching the goal and the brief's strands, and
+    /// the learner model's held, due and misconceived nodes (`graph::read`).
+    /// Empty (rendered "no graph yet") when the graph is empty; an unreadable
+    /// graph or outcomes log is logged and read as empty, never a failed turn.
     pub(crate) fn learner_state(&self, state: &SessionState) -> String {
-        match crate::knowledge::load(&self.repo) {
-            Ok(map) => crate::graph::read::learner_state(&map, state.goal.as_ref()),
+        let map = match crate::knowledge::load(&self.repo) {
+            Ok(map) => map,
             Err(e) => {
                 tracing::warn!("learner state: the graph couldn't be read: {e}");
-                String::new()
+                return String::new();
             }
-        }
+        };
+        let model = crate::learner::load_with(&self.repo, &map).unwrap_or_else(|e| {
+            tracing::warn!("learner state: the outcomes couldn't be read: {e}");
+            crate::learner::LearnerModel::default()
+        });
+        let memory = crate::graph::read::Memory {
+            model: &model,
+            now: chrono::Utc::now(),
+        };
+        crate::graph::read::learner_state(&map, memory, state.goal.as_ref(), state.brief.as_ref())
     }
 
     pub(crate) fn compose_planner(&self, state: &SessionState) -> Result<String, Error> {
@@ -902,7 +912,10 @@ impl Harness {
         let ops = self.store.ops(session_id)?;
         let state = replay_state(&ops);
         match name {
-            "question_ask" => match self.question_view_ok(&ops, &state, args) {
+            "question_ask" => match self
+                .question_view_ok(&ops, &state, args)
+                .and_then(|()| self.probe_node_ok(&state, args))
+            {
                 Ok(()) => Ok(gate_question(&ops, &state, args)),
                 Err(e) => Ok(refuse("question_ask", e)),
             },
@@ -1096,12 +1109,32 @@ impl Harness {
             Ok(q) => q,
             Err(e) => return Ok(refuse(name, e)),
         };
-        if !matches!(
-            opt_str(args, "verdict"),
-            Some("correct" | "partial" | "wrong")
-        ) {
-            return Ok(refuse(name, "`verdict` must be correct, partial or wrong"));
-        }
+        let verdict = match opt_str(args, "verdict") {
+            Some(v @ ("correct" | "partial" | "wrong")) => v,
+            _ => return Ok(refuse(name, "`verdict` must be correct, partial or wrong")),
+        };
+        let misconception = match args.get("misconception") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(m)) if verdict == "correct" && !m.trim().is_empty() => {
+                return Ok(refuse(
+                    name,
+                    "a correct answer carries no `misconception`; leave it out",
+                ))
+            }
+            Some(Value::String(m))
+                if m.chars().count() > crate::learner::MAX_MISCONCEPTION_CHARS =>
+            {
+                return Ok(refuse(
+                    name,
+                    format!(
+                        "`misconception` is a short note: at most {} characters",
+                        crate::learner::MAX_MISCONCEPTION_CHARS
+                    ),
+                ))
+            }
+            Some(Value::String(m)) => Some(m.trim()).filter(|m| !m.is_empty()),
+            Some(_) => return Ok(refuse(name, "`misconception` must be a string")),
+        };
         let question = ops.iter().find_map(|o| match o {
             Op::Tool(t) if t.call_id == qid && t.result.is_none() && t.name == "question_ask" => {
                 Some(t.args.clone())
@@ -1125,7 +1158,48 @@ impl Harness {
         // tutor teaches it on the spot, so there is no planner job and no
         // phase change.
         self.refute_known_section(session_id, ops, qid, &question, args)?;
+        // Evidence for the learner model (§4.8). An "I don't know" was
+        // recorded when it was sent, and a question already graded keeps its
+        // first verdict.
+        if !answered_dont_know(ops, qid) && !already_graded(ops, qid) {
+            if let Some(v) = crate::learner::Verdict::parse(verdict) {
+                self.record_outcome(session_id, ops, qid, v, misconception)?;
+            }
+        }
         Ok(done("Verdict recorded."))
+    }
+
+    /// Append the learner-model outcome a graded question gives
+    /// (`learner::question_outcome`): nothing for a question that measures no
+    /// graph node. An unreadable graph loses only this outcome, logged.
+    fn record_outcome(
+        &self,
+        session_id: &str,
+        ops: &[Op],
+        question_id: &str,
+        verdict: crate::learner::Verdict,
+        misconception: Option<&str>,
+    ) -> Result<(), Error> {
+        let map = match crate::knowledge::load(&self.repo) {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!(
+                    "outcome for {question_id} not recorded: the graph couldn't be read: {e}"
+                );
+                return Ok(());
+            }
+        };
+        if let Some(outcome) = crate::learner::question_outcome(
+            session_id,
+            ops,
+            question_id,
+            verdict,
+            misconception,
+            &map,
+        ) {
+            crate::learner::append_outcome(&self.repo, &outcome)?;
+        }
+        Ok(())
     }
 
     /// Append `knownRefuted` when a missed check lands on the current,
@@ -1668,6 +1742,29 @@ impl Harness {
         }
     }
 
+    /// A probe's `nodeId` names a node the learner's graph holds (its graded
+    /// answer is evidence on that node, §4.8). Teach questions name plan
+    /// nodes and are checked by [`gate_question`].
+    fn probe_node_ok(&self, state: &SessionState, args: &Value) -> Result<(), String> {
+        if state.phase != Phase::Measure {
+            return Ok(());
+        }
+        let Some(id) = args.get("nodeId") else {
+            return Ok(());
+        };
+        let Some(id) = id.as_str().map(str::trim).filter(|i| !i.is_empty()) else {
+            return Err("`nodeId` must be a graph node id".into());
+        };
+        let map = crate::knowledge::load(&self.repo)
+            .map_err(|e| format!("the knowledge graph couldn't be read: {e}"))?;
+        match map.node(id) {
+            Some(n) if !map.is_tombstoned(&n.id) => Ok(()),
+            _ => Err(format!(
+                "the graph has no node `{id}`; find its id with graph_search, or leave `nodeId` out"
+            )),
+        }
+    }
+
     /// Answer-mode gate (W7): the referenced artifact must exist, belong to an
     /// installed, enabled plugin that is active in the current section and
     /// whose view declares `answer = true`, and carry a `target` that stays
@@ -2184,6 +2281,22 @@ impl Harness {
             session_id,
             result_op(&call, &content.to_string(), false, None),
         )?;
+        // Graded here, by code: a choice answer, or "I don't know" (which is
+        // never graded by the tutor's verdict). Evidence for §4.8.
+        if pending.name == "question_ask" {
+            let verdict = if content.get("dontKnow").and_then(Value::as_bool) == Some(true) {
+                Some(crate::learner::Verdict::Dontknow)
+            } else {
+                content
+                    .get("verdict")
+                    .and_then(Value::as_str)
+                    .and_then(crate::learner::Verdict::parse)
+            };
+            if let Some(verdict) = verdict {
+                let ops = self.learn_ops(session_id)?;
+                self.record_outcome(session_id, &ops, call_id, verdict, None)?;
+            }
+        }
         self.tutor_turn(session_id).await
     }
 
@@ -3021,6 +3134,42 @@ fn hunt_return_text(send: &HuntSendOp, notes: &str, links: &[String], files: &[S
     }
     text.push_str("\nDebrief it with `debrief_record` before teaching this section.");
     text
+}
+
+/// Whether the learner answered question `qid` with "I don't know" (its
+/// outcome was recorded when the answer was sent).
+fn answered_dont_know(ops: &[Op], qid: &str) -> bool {
+    ops.iter().any(|o| match o {
+        Op::Tool(t) if t.call_id == qid => t.result.as_ref().is_some_and(|r| {
+            !r.is_error
+                && serde_json::from_str::<Value>(&r.content)
+                    .ok()
+                    .and_then(|v| v.get("dontKnow").and_then(Value::as_bool))
+                    == Some(true)
+        }),
+        _ => false,
+    })
+}
+
+/// Whether an earlier `verdict_record` on question `qid` already succeeded.
+fn already_graded(ops: &[Op], qid: &str) -> bool {
+    let calls: HashSet<&str> = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Tool(t)
+                if t.name == "verdict_record"
+                    && t.result.is_none()
+                    && opt_str(&t.args, "questionId") == Some(qid) =>
+            {
+                Some(t.call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    ops.iter().any(|o| {
+        matches!(o, Op::Tool(t) if calls.contains(t.call_id.as_str())
+            && t.result.as_ref().is_some_and(|r| !r.is_error))
+    })
 }
 
 /// Build the tool result for a learner's answer. Choice questions are graded
