@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "since": {
+      "type": "string",
+      "description": "Entry number to read after (0 or omitted: everything kept). Each result ends with the latest entry number."
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}

@@ -796,7 +796,9 @@ The host library is pure modules: `@harness/json` (encode/decode), `@harness/svg
 
 Why Luau: the owner chose it; the interpreter is small and runs where the app runs, including mobile **[inference]**; plugins are mostly AI-written, so an exact typed host API matters more than ecosystem size; the sandbox, memory cap and interrupt are one crate away (`mlua`).
 
-**Native plugins.** The `Plugin` trait stays for in-tree Rust plugins that need system access (future `sandbox`, `code-runner`, `repl`, `cas`, `live-search`, `image-set`; their manifests, fragments and schemas wait as catalogue entries in `plugins/catalog/`). They use the same `plugin.toml` shape, may declare permissions (`exec`, `net`, `fs-read`, `fs-write`), and reach the planner, tool list, plan limits and consent screen the same way. None is implemented in this build.
+**Native plugins (built, `crates/harness/src/plugins/native/`, `docs/plugins.md` §12).** The `Plugin` trait carries the in-tree Rust plugins that need system access, and seven are built in: `code-parse`, `live-search` (`net`), `image-set` (`fs-read`), `code-runner`, `repl`, `cas` (each `exec`) and `sandbox` (below). Each keeps its manifest, schemas, fragments and view under `native/<id>/` and compiles them in. They use the same `plugin.toml` shape and reach the planner, tool list, plan limits, artifacts, answer-mode grading and consent screen the same way as a package. Differences, all in code: they register after packages so none can be shadowed, `Harness` keeps one instance of each across registry rebuilds (a running REPL survives), `PluginInfo.builtin` is set and `remove_plugin` refuses them, and **a built-in that declares a permission starts disabled**: enabling it in Settings → Plugins (behind the consent screen, in plain words) is the consent, recorded in `settings.json` → `enabledPlugins`. Until then it is not in the planner's catalog, `plugin_request` refuses it and its tools aren't offered. The `exec` ones run programs installed on the device through `native/exec.rs`: scrubbed environment, temporary working directory, timeout, output cap, process-group kill, and on Linux with user namespaces no network; the file system is not isolated (`docs/plugins.md` §12). They list `desktop` only, because a phone has no such toolchains; `code-parse`, `live-search` and `image-set` list `mobile`. A desktop-only native follows the mobile rule like any desktop-only plugin (never offered or granted on a phone; a call refused; a session that used one is locked there, `docs/sync-build.md` "Sessions on mobile"). `cas` also exposes `cas::equivalent` as a Rust API for core code; nothing calls it yet.
+
+**Native plugin `sandbox` (built in).** A lab for hands-on systems skills: one disposable Podman/Docker container per chat session (no network, 256 MB, 1 CPU, 256 processes, dropped capabilities, `no-new-privileges`, removed when replaced or dropped), started by `sandbox_start { scenario, image? }` as a terminal card (answer-mode view `Terminal`, `calls = ["run"]`). Scenarios are fixed pairs of `sh` scripts (`permissions`, `find-the-flag`, `harden-sshd`, `stop-the-service`): a setup run in the container after it starts and a check run in it on demand. The tutor reads the learner's commands with `sandbox_observe` and runs the check with `sandbox_check`; Submit runs the same check through `grade_artifact` against the lab the card ran its commands in, and the tutor records the verdict. A random flag is passed to setup and check only, never to the learner's shell. Permission `exec`, so it starts disabled until the learner enables it. Detail: `docs/plugins.md` §12 `sandbox`.
 
 **Output placement: a handle in the prose.** A tool with `artifact = true` returns an artifact (a static SVG plus the data a view needs), which is stored as an `artifact` op. The model receives the handle and one instruction line, then places the figure itself with `![short description](artifact:<id>)` next to the sentence that refers to it. The UI resolves the reference to a view or the fallback SVG. Built-in syntax (math, code, mermaid) stays inline.
 
@@ -844,7 +846,7 @@ Alternatives considered at the plugin level:
 
 **Is web search standard or a plugin?** Both, at different levels.
 - *Verifying* a fact is standard for every session. `research_request` runs a background researcher that returns a short cited brief, so raw search results never enter the tutor's context.
-- *Searching inside the lesson* is the `live-search` plugin. It is for subjects that need to show current or visual material throughout: fashion collections, current threats, fast-moving tools.
+- *Searching inside the lesson* is the built-in `live-search` plugin (native, `net`; `docs/plugins.md` §12). It is for subjects that need to show current or visual material throughout: fashion collections, current threats, fast-moving tools. It reuses the researcher's search chain and `page_fetch` behind the same URL guard. Its image search downloads each image and embeds it in the figure as a `data:` URI, so the learner's screen never loads a remote URL and replay needs no network.
 - Making live search standard would put hundreds of tokens of snippets into stable subjects such as calculus for no gain.
 
 | Alternative | For | Against |
@@ -972,7 +974,7 @@ The decision rests on a controlled experiment with 390 novices that found no evi
 | Server-side SVG rendering | No client bundle | A server (violates R1) and a round trip per block |
 | Text-only diagrams (ASCII) | Tiny | Poor legibility and accessibility on a phone |
 
-**No tree-sitter in this build.** A tree-sitter code plugin may come later for tasks that need parsing (structure-aware editing, precise error ranges); it is not part of output rendering. Sources and measured sizes: jsDelivr `mermaid@11/dist/mermaid.min.js`, `@highlightjs/cdn-assets@11/highlight.min.js`, `prismjs@1/prism.min.js`, `web-tree-sitter/tree-sitter.wasm`, all measured 2026-11-06.
+**No tree-sitter in output rendering.** Parsing-dependent tasks get the built-in native plugin `code-parse` instead (2026-11-13; `docs/plugins.md` §12): the tree-sitter Rust crate with a fixed set of compiled grammars (Python, JavaScript/JSX, TypeScript, TSX, Rust, C; about 6 MB together), giving the tutor a file's outline, exact syntax-error ranges and a symbol's definition and uses. It is a tool for the agent, not part of how messages or code blocks render, which stay on Prism. Sources and measured sizes: jsDelivr `mermaid@11/dist/mermaid.min.js`, `@highlightjs/cdn-assets@11/highlight.min.js`, `prismjs@1/prism.min.js`, `web-tree-sitter/tree-sitter.wasm`, all measured 2026-11-06.
 
 ### 4.25 Learner attachments and session workspaces
 
@@ -1283,7 +1285,7 @@ Not built yet:
   - every plugin is a package with `plugin.toml`, Luau modules, JSON Schemas, optional view and fragments (§4.20, `docs/plugins.md`);
   - Luau runs in `mlua` with a sandbox, a 64 MiB cap, a 2 s tool-call interrupt and a 200 ms view-bridge interrupt;
   - views are HTML in a sandboxed iframe with an allow-listed `postMessage` bridge;
-  - native Rust plugins keep the `Plugin` trait for future system access (`sandbox`, `code-runner`, `repl`, `cas`); none is implemented.
+  - native Rust plugins keep the `Plugin` trait for system access: `code-parse`, `live-search`, `image-set`, `code-runner`, `repl`, `cas` and `sandbox` are built in (`plugins/native/`), and a built-in that declares permissions stays disabled until the learner consents in Settings (§4.20).
 
 ---
 
@@ -1323,7 +1325,7 @@ Not built yet:
 5. **Done (2026-11-07): sync.** `git2` with per-file conflict resolution: union merges for op logs, local-wins + `.conflicts/` elsewhere, device-local remote and token (`docs/sync-build.md`). Proof is against local bare repositories; a real host, a phone, and libgit2 on Android are unproven.
 6. **Learner model + practice:** outcomes log, FSRS, layers, the coach (write → problem checker → check script → pose), stream/set/exam formats, exam mode.
 7. **Android build** (the flake's `android` shell), then **iOS**.
-8. **Remaining modes and their plugins,** in order of grader objectivity: fact; procedure (native `code-runner`, `repl`, then `sandbox`); perceptual (`image-set`, `live-search`); argument (`argument-map`, then comparative judging for essays once anchors exist).
+8. **Remaining modes and their plugins,** in order of grader objectivity: fact; procedure (native `code-runner`, `repl`, `cas` and `sandbox`: all built); perceptual (`image-set`, `live-search`: built); argument (`argument-map`: built; then comparative judging for essays once anchors exist).
 
 ---
 

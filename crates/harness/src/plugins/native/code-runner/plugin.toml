@@ -1,0 +1,32 @@
+# Built-in native plugin (docs/plugins.md §12), compiled into the app from
+# this directory by crates/harness/src/plugins/native/code_runner.rs. Tool
+# `entry` names the Rust method; there is no src/main.luau.
+id = "code-runner"
+version = "0.1.0"
+api = 1
+title = "Code runner"
+description = "Lets the learner write, fix, read and run code inside the lesson, graded by the tutor's tests."
+license = "MIT"
+platforms = ["desktop"]
+permissions = ["exec"]
+use_when = "Programming sections where the learner must write, read, debug or predict the output of code."
+avoid_when = "The section is about concepts that don't need running code, e.g. what a hash table is for."
+cost = "Runs the language toolchains installed on this device; each run takes up to 10 seconds."
+
+[[tool]]
+name = "code_runner_task"
+description = "Make a code task card the learner works in (edit, run, predict). Checks your tests (and your reference solution) first. Then ask with question_ask { view: { artifactId, task, target: {} } }; the answer holds the learner's code, every run, the test results and their prediction."
+agents = ["tutor", "practice"]
+input = "schemas/code_runner_task.json"
+entry = "task"
+artifact = true
+
+[[view]]
+name = "Code task"
+html = "views/task.html"
+calls = ["run"]
+answer = true
+
+[prompts]
+tutor = "prompts/tutor.md"
+practice = "prompts/practice.md"

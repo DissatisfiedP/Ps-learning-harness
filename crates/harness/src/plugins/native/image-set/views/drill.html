@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 12px; background: var(--paper, #fff); color: var(--ink, #111); font: 14px/1.4 var(--font-ui, system-ui, sans-serif); }
+  ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+  li { border: 1px solid var(--rule, #ccc); border-radius: 6px; padding: 8px; background: var(--raised, transparent); }
+  .num { font-weight: 600; color: var(--ink-2, #444); margin-bottom: 6px; }
+  .imgs { display: flex; gap: 8px; flex-wrap: wrap; }
+  .imgs figure { margin: 0; text-align: center; }
+  .imgs img { display: block; max-width: 220px; max-height: 180px; border-radius: 4px; }
+  .choices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  label { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--rule, #ccc); border-radius: 12px; cursor: pointer; }
+  button { margin-top: 12px; padding: 6px 14px; border: 0; border-radius: 6px; background: var(--accent, #2563eb); color: var(--on-accent, #fff); font: inherit; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { color: var(--ink-3, #666); margin: 0 0 8px; }
+</style>
+</head>
+<body>
+<p class="hint" id="hint"></p>
+<ol id="items"></ol>
+<button id="submit" hidden disabled>Submit answers</button>
+<script>
+(() => {
+  const send = (m) => { m.protocol = 1; parent.postMessage(m, '*'); };
+  const theme = (t) => {
+    for (const [k, v] of Object.entries(t || {})) document.documentElement.style.setProperty('--' + k, v);
+  };
+  const el = (tag, props, ...kids) => {
+    const e = document.createElement(tag);
+    Object.assign(e, props || {});
+    for (const k of kids) e.append(k);
+    return e;
+  };
+  const resize = () => send({ type: 'resize', height: document.body.scrollHeight });
+  const HINTS = {
+    'classify': 'Pick the label for each image.',
+    'same-or-different': 'Do the two images in each item share a label?',
+    'odd-one-out': 'Pick the image whose label differs from the other two.',
+  };
+  let answers = [];
+  let answerMode = false;
+  const button = document.getElementById('submit');
+  const update = () => {
+    button.disabled = answers.some((a) => a === null);
+  };
+
+  function render(data, answer) {
+    const items = Array.isArray(data.items) ? data.items : [];
+    const format = data.format;
+    answerMode = !!answer;
+    answers = items.map(() => null);
+    document.getElementById('hint').textContent = HINTS[format] || '';
+    const list = document.getElementById('items');
+    list.replaceChildren();
+    items.forEach((item, i) => {
+      const imgs = el('div', { className: 'imgs' });
+      (item.images || []).forEach((src, j) => {
+        if (typeof src !== 'string' || !src.startsWith('data:image/')) return;
+        const fig = el('figure', {}, el('img', { src, alt: `Item ${i + 1}, image ${j + 1}` }));
+        if (format === 'odd-one-out') fig.append(el('figcaption', { textContent: String.fromCharCode(65 + j) }));
+        imgs.append(fig);
+      });
+      const li = el('li', {}, el('div', { className: 'num', textContent: `${i + 1}.` }), imgs);
+      if (answerMode) {
+        let options;
+        if (format === 'classify') options = (data.choices || []).map((c) => [c, c]);
+        else if (format === 'same-or-different') options = [['same', 'Same'], ['different', 'Different']];
+        else options = (item.images || []).map((_, j) => [j, String.fromCharCode(65 + j)]);
+        const choices = el('div', { className: 'choices', role: 'radiogroup' });
+        for (const [value, text] of options) {
+          const input = el('input', { type: 'radio', name: `item-${i}` });
+          input.addEventListener('change', () => { answers[i] = value; update(); });
+          choices.append(el('label', {}, input, text));
+        }
+        li.append(choices);
+      }
+      list.append(li);
+    });
+    button.hidden = !answerMode;
+    update();
+    for (const img of document.images) img.addEventListener('load', resize);
+    resize();
+  }
+
+  button.addEventListener('click', () => {
+    if (button.disabled) return;
+    send({ type: 'submit', answer: { answers } });
+    button.disabled = true;
+    for (const input of document.querySelectorAll('input')) input.disabled = true;
+  });
+
+  window.addEventListener('message', (event) => {
+    const m = event.data;
+    if (event.source !== parent || !m || typeof m !== 'object' || m.protocol !== 1) return;
+    if (m.type === 'init') {
+      theme(m.theme);
+      render((m.artifact && m.artifact.data) || {}, m.answer);
+    }
+    if (m.type === 'theme') theme(m.theme);
+  });
+  resize();
+})();
+</script>
+</body>
+</html>

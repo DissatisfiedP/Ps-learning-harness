@@ -15,6 +15,12 @@ use harness::{Harness, Op};
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
+/// Plugins the learner installed or added: the built-in native ones are
+/// always listed and aren't what these tests count.
+fn installed(h: &Harness) -> Vec<harness::plugins::PluginInfo> {
+    h.plugins().into_iter().filter(|p| !p.builtin).collect()
+}
+
 /// Artifact ops of a session, as JSON, in log order.
 fn artifacts(h: &Harness, id: &str) -> Vec<Value> {
     ops(h, id)
@@ -588,12 +594,12 @@ async fn a_folder_plugin_reloads_when_its_files_change() {
     let dir = tally_plugin(&root, "Counts things.", 1);
     h.add_folder_plugin(dir.to_str().unwrap()).unwrap();
     assert_eq!(h.plugin_view_call("tally", "count", json!({})).unwrap(), 1);
-    let first_hash = h.plugins()[0].package_hash.clone();
+    let first_hash = installed(&h)[0].package_hash.clone();
 
     // An edit on disk is picked up by the next use: manifest, code, hash.
     tally_plugin(&root, "Counts things twice over.", 22);
     assert_eq!(h.plugin_view_call("tally", "count", json!({})).unwrap(), 22);
-    let info = &h.plugins()[0];
+    let info = &installed(&h)[0];
     assert_eq!(info.description, "Counts things twice over.");
     assert_ne!(info.package_hash, first_hash);
     assert!(info.load_error.is_none());
@@ -605,7 +611,7 @@ async fn a_folder_plugin_reloads_when_its_files_change() {
     )
     .unwrap();
     assert_eq!(h.plugin_view_call("tally", "count", json!({})).unwrap(), 22);
-    let info = &h.plugins()[0];
+    let info = &installed(&h)[0];
     assert_eq!(info.description, "Counts things twice over.");
     let err = info.load_error.clone().expect("the error is reported");
     assert!(err.contains("plugin.toml"), "{err}");
@@ -616,7 +622,7 @@ async fn a_folder_plugin_reloads_when_its_files_change() {
         h.plugin_view_call("tally", "count", json!({})).unwrap(),
         333
     );
-    assert!(h.plugins()[0].load_error.is_none());
+    assert!(installed(&h)[0].load_error.is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -767,7 +773,7 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
     h.approve(&id, vec![]).await.unwrap();
     let st = h.session_state(&id).unwrap();
     assert!(st.active_plugins.is_empty());
-    assert!(h.plugins().is_empty());
+    assert!(installed(&h).is_empty());
     assert!(ops(&h, &id).iter().any(|o| matches!(o, Op::Message(m)
         if m.tag.as_deref() == Some("plan-notice")
             && m.content.contains("Left out until installed: Dividers (circuit)"))));
@@ -793,7 +799,7 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
         .to_string();
     assert!(err.contains("permissions must be empty"), "{err}");
     assert!(!config.join("plugins").join("circuit").exists());
-    assert!(h.plugin_lock().unwrap().is_empty() && h.plugins().is_empty());
+    assert!(h.plugin_lock().unwrap().is_empty() && installed(&h).is_empty());
 
     // Install writes the lock; then plugin_request grants it mid-section.
     let info = h
@@ -864,7 +870,7 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
             .unwrap_err()
             .to_string(),
     );
-    assert_eq!(h.plugins()[0].version, "0.1.0");
+    assert_eq!(installed(&h)[0].version, "0.1.0");
     gate.add_permits(1);
     turn.await.unwrap().unwrap();
     refused(
@@ -873,7 +879,7 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
             .unwrap_err()
             .to_string(),
     );
-    assert_eq!(h.plugins()[0].version, "0.1.0");
+    assert_eq!(installed(&h)[0].version, "0.1.0");
 
     // Once the session leaves the section, updates are allowed again.
     s.push(
@@ -940,7 +946,7 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
         std::sync::Arc::new(harness::secrets::SecretStore::memory()),
     )
     .unwrap();
-    assert!(h.plugins().is_empty());
+    assert!(installed(&h).is_empty());
     let missing = h.missing_locked().unwrap();
     assert_eq!(missing.len(), 1);
     assert_eq!(

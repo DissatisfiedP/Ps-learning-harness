@@ -113,7 +113,7 @@ export function pluginLabel(id) {
  * Shows the consent screen and runs `action` only if the learner agrees.
  * Resolves the action's value, or null on cancel.
  */
-export function askConsent(details, action, { label = 'Install' } = {}) {
+export function askConsent(details, action, { label = 'Install', busy = 'Installing…', done = 'Installed.' } = {}) {
   const dialog = element('consent');
   if (!dialog) return Promise.resolve(null);
   element('consent-title').textContent = details.title || 'Install this plugin?';
@@ -150,10 +150,10 @@ export function askConsent(details, action, { label = 'Install' } = {}) {
     const accept = async () => {
       install.disabled = true;
       cancel.disabled = true;
-      statusEl.textContent = 'Installing…';
+      statusEl.textContent = busy;
       try {
         const value = await action();
-        statusEl.textContent = 'Installed.';
+        statusEl.textContent = done;
         finish(value);
       } catch (e) {
         install.disabled = false;
@@ -350,7 +350,7 @@ function pluginRow(info, catalog) {
 
   const meta = document.createElement('p');
   meta.className = 'meta';
-  meta.textContent = `${info.id} · ${info.enabled === false ? 'Disabled' : 'Enabled'} · ${info.source}`;
+  meta.textContent = `${info.id} · ${info.enabled === false ? 'Disabled' : 'Enabled'} · ${info.builtin ? 'built in' : info.source}`;
   row.append(meta);
 
   const access = document.createElement('p');
@@ -376,18 +376,45 @@ function pluginRow(info, catalog) {
   const actions = document.createElement('div');
   actions.className = 'actions';
 
+  // A built-in that declares permissions starts off; turning it on is the
+  // learner's consent to them, so it goes through the same screen as an
+  // install and the core records the consent (`enabledPlugins`).
+  const enabling = info.enabled === false;
+  const needsConsent = enabling && info.builtin && (info.permissions?.length ?? 0) > 0;
+  const name = info.title || info.id;
   const toggle = document.createElement('button');
   toggle.type = 'button';
   toggle.className = 'btn text';
-  toggle.textContent = info.enabled === false ? 'Enable' : 'Disable';
-  toggle.setAttribute('aria-label', `${info.enabled === false ? 'Enable' : 'Disable'} ${info.title || info.id}`);
+  toggle.textContent = enabling ? 'Enable' : 'Disable';
+  toggle.setAttribute('aria-label', `${enabling ? 'Enable' : 'Disable'} ${name}`);
+  const setEnabled = async () => {
+    await call('set_plugin_enabled', { id: info.id, enabled: enabling });
+    await loadPlugins(true);
+    onChanged();
+  };
   toggle.addEventListener('click', async () => {
     toggle.disabled = true;
     try {
-      await call('set_plugin_enabled', { id: info.id, enabled: info.enabled === false });
-      await loadPlugins(true);
-      onChanged();
-      status(`${info.title || info.id} ${info.enabled === false ? 'enabled' : 'disabled'}.`);
+      if (needsConsent) {
+        const done = await askConsent(
+          {
+            title: `Enable ${name}?`,
+            description: info.description,
+            version: info.version,
+            source: 'Built in to this app',
+            permissions: info.permissions,
+          },
+          setEnabled,
+          { label: 'Enable', busy: 'Enabling…', done: 'Enabled.' },
+        );
+        if (done === null) {
+          toggle.disabled = false;
+          return;
+        }
+      } else {
+        await setEnabled();
+      }
+      status(`${name} ${enabling ? 'enabled' : 'disabled'}.`);
       await render();
     } catch (e) {
       status(message(e), true);
@@ -418,25 +445,28 @@ function pluginRow(info, catalog) {
     actions.append(update);
   }
 
-  const remove = document.createElement('button');
-  remove.type = 'button';
-  remove.className = 'btn text';
-  remove.textContent = 'Remove';
-  remove.setAttribute('aria-label', `Remove ${info.title || info.id}`);
-  remove.addEventListener('click', async () => {
-    remove.disabled = true;
-    try {
-      await call('remove_plugin', { id: info.id });
-      await loadPlugins(true);
-      onChanged();
-      status(`${info.title || info.id} removed.`);
-      await render();
-    } catch (e) {
-      status(message(e), true);
-      remove.disabled = false;
-    }
-  });
-  actions.append(remove);
+  // A built-in is part of the app: it can be turned off, not removed.
+  if (!info.builtin) {
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn text';
+    remove.textContent = 'Remove';
+    remove.setAttribute('aria-label', `Remove ${name}`);
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      try {
+        await call('remove_plugin', { id: info.id });
+        await loadPlugins(true);
+        onChanged();
+        status(`${name} removed.`);
+        await render();
+      } catch (e) {
+        status(message(e), true);
+        remove.disabled = false;
+      }
+    });
+    actions.append(remove);
+  }
 
   row.append(actions);
   return row;

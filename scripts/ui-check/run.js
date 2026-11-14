@@ -807,10 +807,31 @@ async function library() {
   expect(/1 guide · 1 question bank/.test(row) && /From \/home\/learner\/huawei-ict on this device/.test(row) && /Refresh/.test(row), `library row: ${row}`);
   await page.evaluate(`document.querySelector('#library-list .library').scrollIntoView({ block: 'center' })`);
   await page.shot('library-settings');
+  // Settings → Libraries → Image sets: empty, import a labelled folder, remove it.
+  const SETS = `({ rows: [...document.querySelectorAll('#image-set-list .image-set')].map((r) => r.textContent), help: document.querySelector('#image-set-list .help')?.textContent ?? null, status: document.getElementById('image-set-status').textContent })`;
+  let sets = await page.evaluate(SETS);
+  expect(sets.rows.length === 0 && sets.help === 'No image sets yet.', `empty image sets: ${JSON.stringify(sets)}`);
+  await page.evaluate(click('image-set-import'));
+  await until('the imported image set', () => page.evaluate(`document.querySelectorAll('#image-set-list .image-set').length === 1`));
+  sets = await page.evaluate(SETS);
+  expect(/huawei-ict/.test(sets.rows[0]) && /7 images, 2 labels: crow 4 · raven 3/.test(sets.rows[0])
+    && sets.status === 'huawei-ict: 7 images in 2 labels. Skipped 1 file (not an image, or over 5 MB).', `image set row: ${JSON.stringify(sets)}`);
+  const imported = await page.evaluate(`${argsOf('image_set_import')}`);
+  expect(JSON.stringify(imported) === JSON.stringify([{ path: '/home/learner/huawei-ict', name: null }]), `image_set_import args: ${JSON.stringify(imported)}`);
+  await page.evaluate(`document.getElementById('image-set-list').scrollIntoView({ block: 'center' })`);
+  await page.shot('image-sets-settings');
+  await page.evaluate(`[...document.querySelectorAll('#image-set-list .image-set button')].find((b) => b.textContent === 'Remove').click()`);
+  await until('the remove confirmation', () => page.evaluate(`document.getElementById('confirm').open`));
+  const confirmTitle = await page.evaluate(`document.getElementById('confirm-title').textContent`);
+  expect(confirmTitle === 'Remove huawei-ict?', `confirm title: ${confirmTitle}`);
+  await page.evaluate(click('confirm-ok'));
+  await until('the set removed', () => page.evaluate(`document.querySelectorAll('#image-set-list .image-set').length === 0`));
+  sets = await page.evaluate(SETS);
+  expect(sets.status === 'Removed huawei-ict.' && sets.help === 'No image sets yet.', `after remove: ${JSON.stringify(sets)}`);
   const errors = await page.evaluate('window.__errors');
   expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
   await page.close();
-  console.log('library: Home + menu (files, folder as library, link list), import → chip with result line, linked state, Escape, Settings → Libraries row checked');
+  console.log('library: Home + menu (files, folder as library, link list), import → chip with result line, linked state, Escape, Settings → Libraries row, Image sets (empty, import, row, remove with confirmation) checked');
 }
 
 
@@ -1026,7 +1047,7 @@ async function session() {
   console.log('session: debrief list (five verdict groups, notes, sources, tip attribution/scope, after the reply), plan sheet controls (box ⋯ → drawer, level + known parts, Escape, plan options, list Options, Send → one edit_plan)');
 }
 
-const cases = { ipc, placement, sync, library, map, session, turn };
+const cases = { ipc, placement, sync, library, map, session, turn, plugins: pluginsCase };
 // The backend's turn status decides the "reply owed" offer; the page doesn't
 // guess it from the last message.
 async function turn() {
@@ -1042,6 +1063,72 @@ async function turn() {
   expect(cmds.includes('resume_turn'), `resume_turn after the click; last commands: ${JSON.stringify(cmds)}`);
   await page.close();
   console.log('turn: a failed last turn is offered with the backend reason and retries through resume_turn');
+}
+
+// Built-in plugins in Settings → Plugins: never removable, labelled "built
+// in", and one that declares permissions stays off until the consent screen
+// naming them is accepted (the core records it; plugins/load.rs).
+async function pluginsCase() {
+  const page = await openApp('none', { query: '&builtins=1' });
+  await page.evaluate(click('open-settings'));
+  await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
+  await until('the plugin rows', () => page.evaluate(`document.querySelectorAll('#plugin-list .plugin').length === 5`));
+  const row = (id) => `document.querySelector('#plugin-list .plugin[data-id="${id}"]')`;
+  const buttons = (id) => page.evaluate(`[...${row(id)}.querySelectorAll('.actions button')].map((b) => b.textContent)`);
+  const state = (id) => page.evaluate(`({ meta: ${row(id)}.querySelector('.meta').textContent, access: ${row(id)}.querySelectorAll('.meta')[1].textContent })`);
+  const press = (id, label) => page.evaluate(`[...${row(id)}.querySelectorAll('.actions button')].find((b) => b.textContent === '${label}').click()`);
+  const consent = `(() => { const d = document.getElementById('consent'); return { open: d.open, title: document.getElementById('consent-title').textContent, perms: document.getElementById('consent-perms').textContent, source: document.getElementById('consent-source').textContent, action: document.getElementById('consent-install').textContent }; })()`;
+
+  // Built-ins carry no Remove; a package plugin still does.
+  for (const id of ['code-parse', 'cas', 'live-search']) {
+    const b = await buttons(id);
+    expect(!b.includes('Remove'), `${id} (built in) offers Remove: ${b}`);
+  }
+  expect((await buttons('circuit')).includes('Remove'), 'a package plugin lost its Remove button');
+  const parse = await state('code-parse');
+  expect(/Enabled · built in/.test(parse.meta), `code-parse row: ${parse.meta}`);
+  expect((await buttons('code-parse')).includes('Disable'), 'a permission-free built-in should start enabled');
+
+  // A built-in that declares permissions starts off, naming them.
+  const cas = await state('cas');
+  expect(/Disabled · built in/.test(cas.meta) && /Run programs on your device/.test(cas.access), `cas row: ${JSON.stringify(cas)}`);
+  expect((await buttons('cas')).includes('Enable'), 'cas should offer Enable');
+
+  // Enable → the consent screen first; Cancel changes nothing.
+  await press('cas', 'Enable');
+  await until('the consent screen', () => page.evaluate(`document.getElementById('consent').open`));
+  let c = await page.evaluate(consent);
+  expect(/Enable Computer algebra/.test(c.title) && /Run programs on your device/.test(c.perms) && /Built in/.test(c.source) && c.action === 'Enable', `cas consent: ${JSON.stringify(c)}`);
+  expect((await page.evaluate(argsOf('set_plugin_enabled'))).length === 0, 'enabling reached the core before consent');
+  await page.evaluate(`document.getElementById('consent-cancel').click()`);
+  await until('the screen closed', () => page.evaluate(`!document.getElementById('consent').open`));
+  expect((await page.evaluate(argsOf('set_plugin_enabled'))).length === 0, 'Cancel still enabled the plugin');
+  expect(/Disabled/.test((await state('cas')).meta) && (await buttons('cas')).includes('Enable'), 'Cancel changed the row');
+
+  // Accept: exactly one enable call, the row turns on.
+  await press('cas', 'Enable');
+  await until('the consent screen again', () => page.evaluate(`document.getElementById('consent').open`));
+  await page.evaluate(`document.getElementById('consent-install').click()`);
+  await until('cas enabled', () => page.evaluate(`/Enabled · built in/.test(${row('cas')}?.querySelector('.meta')?.textContent ?? '')`));
+  expect(JSON.stringify(await page.evaluate(argsOf('set_plugin_enabled'))) === JSON.stringify([{ id: 'cas', enabled: true }]), `enable calls: ${JSON.stringify(await page.evaluate(argsOf('set_plugin_enabled')))}`);
+  expect((await buttons('cas')).includes('Disable'), 'cas should now offer Disable');
+
+  // Turning one off needs no consent.
+  await press('cas', 'Disable');
+  await until('cas disabled', () => page.evaluate(`/Disabled · built in/.test(${row('cas')}?.querySelector('.meta')?.textContent ?? '')`));
+  expect(!(await page.evaluate(`document.getElementById('consent').open`)), 'Disable asked for consent');
+
+  // The network one names its own permission.
+  await press('live-search', 'Enable');
+  await until('live-search consent', () => page.evaluate(`document.getElementById('consent').open`));
+  c = await page.evaluate(consent);
+  expect(/Use the network/.test(c.perms) && !/programs/.test(c.perms), `live-search consent: ${JSON.stringify(c)}`);
+  await page.evaluate(`document.getElementById('consent-cancel').click()`);
+
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+  console.log('plugins: built-ins have no Remove and read "built in"; one with permissions starts off, Enable shows the consent screen naming them (Cancel changes nothing), Disable needs none');
 }
 
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases);

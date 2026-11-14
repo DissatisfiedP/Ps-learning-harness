@@ -186,6 +186,11 @@ pub struct Settings {
     /// Installed plugins the learner turned off.
     #[serde(default)]
     pub disabled_plugins: Vec<String>,
+    /// Built-in native plugins that need a permission (`exec`, `net`, …) and
+    /// that the learner enabled in Settings: they start disabled, and
+    /// enabling one is the consent to its permissions (docs/plugins.md §12).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled_plugins: Vec<String>,
     /// How a new session measures the learner (docs/learning-system.md §3):
     /// `measure` (the full probe), `quick` (at most five questions) or `new`
     /// (no probe questions). Remembered as the learner's default; the tutor

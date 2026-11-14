@@ -20,6 +20,28 @@
       hasView: true, tools: ['ipc_probe_show'],
     },
   ];
+  // `?builtins=1`: the compiled-in plugins, as the core lists them -- one
+  // that needs no permissions (on from the start), two that declare some
+  // (off until the learner consents).
+  if (new URLSearchParams(location.search).get('builtins') === '1') {
+    plugins.push(
+      {
+        id: 'code-parse', title: 'Code structure', description: 'Parses source into a syntax tree.', version: '0.1.0', api: 1,
+        platforms: ['desktop', 'mobile'], permissions: [], enabled: true, source: 'built-in', packageHash: 'builtin-code-parse',
+        hasView: false, tools: ['code_parse'], builtin: true, onPlatform: true,
+      },
+      {
+        id: 'cas', title: 'Computer algebra', description: 'Exact algebra with SymPy.', version: '0.1.0', api: 1,
+        platforms: ['desktop'], permissions: ['exec'], enabled: false, source: 'built-in', packageHash: 'builtin-cas',
+        hasView: true, tools: ['cas_solve'], builtin: true, onPlatform: true,
+      },
+      {
+        id: 'live-search', title: 'Live search', description: 'Searches the web while teaching.', version: '0.1.0', api: 1,
+        platforms: ['desktop', 'mobile'], permissions: ['net'], enabled: false, source: 'built-in', packageHash: 'builtin-live-search',
+        hasView: false, tools: ['live_search'], builtin: true, onPlatform: true,
+      },
+    );
+  }
   const views = {
     circuit: { name: 'circuit', html: '', calls: ['solve', 'render'], answer: true },
     'ipc-probe': { name: 'ipc-probe', html: '', calls: [], answer: false },
@@ -154,6 +176,7 @@
   const secretStorage = { backend: 'os', label: 'the Secret Service (desktop keyring)', secure: true, notice: null };
   let finishLogin = null;
   let libraries = [];
+  let imageSets = [];
   const appHandlers = {
     subscribe_events: () => null,
     list_sessions: () => [],
@@ -194,6 +217,18 @@
       };
       libraries = [...libraries.filter((l) => l.slug !== slug), lib];
       return { library: lib, added: 2, changed: 0, unchanged: 0, removed: 0 };
+    },
+    image_sets: () => structuredClone(imageSets),
+    // A labelled folder becomes a set (subfolder name = label).
+    image_set_import: ({ path, name }) => {
+      const title = name || path.split('/').at(-1);
+      const set = { id: title.toLowerCase(), title, size: 7, labels: [{ label: 'crow', count: 4 }, { label: 'raven', count: 3 }] };
+      imageSets = [...imageSets.filter((s) => s.id !== set.id), set];
+      return { set, skipped: 1 };
+    },
+    image_set_remove: ({ id }) => {
+      imageSets = imageSets.filter((s) => s.id !== id);
+      return null;
     },
   };
 
@@ -358,7 +393,19 @@
     ...syncHandlers,
     ...appHandlers,
     ...(learnFixture ? learnHandlers : {}),
-    plugins: () => plugins,
+    plugins: () => structuredClone(plugins),
+    // The core's rules (plugins/load.rs): a built-in with permissions is
+    // only turned on by consent, and none can be removed.
+    set_plugin_enabled: ({ id, enabled }) => {
+      const p = plugins.find((x) => x.id === id);
+      if (!p) throw new Error(`plugin ${id} was not found`);
+      p.enabled = enabled;
+    },
+    remove_plugin: ({ id }) => {
+      const p = plugins.find((x) => x.id === id);
+      if (p?.builtin) throw new Error(`\`${id}\` is built in; turn it off instead of removing it`);
+      plugins.splice(0, plugins.length, ...plugins.filter((x) => x.id !== id));
+    },
     plugin_view: ({ pluginId }) => {
       if (!views[pluginId]) throw new Error(`plugin \`${pluginId}\` has no view`);
       return views[pluginId];

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "scenario": {
+      "type": "string",
+      "enum": ["permissions", "find-the-flag", "harden-sshd", "stop-the-service"]
+    },
+    "image": {
+      "type": "string",
+      "description": "Container image to run the scenario in (default alpine:3.20). It needs a POSIX sh, awk and, for stop-the-service, busybox."
+    }
+  },
+  "required": [
+    "scenario"
+  ],
+  "additionalProperties": false
+}

@@ -35,15 +35,16 @@ impl Harness {
         lock(&self.plugins).platform() == "mobile"
     }
 
-    /// Rebuild the registry from installed packages, folder plugins and the
-    /// learner's enable/disable choices. A broken package is skipped with a
-    /// warning, never crashing the app.
+    /// Rebuild the registry from installed packages, folder plugins, the
+    /// built-in natives and the learner's enable/disable choices. A broken
+    /// package is skipped with a warning, never crashing the app.
     pub fn reload_plugins(&self) -> Result<(), Error> {
-        let (folders, disabled) = {
+        let (folders, disabled, consented) = {
             let config = lock(&self.config);
             (
                 config.settings.plugin_folders.clone(),
                 config.settings.disabled_plugins.clone(),
+                config.settings.enabled_plugins.clone(),
             )
         };
         // Keep the platform the registry already has (the build target's,
@@ -111,11 +112,40 @@ impl Harness {
                 Err(e) => tracing::warn!(path = %folder.path, error = %e, "skipping folder plugin"),
             }
         }
+        // Built-ins last, so a package can't shadow one. They are made once
+        // per Harness and carried across rebuilds (their REPLs and labs are
+        // per-instance state).
+        let builtins = {
+            let old = lock(&self.plugins);
+            let mut kept = old.builtins();
+            if !old.builtins_loaded() {
+                kept.extend(super::native::builtin(&self.native_env()));
+            }
+            kept
+        };
+        for plugin in builtins {
+            let id = plugin.manifest().id.clone();
+            let needs_consent = !plugin.manifest().permissions.is_empty();
+            registry.register(plugin, PluginSource::Builtin, format!("builtin-{id}"));
+            if needs_consent && !consented.contains(&id) {
+                registry.disable(&id);
+            }
+        }
+        registry.mark_builtins_loaded();
         for id in disabled {
             registry.disable(&id);
         }
         *lock(&self.plugins) = registry;
         Ok(())
+    }
+
+    /// What the built-in natives get from the host.
+    fn native_env(&self) -> super::native::NativeEnv {
+        super::native::NativeEnv {
+            repo: self.repo.clone(),
+            config_dir: self.config_dir.clone(),
+            client: self.client.clone(),
+        }
     }
 
     /// The plugin registry, with folder plugins reloaded first if their files
@@ -172,12 +202,25 @@ impl Harness {
         self.plugin_registry().info()
     }
 
+    /// Turn a plugin on or off (device-local). For a built-in that declares
+    /// permissions, enabling is the learner's consent to them and is
+    /// remembered in `enabledPlugins`; disabling withdraws it.
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<(), Error> {
+        let needs_consent = {
+            let registry = lock(&self.plugins);
+            registry.is_builtin(id)
+                && registry
+                    .manifest(id)
+                    .is_some_and(|m| !m.permissions.is_empty())
+        };
         {
             let mut config = lock(&self.config);
             config.settings.disabled_plugins.retain(|p| p != id);
+            config.settings.enabled_plugins.retain(|p| p != id);
             if !enabled {
                 config.settings.disabled_plugins.push(id.to_owned());
+            } else if needs_consent {
+                config.settings.enabled_plugins.push(id.to_owned());
             }
             config.save_settings()?;
         }
@@ -200,6 +243,7 @@ impl Harness {
         version: &str,
     ) -> Result<PluginInfo, Error> {
         install::check_id(id)?;
+        self.check_not_builtin(id)?;
         self.check_not_in_use(id)?;
         let lists = |index: &install::RegistryIndex| {
             index
@@ -300,6 +344,17 @@ impl Harness {
             .expect("just registered"))
     }
 
+    /// A package may not take a built-in's id (the built-in would replace it
+    /// at the next reload anyway).
+    fn check_not_builtin(&self, id: &str) -> Result<(), Error> {
+        if lock(&self.plugins).is_builtin(id) {
+            return Err(Error::Invalid(format!(
+                "`{id}` is a built-in plugin's id; a package can't replace it"
+            )));
+        }
+        Ok(())
+    }
+
     /// Add a development plugin by folder and remember it in settings.
     pub fn add_folder_plugin(&self, path: &str) -> Result<PluginInfo, Error> {
         let dir = PathBuf::from(path)
@@ -307,6 +362,7 @@ impl Harness {
             .map_err(|e| Error::Invalid(format!("can't open that folder ({e})")))?;
         let package = LuauPlugin::open(&dir).map_err(Error::Invalid)?;
         let manifest = package.manifest().clone();
+        self.check_not_builtin(&manifest.id)?;
         let hash = super::package_hash(&dir);
         let name = manifest.id.clone();
         {
@@ -340,6 +396,11 @@ impl Harness {
 
     pub fn remove_plugin(&self, id: &str) -> Result<(), Error> {
         install::check_id(id)?;
+        if lock(&self.plugins).is_builtin(id) {
+            return Err(Error::Invalid(format!(
+                "`{id}` is built into the app and can't be removed; disable it instead"
+            )));
+        }
         {
             let mut config = lock(&self.config);
             config.settings.plugin_folders.retain(|f| f.id != id);

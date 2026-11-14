@@ -1,0 +1,48 @@
+# Built-in native plugin (docs/plugins.md §12), compiled into the app from
+# this directory by crates/harness/src/plugins/native/sandbox.rs. Tool
+# `entry` names the Rust method; there is no src/main.luau.
+id = "sandbox"
+version = "0.1.0"
+api = 1
+title = "Lab sandbox"
+description = "Boots a disposable local container lab that the learner works in through a terminal card, and checks the result inside the lab."
+license = "MIT"
+platforms = ["desktop"]
+permissions = ["exec"]
+use_when = "Hands-on systems or security skills that must be performed against a real target (permissions, log analysis, hardening a service config, stopping a service)."
+avoid_when = "The section is conceptual; a diagram or a worked transcript would do."
+cost = "Starts a local container (no network, 256 MB, 1 CPU); needs Podman or Docker on the learner's machine and pulls the image the first time."
+
+[[tool]]
+name = "sandbox_start"
+description = "Boot a lab from the scenario catalog and make its terminal card for the learner. One lab per chat; starting another removes the old one."
+agents = ["tutor", "practice"]
+input = "schemas/sandbox_start.json"
+entry = "start"
+artifact = true
+
+[[tool]]
+name = "sandbox_observe"
+description = "Return the learner's commands and their output in this chat's lab, after the given entry number."
+agents = ["tutor", "practice"]
+input = "schemas/sandbox_observe.json"
+entry = "observe"
+artifact = false
+
+[[tool]]
+name = "sandbox_check"
+description = "Run the scenario's success check inside the lab; returns pass or fail with details."
+agents = ["tutor", "practice"]
+input = "schemas/sandbox_check.json"
+entry = "check"
+artifact = false
+
+[[view]]
+name = "Terminal"
+html = "views/terminal.html"
+calls = ["run"]
+answer = true
+
+[prompts]
+tutor = "prompts/tutor.md"
+practice = "prompts/practice.md"

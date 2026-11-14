@@ -1,0 +1,26 @@
+# Built-in native plugin (docs/plugins.md §12), compiled into the app from
+# this directory by crates/harness/src/plugins/native/cas.rs. Tool `entry`
+# names the Rust method; there is no src/main.luau.
+id = "cas"
+version = "0.1.0"
+api = 1
+title = "Computer algebra check"
+description = "Runs a short SymPy program so the tutor can check its own derivations and numbers."
+license = "MIT"
+platforms = ["desktop"]
+permissions = ["exec"]
+use_when = "Math-heavy sections (algebra, calculus, linear algebra, circuit equations, physics formulas) where a wrong sign or factor in your own working would mislead the learner."
+avoid_when = "Sections with little symbolic or numeric work."
+cost = "Needs python3 with SymPy installed on this device; each check takes about a second."
+
+[[tool]]
+name = "cas_check"
+description = "Run a short SymPy program (everything from sympy is imported; x, y, z, t, a, b, c, n, k are symbols) and return its printed output. For checking your own working; never shown to the learner in place of reasoning."
+agents = ["tutor", "practice"]
+input = "schemas/cas_check.json"
+entry = "check"
+artifact = false
+
+[prompts]
+tutor = "prompts/tutor.md"
+practice = "prompts/practice.md"

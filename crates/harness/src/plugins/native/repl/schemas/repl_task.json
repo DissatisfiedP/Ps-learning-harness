@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "lang": {
+      "type": "string",
+      "description": "python, javascript, sql (SQLite, in memory) or nix"
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "check": {
+      "type": "string",
+      "description": "expression evaluated against the learner's final REPL state, true when the task is done: python/javascript `result == 42`; sql a scalar like `(SELECT count(*) FROM users) = 3`; nix `builtins.hasAttr \"port\" config`"
+    }
+  },
+  "required": [
+    "lang",
+    "prompt",
+    "check"
+  ],
+  "additionalProperties": false
+}

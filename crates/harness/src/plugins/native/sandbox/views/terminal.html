@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lab terminal</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 12px; font: 14px/1.45 var(--font-ui, system-ui, sans-serif); color: var(--ink, #222); background: var(--raised, #fff); }
+  h1 { font-size: 13px; font-weight: 600; margin: 0 0 6px; color: var(--ink-2, #444); text-transform: uppercase; letter-spacing: .04em; }
+  p.goal { margin: 0 0 10px; white-space: pre-wrap; }
+  #log { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: #14161a; color: #d8dde6; border-radius: 6px; padding: 8px; height: 18em; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  .in { color: #8fb4ff; }
+  .in::before { content: '$ '; }
+  .code { color: #ff9a9a; }
+  .note { color: #9aa3b2; font-style: italic; }
+  .err { color: #ff9a9a; }
+  .line { display: flex; gap: 6px; align-items: center; margin-top: 8px; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .line span { color: var(--ink-3, #777); }
+  input#cmd { flex: 1; box-sizing: border-box; font: inherit; color: var(--ink, #222); background: var(--paper, #fafafa); border: 1px solid var(--rule, #ccc); border-radius: 6px; padding: 6px 8px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .meta { font-size: 12px; color: var(--ink-3, #777); flex: 1; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--rule-strong, #999); background: var(--raised, #fff); color: var(--ink, #222); cursor: pointer; }
+  button.primary { background: var(--accent, #2a5bd7); border-color: var(--accent, #2a5bd7); color: var(--on-accent, #fff); }
+  button:disabled { opacity: .5; cursor: default; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1 id="title">Lab terminal</h1>
+<p class="goal" id="goal"></p>
+<div id="log" role="log" aria-live="polite"></div>
+<div class="line"><span>$</span><input id="cmd" type="text" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Command"></div>
+<div class="row">
+  <span class="meta">Enter runs one command in the lab. Each command is separate, so a <code>cd</code> doesn't carry over; chain with <code>&amp;&amp;</code>. 20 s limit.</span>
+  <button type="button" id="run">Run</button>
+  <button type="button" class="primary" id="submit" hidden>Submit</button>
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const pending = new Map();
+  let nextId = 1;
+  let data = {};
+  let artifactId = '';
+  let busy = false;
+  let ended = false;
+  const history = [];
+  let at = 0;
+  const send = (m) => { m.protocol = 1; parent.postMessage(m, '*'); };
+  const call = (fn, args) => new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    send({ type: 'call', id, fn, args });
+  });
+  const theme = (t) => { for (const [k, v] of Object.entries(t || {})) document.documentElement.style.setProperty('--' + k, v); };
+  const resize = () => send({ type: 'resize', height: document.documentElement.scrollHeight + 4 });
+  const line = (cls, text) => {
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = text;
+    $('log').append(d);
+    $('log').scrollTop = $('log').scrollHeight;
+  };
+
+  async function run() {
+    const text = $('cmd').value;
+    if (busy || ended || !text.trim()) return;
+    busy = true;
+    $('run').disabled = true;
+    line('in', text);
+    history.push(text);
+    at = history.length;
+    $('cmd').value = '';
+    try {
+      const r = await call('run', { labId: data.labId, artifactId, command: text });
+      if (r.output) line('out', r.output);
+      if (r.exit !== 0) line('code', r.exit == null ? '[stopped]' : `[exit ${r.exit}]`);
+      send({ type: 'state', summary: `ran ${history.length} command${history.length === 1 ? '' : 's'}; last: ${text.slice(0, 120)}` });
+    } catch (e) {
+      const msg = String(e.message || e);
+      line('err', msg);
+      if (/lab has ended/.test(msg)) {
+        ended = true;
+        $('cmd').disabled = true;
+      }
+    } finally {
+      busy = false;
+      $('run').disabled = ended;
+      if (!ended) $('cmd').focus();
+      resize();
+    }
+  }
+
+  $('run').addEventListener('click', run);
+  $('cmd').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); run(); }
+    if (e.key === 'ArrowUp' && at > 0) { at -= 1; $('cmd').value = history[at]; e.preventDefault(); }
+    if (e.key === 'ArrowDown' && at < history.length) { at += 1; $('cmd').value = history[at] ?? ''; e.preventDefault(); }
+  });
+  $('submit').addEventListener('click', () => {
+    $('submit').disabled = true;
+    $('run').disabled = true;
+    $('cmd').disabled = true;
+    send({ type: 'submit', answer: { commands: history.length } });
+  });
+
+  window.addEventListener('message', (event) => {
+    const m = event.data;
+    if (event.source !== parent || !m || typeof m !== 'object' || m.protocol !== 1) return;
+    if (m.type === 'init') {
+      theme(m.theme);
+      artifactId = m.artifact?.artifactId || '';
+      data = m.artifact?.data || {};
+      $('title').textContent = `Lab terminal · ${data.scenario || ''}`;
+      $('goal').textContent = data.goal || '';
+      $('submit').hidden = !m.answer;
+      resize();
+    }
+    if (m.type === 'theme') theme(m.theme);
+    if (m.type === 'result') {
+      const p = pending.get(m.id);
+      if (!p) return;
+      pending.delete(m.id);
+      m.ok ? p.resolve(m.value) : p.reject(new Error(m.error));
+    }
+  });
+  resize();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "language": {
+      "type": "string",
+      "description": "python, javascript, typescript, sql (SQLite) or bash; only the ones installed on this device run"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "write",
+        "fix",
+        "read",
+        "error"
+      ],
+      "description": "write: implement something; fix: the starter runs but behaves wrongly; read: predict the starter's output, no editing; error: explain the error the starter produces"
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "starter": {
+      "type": "string",
+      "description": "starting code; required for fix, read and error"
+    },
+    "solution": {
+      "type": "string",
+      "description": "your reference solution (write and fix): it must pass every test before the learner sees the task; never shown"
+    },
+    "tests": {
+      "type": "array",
+      "description": "each test runs the program with `input` on stdin (for sql: setup statements run before the code) and compares its trimmed stdout with `expected`",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "input": {
+            "type": "string"
+          },
+          "expected": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "expected"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "predictFirst": {
+      "type": "boolean",
+      "description": "ask the learner to commit to the expected output before running"
+    }
+  },
+  "required": [
+    "language",
+    "kind",
+    "prompt",
+    "tests"
+  ],
+  "additionalProperties": false
+}

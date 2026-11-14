@@ -39,6 +39,14 @@ git2 = { version = "0.21", default-features = false, features = ["vendored-libgi
 # (pure Rust zbus, already in the build through the shell); its session
 # encryption uses RustCrypto, so no libsecret or OpenSSL is linked.
 keyring-core = "1"
+# The built-in `code-parse` plugin (plugins/native/code_parse.rs): the
+# tree-sitter runtime plus a fixed set of grammars, each compiled from C.
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-c = "0.24"
 
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["rt-async-io-crypto-rust"] }

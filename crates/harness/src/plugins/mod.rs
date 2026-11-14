@@ -1,6 +1,7 @@
 //! Plugins as packages (build prompt W5, D5/D6): tools, prompt fragments,
-//! renderers and interactive views, written in sandboxed Luau. Native Rust
-//! plugins keep the same manifest shape for future system-level tools.
+//! renderers and interactive views, written in sandboxed Luau. Built-in
+//! native Rust plugins (`native/`) keep the same manifest shape for
+//! system-level tools (running programs, the network, files).
 //!
 //! One catalog path for the planner, one dispatch path for the tutor and
 //! practice agents. See `docs/plugins.md` for the authoring specification.
@@ -10,6 +11,7 @@ pub mod install;
 pub mod load;
 mod luau;
 pub mod manifest;
+pub mod native;
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -67,6 +69,20 @@ pub trait Plugin: Send + Sync {
     fn grade(&self, _answer: &Value, _target: &Value) -> Result<Value, String> {
         Err("this plugin cannot grade".into())
     }
+    /// Answer-mode grading (§7.4) with the artifact the question points at:
+    /// its id and the tool input committed when it was made, before the
+    /// learner saw it. Defaults to [`Plugin::grade`]; natives that grade
+    /// against what their tool committed (code-runner's tests, a REPL's
+    /// check) override it.
+    fn grade_artifact(
+        &self,
+        answer: &Value,
+        target: &Value,
+        _artifact_id: &str,
+        _input: &Value,
+    ) -> Result<Value, String> {
+        self.grade(answer, target)
+    }
     fn call(self: Arc<Self>, name: &str, args: &Value, ctx: PluginContext) -> ToolFuture;
 }
 
@@ -74,8 +90,15 @@ pub trait Plugin: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PluginSource {
-    Registry { url: String },
-    Folder { name: String },
+    Registry {
+        url: String,
+    },
+    Folder {
+        name: String,
+    },
+    /// Compiled into the app (`native::builtin`, or a test's
+    /// `Harness::register_native_plugin`).
+    Builtin,
 }
 
 impl PluginSource {
@@ -83,6 +106,7 @@ impl PluginSource {
         match self {
             PluginSource::Registry { url } => url.clone(),
             PluginSource::Folder { name } => format!("folder {name}"),
+            PluginSource::Builtin => "built-in".into(),
         }
     }
 }
@@ -106,6 +130,8 @@ pub struct PluginInfo {
     pub package_hash: String,
     pub has_view: bool,
     pub tools: Vec<String>,
+    /// Compiled into the app: it can be disabled but not removed.
+    pub builtin: bool,
     /// Its manifest lists this device's platform. When it doesn't, its tools
     /// aren't offered here and the UI shows its figures as the fallback.
     pub on_platform: bool,
@@ -376,6 +402,9 @@ pub struct PluginRegistry {
     /// never re-enables a plugin the learner turned off.
     disabled: HashSet<String>,
     platform: String,
+    /// `native::builtin` already ran for this Harness; rebuilds carry the
+    /// same instances over instead of making new ones.
+    builtins_loaded: bool,
 }
 
 impl PluginRegistry {
@@ -384,11 +413,20 @@ impl PluginRegistry {
             entries: Vec::new(),
             disabled: HashSet::new(),
             platform: platform.to_owned(),
+            builtins_loaded: false,
         }
     }
 
     pub fn platform(&self) -> &str {
         &self.platform
+    }
+
+    pub fn builtins_loaded(&self) -> bool {
+        self.builtins_loaded
+    }
+
+    pub fn mark_builtins_loaded(&mut self) {
+        self.builtins_loaded = true;
     }
 
     /// This device's platform (`desktop` | `mobile`). Startup decides it from
@@ -506,6 +544,7 @@ impl PluginRegistry {
                     package_hash: e.package_hash.clone(),
                     has_view: !m.view.is_empty(),
                     tools: m.tool_names(),
+                    builtin: e.source == PluginSource::Builtin,
                     on_platform: self.on_platform(m),
                     load_error: e.watch.as_ref().and_then(|w| w.error.clone()),
                 }
@@ -582,6 +621,23 @@ impl PluginRegistry {
     /// Whether installed plugin `id` lists this device's platform.
     pub fn is_on_platform(&self, id: &str) -> bool {
         self.manifest(id).is_some_and(|m| self.on_platform(m))
+    }
+
+    /// The built-in plugins registered now (kept across a registry rebuild,
+    /// so a running REPL or lab survives an install elsewhere).
+    pub fn builtins(&self) -> Vec<Arc<dyn Plugin>> {
+        self.entries
+            .iter()
+            .filter(|e| e.source == PluginSource::Builtin)
+            .map(|e| Arc::clone(&e.plugin))
+            .collect()
+    }
+
+    /// Whether installed plugin `id` is compiled into the app.
+    pub fn is_builtin(&self, id: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.manifest.id == id && e.source == PluginSource::Builtin)
     }
 
     /// The plugin that produced an artifact, if it is still installed.

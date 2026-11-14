@@ -663,6 +663,29 @@ async fn library_update(
     .await
 }
 
+// ---- image sets (docs/plugins.md §12, `image-set`) -------------------------------
+
+#[tauri::command]
+async fn image_sets(h: H<'_>) -> Result<Vec<harness::plugins::native::image_set::SetInfo>> {
+    blocking(&h, |h| Ok(h.image_sets())).await
+}
+
+/// Copy a labelled folder (picked with `pick_folder`; one subfolder of
+/// images per label) into the data repo as an image set. Desktop only.
+#[tauri::command]
+async fn image_set_import(
+    h: H<'_>,
+    path: String,
+    name: Option<String>,
+) -> Result<harness::plugins::native::image_set::SetImportReport> {
+    blocking(&h, move |h| h.image_set_import(&path, name.as_deref())).await
+}
+
+#[tauri::command]
+async fn image_set_remove(h: H<'_>, id: String) -> Result<()> {
+    blocking(&h, move |h| h.image_set_remove(&id)).await
+}
+
 // ---- settings ----------------------------------------------------------------
 
 #[tauri::command]
@@ -1124,6 +1147,9 @@ pub fn run() {
             library_refresh,
             library_remove,
             library_update,
+            image_sets,
+            image_set_import,
+            image_set_remove,
             focus_dnd_support,
             focus_dnd,
         ])

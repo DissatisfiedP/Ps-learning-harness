@@ -1,0 +1,39 @@
+# Built-in native plugin (docs/plugins.md §12): compiled into the core from
+# `plugins/native/live_search.rs`. Native because it needs `net`, which no
+# Luau api 1 package may declare (§8.4). Tool `entry` names the Rust method.
+id = "live-search"
+version = "0.1.0"
+api = 1
+title = "Live web and image search"
+description = "Lets the tutor search the web, fetch pages and find captioned images while teaching."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = ["net"]
+use_when = "The section needs current or visual material throughout, not one verified fact: fashion and design (reference images, current collections), fast-moving tools and threats, recent events."
+avoid_when = "Stable subjects. The standard `research_request` already verifies single facts in the background with a cited brief."
+cost = "Search results take a lot of context; each call adds several hundred tokens."
+
+[[tool]]
+name = "live_search_web"
+description = "Search the web; returns titles, URLs and snippets. A snippet is not evidence: fetch the page before relying on it."
+agents = ["tutor"]
+input = "schemas/live_search_web.json"
+entry = "web"
+
+[[tool]]
+name = "live_search_fetch"
+description = "Fetch a public web page and return its readable text (PDFs as page-tagged text)."
+agents = ["tutor"]
+input = "schemas/live_search_fetch.json"
+entry = "fetch"
+
+[[tool]]
+name = "live_search_images"
+description = "Search images; returns each image's caption, source page and credit as text, plus one figure of the images (with numbered captions) to place for the learner."
+agents = ["tutor"]
+input = "schemas/live_search_images.json"
+entry = "images"
+artifact = true
+
+[prompts]
+tutor = "prompts/tutor.md"

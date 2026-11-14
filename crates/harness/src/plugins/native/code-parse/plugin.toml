@@ -1,0 +1,36 @@
+id = "code-parse"
+version = "0.1.0"
+api = 1
+title = "Code structure"
+description = "Parses source code with tree-sitter: a file's outline, the exact positions of syntax errors, and where a symbol is defined and used."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = []
+use_when = "Programming sections in Python, JavaScript, TypeScript/TSX, Rust or C where code must be navigated or diagnosed precisely: the structure of a long file, where a syntax error starts, the definition and uses of a function or type."
+avoid_when = "A snippet you can read at a glance, another language, or checking what code does when run (it only parses; nothing executes)."
+cost = "instant"
+
+[[tool]]
+name = "code_parse_outline"
+description = "Outline of a source file or snippet: every function, method, class, struct, enum, trait, impl, interface, type, module and macro definition, nested, with its line range and signature. Also says whether the source parses cleanly."
+agents = ["tutor", "practice"]
+input = "schemas/code_parse_outline.json"
+entry = "outline"
+
+[[tool]]
+name = "code_parse_errors"
+description = "The syntax errors in source code, as the parser sees them: each with its exact line and column range (columns count characters), the source line with a caret under it, and what the parser expected or could not fit. Says `parses cleanly` when there are none."
+agents = ["tutor", "practice"]
+input = "schemas/code_parse_errors.json"
+entry = "errors"
+
+[[tool]]
+name = "code_parse_locate"
+description = "Find a symbol (`push`, or a dotted path such as `Stack.push`): each matching definition with its kind, exact line/column range and signature (and its full text with `text: true`), then every line where the name is used as an identifier. Strings and comments are not matched."
+agents = ["tutor", "practice"]
+input = "schemas/code_parse_locate.json"
+entry = "locate"
+
+[prompts]
+tutor = "prompts/tutor.md"
+practice = "prompts/practice.md"

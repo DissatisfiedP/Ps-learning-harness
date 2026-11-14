@@ -9,7 +9,7 @@ A plugin is a package (a directory or a `.tar.gz`) that can add any of:
 - one **interactive view** (HTML + JS + CSS) the learner manipulates;
 - **prompt fragments**, one per agent that may use the plugin.
 
-Plugins are written in **Luau** and run in a sandboxed `mlua` VM with a small pure host library. Native (Rust) plugins use the same manifest shape for system access; none ship in this build (see "Native plugins" below). The design reasons are in `docs/architecture.md` §4.20.
+Plugins are written in **Luau** and run in a sandboxed `mlua` VM with a small pure host library. Native (Rust) plugins use the same manifest shape for system access (programs, network, files); seven are built in (see "Native plugins" below). The design reasons are in `docs/architecture.md` §4.20.
 
 ## 1. Package layout
 
@@ -483,12 +483,12 @@ Installing runs third-party code, so it needs explicit consent. The consent scre
 
 There are no automatic updates and no separate update command: an update is installing another version through `install_plugin`. It is refused while any unfinished session is in Teach with that plugin active in its current section ("`<id>` is in use in the current section of the session “<title>”; update it after that section ends"), checked before the download and again before the swap. A running session therefore keeps the version it was granted until its next section starts (build prompt W8). Otherwise the new package replaces the loaded one. Removing or disabling a plugin never removes its artifacts from sessions; those keep their fallback SVGs.
 
-Native plugins may declare `exec`, `net`, `fs-read`, `fs-write`. The field is validated as empty for Luau plugins today because no privileged host module exists.
+Native plugins may declare `exec`, `net`, `fs-read`, `fs-write`. The field is validated as empty for Luau plugins today because no privileged host module exists. A built-in native that declares permissions is consented to by enabling it in Settings, on this same screen (§12 *Consent and the Settings row*).
 
 ### 8.5 Enable, disable, remove
 
 - **Disable** keeps the package installed but removes it from the planner catalog, from approval grants and `plugin_request`, and from section tools and fragments. The choice is device-local (`settings.json` → `disabledPlugins`). The core also refuses a disabled plugin's `plugin_view` and `plugin_view_call` ("plugin `<id>` is disabled; enable it in Settings → Plugins") and its answer-mode checks.
-- **Enable** reverses it.
+- **Enable** reverses it. Enabling a built-in that declares permissions is the consent to them: Settings shows the consent screen first and the core records it in `enabledPlugins` (§12). A built-in cannot be removed, only disabled.
 - **Remove** deletes `<config>/plugins/<id>/` (every installed copy), drops the id from `pluginFolders`, `disabledPlugins` and `plugins.lock`, and unloads it. Artifacts already in sessions still display.
 
 ### 8.6 Folder plugins (development)
@@ -704,26 +704,137 @@ What happens in a session:
 4. The tutor writes `![Spending by category](artifact:01J…)` beside the sentence that uses it; the UI shows the stored SVG.
 5. If the plugin declared a view with `answer = true`, the same artifact could serve a `question_ask` answer surface; `bars` deliberately has none, because moving a slider is not the point of a bar chart.
 
-## 11. Planned catalogue (not built)
+## 11. Catalogue
 
-These ids are the plugins the architecture envisages. None is implemented in this build; the loader knows only `circuit` (reference, installed by folder or registry), the security fixture `plugins/fixtures/ipc-probe` (§7.2, added only by hand) and whatever the learner installs.
+These ids are the plugins the architecture envisages; the Status column says which are built. Besides the built-ins (§12), the loader knows `circuit` and `argument-map` (Luau packages in `plugins/`, installed by folder or registry), the security fixture `plugins/fixtures/ipc-probe` (§7.2, added only by hand) and whatever the learner installs.
 
-Each unbuilt entry is kept in the package layout under `plugins/catalog/<id>/`: `plugin.toml` (title, description, platforms, permissions, `use_when`/`avoid_when`/`cost`, tools with their agents and entries), `prompts/tutor.md` (the tutor fragment migrated from the old `prompts/plugins/<id>.md` brief) and `schemas/<tool>.json` (each tool's input contract, e.g. `code_runner_task { language, kind: write|fix|read|error, prompt, starter?, tests, predictFirst? }`). Tool names follow the `<id>_` rule (§2), so several were renamed from the old briefs (`code_task` → `code_runner_task`, `lab_start` → `sandbox_start`, `web_search` → `live_search_web`, …). A comment at the top of each manifest says why it isn't loadable yet. **Nothing reads `plugins/catalog/`**: it is not a folder plugin, not in a registry and not used by any test. An entry becomes a plugin by adding the missing parts (the Rust type for a native one; `src/main.luau`, `tests/` and a renderer/view for a Luau one) and then adding or installing it like any other.
+Tool names follow the `<id>_` rule (§2), so several were renamed from the old briefs (`code_task` → `code_runner_task`, `lab_start` → `sandbox_start`, `web_search` → `live_search_web`, …). Every built-in's manifest, schemas, prompt fragments and view live in `crates/harness/src/plugins/native/<id>/` and are compiled in (§12).
 
 | Plugin id | Gives | Platforms | Status |
 |---|---|---|---|
-| `sandbox` | Local container or VM lab: `sandbox_start`, `sandbox_observe`, `sandbox_check` | desktop | Not built. Native (`exec`): a Luau api 1 package may not declare permissions (§8.4). |
-| `code-runner` | Write, fix, read and error-reading tasks graded by tests: `code_runner_task` | desktop, mobile (JS/TS/Python) | Not built. Native (`exec`). |
-| `repl` | `repl_eval` for the agent, `repl_task` for the learner (nix, python, sql, …) | desktop | Not built. Native (`exec`). |
-| `cas` | `cas_check` (SymPy) to verify the tutor's own working and answer keys | desktop, mobile | Not built. Native (`exec`). |
-| `live-search` | `live_search_web`, `live_search_fetch`, `live_search_images` inside the lesson | desktop, mobile | Not built. Native (`net`). |
-| `image-set` | Labelled image drills: `image_set_list`, `image_set_drill` | desktop, mobile | Not built. Native (`fs-read`: sets include the learner's labelled folders). |
-| `argument-map` | Pinned premise/objection card: `argument_map_show` (artifact) | desktop, mobile | Not built. Pure computation, so a Luau api 1 package suffices. |
+| `sandbox` | Local container lab the learner works in through a terminal card: `sandbox_start` (artifact), `sandbox_observe`, `sandbox_check` | desktop | **Built** in (native, `exec`; §12 `sandbox`). |
+| `code-runner` | Write, fix, read and error-reading tasks graded by tests: `code_runner_task` | desktop | **Built** in (native, `exec`; §12 `code-runner`). Python, JavaScript, TypeScript, SQL (SQLite) and bash, each only where its toolchain is installed. Desktop only: it runs the device's own toolchains. |
+| `repl` | `repl_eval` for the agent, `repl_task` for the learner (python, javascript, sql, nix) | desktop | **Built** in (native, `exec`; §12 `repl`). |
+| `cas` | `cas_check` (SymPy) to verify the tutor's own working and answer keys | desktop | **Built** in (native, `exec`; §12 `cas`). Needs `python3` with SymPy. Also a Rust API (`cas::equivalent`) that no core path calls yet. |
+| `live-search` | `live_search_web`, `live_search_fetch`, `live_search_images` inside the lesson | desktop, mobile | **Built** in (native, `net`; §12 `live-search`). |
+| `image-set` | Labelled image drills: `image_set_list`, `image_set_drill` | desktop, mobile | **Built** in (native, `fs-read`; §12 `image-set`). Sets are the learner's labelled folders copied into the data repo. |
+| `argument-map` | Pinned premise/objection card: `argument_map_show` (artifact) | desktop, mobile | **Built** (Luau api 1, `plugins/argument-map/`; ships like `circuit`: through the owner's registry, `../ps-learn-registry/plugins/argument-map`, which is a copy of the app repo's folder. Re-copy it from the app repo and raise `version` before publishing a change; the registry's CI refuses a changed folder under a published version). Objections nest under the premise they target, replies under their objection; `blanks` hides a part (premise or objection id, `O1.1` for a reply, `conclusion`) from the figure **and** the stored data while the tool text still gives the model the hidden text to grade against. No view. Tests with two goldens in `tests/`. |
 | `demo` | Interactive simulation jobs: `demo_request` | desktop, mobile | Not a plugin in the current plan: a Builder-role job (`crates/harness/prompts/jobs/demo-builder.md`, which also holds the brief rules the tutor follows). |
 | `figure` | Exact SVG figure jobs: `figure_request` | desktop, mobile | Not a plugin in the current plan: a Builder-role job (`crates/harness/prompts/jobs/figure-maker.md`, likewise). |
 
-The catalog the planner sees today contains only installed, enabled plugins available on the current platform; with none installed it says "none available".
+The catalog the planner sees contains only installed, enabled plugins available on the current platform; with none it says "none available". A built-in that declares permissions is not in it until the learner has enabled it (§12 *Consent and the Settings row*), so the planner can't propose, and the tutor can't request, a plugin that would be refused. On a phone only the manifests that list `mobile` appear.
 
 ## 12. Native plugins
 
-A native plugin is an in-tree Rust type implementing `plugins::Plugin` (manifest, tools, fragment, view, grade, call). It uses the same `plugin.toml` shape and may declare permissions (`exec`, `net`, `fs-read`, `fs-write`). It is registered through `Harness::register_native_plugin` and otherwise behaves like a Luau plugin to the planner, the tool loop and the plan limits. No native plugin is implemented in this build; the trait exists so system-level capabilities do not have to be wedged into the sandbox.
+A native plugin is an in-tree Rust type implementing `plugins::Plugin` (manifest, tools, fragment, view, grade, call). It uses the same `plugin.toml` shape (its `entry` names the Rust method; there is no `src/main.luau`) and may declare permissions (`exec`, `net`, `fs-read`, `fs-write`). The built-ins are listed by `plugins::native::builtin` (once per `Harness`, on the first `reload_plugins`; later registry rebuilds keep the same instances, so a running REPL survives an install elsewhere). They register after installed and folder packages, so a package can't shadow one, and otherwise behave like a Luau plugin to the planner, the tool loop, the plan limits, artifacts (§6) and answer-mode views (§7.4). `Harness::register_native_plugin` adds a further in-tree plugin (tests use it) under the same consent rule.
+
+Seven are built in: `code-parse`, `live-search`, `image-set`, `code-runner`, `repl`, `cas` and `sandbox`. Each manifest is validated like a package's, with the native rules (`manifest::validate_native`); a unit test loads every built-in.
+
+**Consent and the Settings row.** `PluginInfo.builtin` marks them. A built-in is never removable (`remove_plugin` refuses it; Settings shows no Remove button) and its row reads "built in". One with an empty `permissions` list (`code-parse`) is on from the start. One that declares permissions starts **disabled**: `set_plugin_enabled(id, true)` is the learner's consent to those permissions and is recorded device-locally in `settings.json` → `enabledPlugins` (turning it off withdraws it and lists it in `disabledPlugins`, as for any plugin). Settings → Plugins therefore opens the same consent screen as an install (§8.4, with the permissions in plain words: "Run programs on your device", "Use the network", "Read your files") when the learner presses **Enable**, and only calls `set_plugin_enabled` after they accept; **Disable** needs no consent. Until then the plugin is not in the planner's catalog, `plugin_request` refuses it, its tools are not offered, and its view and bridge calls are refused ("plugin `<id>` is disabled"). Consent is per device: another device has its own.
+
+**Platforms.** A manifest's `platforms` is what the plugin does today. `exec` natives (`code-runner`, `repl`, `cas`, `sandbox`) list only `desktop`, because they run programs installed on the device and no such toolchain exists on a phone. `code-parse`, `live-search` and `image-set` list `mobile` too: they are Rust without external programs (the tree-sitter grammars compile from C; HTTP uses the app's client; images are read from the synced data repo). Checked 2026-11-14: `cargo check -p harness --target aarch64-linux-android` in the flake's `android` shell (NDK r26, the six grammars' C compiled by the NDK clang) passes with every native in the tree, so the harness, `exec.rs` included, builds for Android; only that one ABI was checked, and no native has run on a phone. On a phone a desktop-only plugin is `onPlatform: false`, never offered or granted, a tool call to one is refused, and a session that used one locks (`docs/sync-build.md` "Sessions on mobile"); `crates/harness/tests/native_plugins_e2e.rs` runs that rule against the real manifests (`cas` on a phone).
+
+**Running programs (`exec`).** The `exec` built-ins share `native/exec.rs`. Every run gets a fresh temporary working directory (removed afterwards; `HOME` and `TMPDIR` point into it), a scrubbed environment (only `PATH` survives, so API keys in the app's environment never reach the program), a wall-clock limit and an output cap (hitting either kills it and says so), and its own process group, killed when the run or its handle ends. On Linux, when unprivileged user namespaces work (probed once with `unshare`), it also runs under `unshare --user --map-root-user --net --pid --fork --kill-child`: **no network**, a PID namespace that takes every descendant with it, and `prlimit` CPU and file-size limits when present. The file system is **not** isolated: the program runs as the learner's user and can read and write what they can. Elsewhere (macOS, Windows, Linux without user namespaces) there is no network or file isolation at all, and `exec::isolation()` says which applies. None of this makes hostile code safe; it keeps ordinary mistakes (an infinite loop, a stray request) from hurting the machine. Enabling an `exec` plugin is consent to run programs. Only `sandbox` (container labs, below) gets a separate file system. A missing toolchain is a plain tool error naming what to install (`code-runner` and `repl` run whichever of their languages are installed).
+
+### `code-parse` (tree-sitter)
+
+Built in, `crates/harness/src/plugins/native/code_parse.rs` (assets in `native/code-parse/`). Permissions `[]`: every tool takes the code as `source` text (≤ 256 KiB, the `file_read` cap; optional `firstLine` shifts reported lines for a range read), so it reads no files itself. Desktop and mobile.
+
+| Tool | Returns |
+|---|---|
+| `code_parse_outline { language, source, firstLine? }` | Whether it parses cleanly, then every definition nested (function/method, class, struct, enum, union, trait, impl, interface, type, namespace/mod, macro) as `lines a–b (kind): signature` (the node's text up to its body, whitespace collapsed, ≤ 100 chars); at most 300 entries |
+| `code_parse_errors { language, source, firstLine? }` | The outermost `ERROR` nodes and every `MISSING` node of tree-sitter's error recovery, in order, each as `line L, cols a–b: unexpected `…` in <construct>` or `missing `)` in arguments`, with the source line and a caret; at most 20. `parses cleanly` otherwise |
+| `code_parse_locate { language, source, symbol, text?, firstLine? }` | Each definition whose path of enclosing definition names ends with `symbol` (`Stack.push`, `shapes::Circle::area`; a Rust `impl` is named by its type without generics), with kind, line and column range, signature and, with `text: true`, its text (≤ 200 lines); then every line where an identifier leaf is spelled like the name (strings and comments never match). Unknown symbols list the names that are defined |
+
+Lines and columns are 1-based and columns count characters, not tree-sitter's bytes. Traversal uses explicit stacks, so deeply nested code cannot overflow the thread. `language` is one of `python`, `javascript` (JSX included), `typescript`, `tsx`, `rust`, `c`; extensions (`py`, `js`, `ts`, `rs`, `h`, …) are accepted too.
+
+**Grammar set and size.** Each grammar is a generated C parse table compiled into the app (tree-sitter 0.25 runtime; grammar crates python 0.25, javascript 0.25, typescript 0.23, rust 0.24, c 0.24). Measured 2026-11-13 as the growth of a stripped x86_64 release binary: runtime about 0.46 MB, Python +0.47 MB, JavaScript +0.42 MB, TypeScript +1.43 MB, TSX +1.45 MB, Rust +1.13 MB, C +0.63 MB; all six together 6.0 MB. The set covers the languages the catalogue's code tasks use (`code-runner` JS/TS/Python) plus the two systems languages; TSX costs as much as TypeScript but `.tsx` files fail under the plain TypeScript grammar. Every further grammar is another 0.4–1.5 MB per Android ABI, so the set stays fixed rather than growing on demand.
+
+### `live-search`
+
+Built in, `crates/harness/src/plugins/native/live_search.rs` (assets in `native/live-search/`). Permissions `[net]`, so it starts disabled until the learner enables it in Settings. Desktop and mobile. Tutor only.
+
+| Tool | Returns |
+|---|---|
+| `live_search_web { query, recency? }` | The researcher's search chain (`research_search::search_at`: Brave with `BRAVE_API_KEY`, else Wikipedia; `recency` is `day`/`week`/`month`/`year` and only Brave honours it) as a numbered list of up to 8 sources: title, URL, snippet (≤ 240 chars) |
+| `live_search_fetch { url }` | The researcher's `web::page_fetch`: readable text of an HTML page (≤ 40k chars, `[truncated]`), a PDF as `[p.N]`-tagged text. Every URL and every redirect hop goes through the same `web::GuardedClient` as `page_fetch`: http(s) only, no loopback, private, link-local, CGNAT or metadata addresses, and names resolving to one are dropped by the resolver |
+| `live_search_images { query, count? }` | An `svg` artifact: up to `count` images (default 4, at most 6), two per row, each numbered with its caption shortened below. The text lists each image's full caption, source page and credit (licence and author when the service gives one), plus any hit whose download failed |
+
+**How images reach the learner.** The image search is Brave images (with the key), else Wikimedia Commons file search (keyless; raster files only, caption from the file's own description, else its file name, credit from its author and licence). Twice `count` hits are downloaded at once through the guard (≤ 4 MiB each; PNG, JPEG, GIF or WebP by content, anything else is skipped) and embedded in the artifact SVG as `data:` URIs: `data:image/png|jpeg|gif|webp` is the only image link the artifact sanitizer keeps (§6.2) and the only image source the view CSP allows (`img-src data:`). So nothing is fetched from the network when the figure is shown or replayed, and a page that disappears later doesn't break the lesson. To keep the fallback SVG under its 256 KiB cap, the figure has a 232 KiB image budget split evenly across its images. A PNG or JPEG over 360 px or over its share is re-encoded as a JPEG at the largest size from 360 px down to 80 px that fits. A GIF or WebP is kept only if it already fits. The artifact `data` holds the sources (`query`, `images[]: { n, caption, pageUrl, imageUrl, credit }`), not the pixels. There is no view.
+
+The fragment tells the tutor that a snippet is not evidence (fetch first, cite) and to label an image only from its source's caption, never from how it looks. Single facts still go to `research_request` (architecture §4.20).
+
+### `image-set`
+
+Built in, `crates/harness/src/plugins/native/image_set.rs` (assets in `native/image-set/`, including the answer-mode view `views/drill.html`). Permissions `[fs-read]`, so it starts disabled until the learner enables it in Settings. Desktop and mobile. Tutor and practice (the practice fragment waits for the coach).
+
+**Where sets live.** A set is `<repo>/image-sets/<setId>/<label>/<image>`: the subfolder name is the label. An optional `set.json` `{ "title" }` names the set. Sets are in the synced data repo, like message images (architecture §4.25), because a drill must work on every device. A learner's own labelled folder is copied in once, on a desktop, with Settings → Libraries → **Import image set…** (`image_set_import { path, name? }`; `image_sets`, `image_set_remove { id }` list and delete). The source folder is never touched, and an import into an existing id replaces it. Only PNG, JPEG, GIF and WebP files (by content; a missing extension is added) up to 5 MiB count. Hidden entries, symlinks and loose files are skipped, and a set needs at least two labels.
+
+| Tool | Returns |
+|---|---|
+| `image_set_list {}` | JSON `[{ id, title, labels: [{ label, count }], size }]`, or how the learner adds a set when there is none |
+| `image_set_drill { setId, labels?, n, format, interleave: true }` | An `svg` artifact (the drill figure), and text with the labels used and `target: {…}`, the answer key the tutor copies into `question_ask`'s `view.target` |
+
+**Drill.** `classify` shows `n` images, and the learner picks each image's label from `choices`. `same-or-different` shows `n` pairs, about half of them same-label pairs, and the learner answers `same` or `different` per pair. `odd-one-out` shows `n` triples (two of one label, one of another), and the learner picks A, B or C. Labels are interleaved: an item never repeats the previous item's label when another is available, and images are drawn without repeats until a label runs out. At most 36 images per drill, so 12 triples. Images are embedded as `data:` URIs within the same 232 KiB budget as `live-search` (so `data` and the fallback SVG each stay under their 256 KiB caps). The view's `data` (`{ setId, format, items: [{ images }], choices }`) holds no labels.
+
+**Grading** (§7.4). The view posts `{ answers: [...] }`, with labels, `same`/`different`, or the 0-based odd image. `grade(answer, target)` returns `{ correct, score, total, detail, items: [{ item, expected, given, correct }], confusions: [{ expected, given, count }] }`, with confusions sorted by count. A confusion is a true label taken for another one: the label given, the second label of a different pair called `same`, or the label of the image picked instead of the odd one. The target carries `check`, a hash of `format`, `key` and `labels`. A target the tutor didn't copy exactly is refused ("…not copied exactly…"), so the question stays open instead of being graded against a wrong key. As always, the tutor records the verdict.
+
+### `code-runner`
+
+Built in, `crates/harness/src/plugins/native/code_runner.rs` (assets in `native/code-runner/`, including the answer-mode view `views/task.html`). Permissions `[exec]`, so it starts disabled until the learner enables it in Settings. Desktop only. Tutor and practice (the practice fragment waits for the coach). Languages: python (`python3`), javascript (`node`, else `deno`), typescript (`deno`, else `node --experimental-strip-types`), sql (`sqlite3`, in memory: a test's `input` is setup SQL run before the code) and bash. Only languages whose program is on `PATH` run; a missing one is a tool error that says what to install.
+
+| Tool | Returns |
+|---|---|
+| `code_runner_task { language, kind, prompt, starter?, solution?, tests, predictFirst? }` | Checks the task before the learner sees it (`write`/`fix`: the reference `solution` passes every test, and a `fix` starter fails at least one; `read`: the starter prints every `expected`; `error`: the starter fails), then an `svg` artifact, the task card. `tests` are `{ name, input?, expected }` (stdin in, trimmed stdout compared), at most 12. The artifact `data` holds the prompt, starter and test inputs, never the expected outputs or the solution; those stay in the committed tool input |
+
+The tutor asks with `question_ask { view: { artifactId, task, target: {} } }`. **Grading** (§7.4): the view's `run` call runs the learner's code (10 s, 32 KiB of output per run; the card remembers its last 20 runs, and the prediction sent with the first run is the committed one). Submit posts `{ code, prediction, explanation }`; `grade_artifact` re-runs that code against the tests in the artifact's committed input and returns `{ correct, detail, code, prediction, explanation, runs, tests }`. As always, the tutor records the verdict. The card is replayable without the plugin from its fallback SVG; a card whose plugin is off or missing can't take an answer.
+
+### `repl`
+
+Built in, `crates/harness/src/plugins/native/repl.rs` (assets in `native/repl/`: the view `views/repl.html`, the python and node drivers in `drivers/`). Permissions `[exec]`, so it starts disabled until the learner enables it in Settings. Desktop only. Tutor and practice (the practice fragment waits for the coach).
+
+| Tool | Returns |
+|---|---|
+| `repl_eval { lang, input }` | What the input prints and its value, in the tutor's **own** session for that language in this chat (state persists between calls; another chat has its own). Not an artifact: the learner sees it only if the tutor quotes it |
+| `repl_task { lang, prompt, check }` | An `svg` artifact, a REPL card. `check` is an expression true in the learner's final session state (`result == 55`; SQL a scalar such as `(SELECT count(*) FROM users) = 3`; nix `builtins.hasAttr "port" config`). It is refused when it already holds in a fresh session or doesn't parse, and it never appears in the card's data |
+
+Engines: **python** (`python3`) and **javascript** (`node`) run one persistent process with a small driver that evaluates each input in a kept namespace and echoes the last expression; **sql** (`sqlite3`) keeps every input and replays the history into a fresh `sqlite3 -safe` per input, printing only the new input's output; **nix** (`nix-instantiate --eval --strict`) turns `name = expr` inputs into `let` bindings for every later input. An input has 10 s (nix 30 s) and 32 KiB of output; one past its limit stops the session, which starts empty on the next input and says so. At most 8 sessions stay alive (least recently used first), and a transcript keeps its last 60 entries.
+
+**Grading** (§7.4). The learner's inputs go to a session of their own per card (the view's `input` call; the card's id is the key). `grade_artifact` evaluates the committed `check` in that session's final state and returns `{ correct, detail, lang, check: { expression, value, passed }, transcript }`; a card with no recorded input is graded on an empty session and says so (after an app restart the session is gone). As always, the tutor records the verdict.
+
+### `cas`
+
+Built in, `crates/harness/src/plugins/native/cas.rs` (assets in `native/cas/`). Permissions `[exec]`, so it starts disabled until the learner enables it in Settings. Desktop only. Tutor and practice (the practice fragment waits for the coach). Needs `python3` with SymPy installed for that python; without them `cas_check` returns an error that names what's missing.
+
+| Tool | Returns |
+|---|---|
+| `cas_check { code }` | What a short SymPy program prints (stdout then stderr, with a note when stopped). `from sympy import *` is done and `x, y, z, t, a, b, c, n, k` are symbols; ≤ 16 KiB of code, 20 s, 16 KiB of output. For checking the tutor's own derivations and numbers; not an artifact |
+
+The same engine is a Rust API for core code that must check math without a model: `cas::check(code)` and `cas::equivalent(a, b)` (`simplify(a - b) == 0`, then SymPy's numeric `equals`; implicit multiplication and `^` as power; the expressions travel as JSON on stdin, never spliced into the program). Both block (run them off the async runtime) and fail with `CasError::Unavailable` when python3 or SymPy is missing. No core path calls them yet.
+
+### `sandbox`
+
+Built in, `crates/harness/src/plugins/native/sandbox.rs` (assets in `native/sandbox/`: scenario scripts in `scenarios/`, the answer-mode view `views/terminal.html`). Permissions `[exec]`, so it starts disabled until the learner enables it in Settings. Desktop only. Tutor and practice (the practice fragment waits for the coach). Needs Podman (preferred) or Docker on `PATH`; without one the tools return the usual "isn't available on this device" error and the plugin's `use_when` says "Container runtime on this device: none found".
+
+| Tool | Returns |
+|---|---|
+| `sandbox_start { scenario, image? }` | Boots the lab and returns an `svg` artifact, the terminal card (`data`: `{ labId, scenario, goal, image }`), and text with the goal and the lab id. `scenario` is one of the four below (an enum in the schema, each listed with its goal in the tool description); `image` defaults to `alpine:3.20` and must match `^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?$` (a name without `/` is qualified as `docker.io/library/<name>`, because Podman can't ask which registry to search without a terminal) |
+| `sandbox_observe { since? }` | The learner's commands in this chat's lab after entry number `since` (default all kept: the last 200), each as `[n] $ command`, its output and `(exit c)`; the text ends with `Latest entry N.` |
+| `sandbox_check { checkId }` | `PASS`/`FAIL <scenario>` and the check's `ok:`/`fail:` lines. `checkId` is the scenario id; another id is refused |
+
+**Lab.** One lab per chat session: starting another removes the old container first, and a lab is removed when it is replaced, when the plugin is dropped and, if the app is killed first, when its `sleep 7200` ends (`--rm`). The container is `run -d --rm --name lh-lab-<id> --network none --memory 256m --cpus 1 --pids-limit 256 --stop-timeout 1 --cap-drop ALL --cap-add CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,KILL --security-opt no-new-privileges <image> sleep 7200`; the scenario's setup script is then `exec`'d synchronously (a setup that fails removes the container and returns its output). The client runs through `exec::run` with `no_isolation()` (it has to reach the container service).
+
+**Scenarios.** Each is a pair of POSIX `sh` scripts (`scenarios/<id>.setup.sh`, `.check.sh`) sent as one `sh -c` argument. Both honour an optional `$LAB_ROOT` path prefix (empty in a container) and `LAB_OWNER` (default `root`), which is how the tests run them on the host. `LAB_FLAG`, a random token per lab, goes to setup and check as an `exec -e` only, so the learner's own commands (and `env`) can't read it. A check prints `ok:`/`fail:` lines and exits 0 only when all hold.
+
+| Scenario | Setup | Check |
+|---|---|---|
+| `permissions` | `/srv/app/secret.conf`, mode 666 | mode 600, owner root, contents intact |
+| `find-the-flag` | six logs in `/var/log/app`; one (picked from the flag) holds a `FLAG{…}` line | `/tmp/flag.txt` holds exactly the flag |
+| `harden-sshd` | `/etc/ssh/sshd_config` with `yes` on `PermitRootLogin`, `PasswordAuthentication`, `PermitEmptyPasswords`, `X11Forwarding` | the first active `PermitRootLogin` and `PasswordAuthentication` are `no`, the `Port 22` line is kept, no active setting is `yes` |
+| `stop-the-service` | busybox `httpd` on port 8080, started and waited for | no LISTEN socket on the port in `/proc/net/tcp{,6}` (looked at for up to a second, so a just-signalled service can close) |
+
+**Terminal.** The `Terminal` view (`calls = ["run"]`, answer mode) shows the goal and a command line. `run { labId, artifactId, command }` runs `exec <container> sh -c <command>` as one argv (no host shell), each command on its own (a `cd` doesn't carry over), with a 20 s timeout and a 16 KiB output cap; a command past either is stopped and the output says so (a timed-out command may keep running in the lab). The transcript (commands, output, exit codes) is kept in memory. The view shows `[exit n]` for a failure and stops accepting input when its lab has been replaced.
+
+**Grading** (§7.4). Submit posts `{ commands: n }`; `grade_artifact` runs the scenario check in the lab the card is bound to and returns `{ correct, detail, scenario, check: { id, passed, output }, transcript }` (the last 40 commands). A card is bound to the lab of its first `run` call (so two chats' cards each grade their own lab); a card that never ran a command uses the only lab there is when its scenario matches, and otherwise gets an error. A replaced lab, an app restart or a container that has vanished gives a "start a new lab" error rather than a failed check. As always, the tutor records the verdict.
+
+Tested with a fake container client (a shell script whose "container" is a directory, so every scenario's setup and check run on the host): each check fails before the fix and passes after, plus the transcript, binding, replacement, limits and error paths. No Podman or Docker is installed on the development machine, so a real container run is not covered; the `permissions`, `find-the-flag` and `harden-sshd` scripts were also run under BusyBox `ash` (with the host's coreutils and awk), and `stop-the-service` needs BusyBox's `httpd`, which only the image has.

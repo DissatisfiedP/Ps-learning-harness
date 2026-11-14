@@ -143,8 +143,52 @@ pub fn core_tool_names() -> std::collections::BTreeSet<String> {
     names
 }
 
+/// Where a manifest's referenced files live: a package directory (Luau) or
+/// the `(path, text)` pairs a native plugin compiles in.
+enum Files<'a> {
+    Dir(&'a Path),
+    Embedded(&'a [(&'a str, &'a str)]),
+}
+
+impl Files<'_> {
+    fn check(&self, rel: &str, what: &str) -> Result<(), String> {
+        match self {
+            Files::Dir(dir) => check_file(dir, rel, what),
+            Files::Embedded(files) if files.iter().any(|(p, _)| *p == rel) => Ok(()),
+            Files::Embedded(_) => Err(format!("{what} `{rel}` does not exist")),
+        }
+    }
+
+    fn text(&self, rel: &str) -> String {
+        match self {
+            Files::Dir(dir) => std::fs::read_to_string(dir.join(rel)).unwrap_or_default(),
+            Files::Embedded(files) => files
+                .iter()
+                .find(|(p, _)| *p == rel)
+                .map(|(_, t)| (*t).to_owned())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Permissions a native plugin may declare (docs/plugins.md §8.4).
+pub const NATIVE_PERMISSIONS: &[&str] = &["exec", "net", "fs-read", "fs-write"];
+
 /// Everything the loader refuses, each with the problem named (W5 acceptance).
 pub fn validate(m: &PluginManifest, dir: &Path) -> Result<(), String> {
+    validate_in(m, &Files::Dir(dir))
+}
+
+/// The same rules for a built-in native plugin whose files are compiled in:
+/// permissions may be any of [`NATIVE_PERMISSIONS`], there is no
+/// `src/main.luau`, and an artifact tool needs no `[[renderer]]` (the Rust
+/// type draws its own fallback).
+pub fn validate_native(m: &PluginManifest, files: &[(&str, &str)]) -> Result<(), String> {
+    validate_in(m, &Files::Embedded(files))
+}
+
+fn validate_in(m: &PluginManifest, files: &Files<'_>) -> Result<(), String> {
+    let native = matches!(files, Files::Embedded(_));
     if !valid_id(&m.id) {
         return Err(format!(
             "id `{}` must start with a lowercase letter and use only a-z, 0-9 and '-'",
@@ -172,7 +216,18 @@ pub fn validate(m: &PluginManifest, dir: &Path) -> Result<(), String> {
     {
         return Err("platforms must be a non-empty subset of [desktop, mobile]".into());
     }
-    if !m.permissions.is_empty() {
+    if native {
+        if let Some(p) = m
+            .permissions
+            .iter()
+            .find(|p| !NATIVE_PERMISSIONS.contains(&p.as_str()))
+        {
+            return Err(format!(
+                "unknown permission `{p}` (valid: [{}])",
+                NATIVE_PERMISSIONS.join(", ")
+            ));
+        }
+    } else if !m.permissions.is_empty() {
         return Err(format!(
             "permissions must be empty for a Luau plugin (api {API_VERSION}); got [{}]",
             m.permissions.join(", ")
@@ -224,8 +279,8 @@ pub fn validate(m: &PluginManifest, dir: &Path) -> Result<(), String> {
         if t.entry.trim().is_empty() {
             return Err(format!("tool `{}` needs an entry function", t.name));
         }
-        check_file(dir, &t.input, &format!("tool `{}` input schema", t.name))?;
-        if t.artifact && m.renderer.is_empty() {
+        files.check(&t.input, &format!("tool `{}` input schema", t.name))?;
+        if t.artifact && !native && m.renderer.is_empty() {
             return Err(format!(
                 "tool `{}` declares artifact = true but the plugin has no [[renderer]]",
                 t.name
@@ -239,11 +294,8 @@ pub fn validate(m: &PluginManifest, dir: &Path) -> Result<(), String> {
                 AGENTS.join(", ")
             ));
         }
-        check_file(dir, path, &format!("prompts.{agent}"))?;
-        let words = std::fs::read_to_string(dir.join(path))
-            .unwrap_or_default()
-            .split_whitespace()
-            .count();
+        files.check(path, &format!("prompts.{agent}"))?;
+        let words = files.text(path).split_whitespace().count();
         if words > MAX_FRAGMENT_WORDS {
             return Err(format!(
                 "prompts.{agent} has {words} words (about 200 at most)"
@@ -260,9 +312,11 @@ pub fn validate(m: &PluginManifest, dir: &Path) -> Result<(), String> {
         if v.name.trim().is_empty() {
             return Err("view.name is required".into());
         }
-        check_file(dir, &v.html, "view html")?;
+        files.check(&v.html, "view html")?;
     }
-    check_file(dir, "src/main.luau", "entry module")?;
+    if !native {
+        files.check("src/main.luau", "entry module")?;
+    }
     Ok(())
 }
 

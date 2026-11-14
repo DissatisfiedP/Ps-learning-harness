@@ -1,0 +1,39 @@
+# Built-in native plugin (docs/plugins.md §12): compiled into the core from
+# `plugins/native/image_set.rs`. Native because it reads image files
+# (`fs-read`: the labelled sets in the data repo's `image-sets/`), which no
+# Luau api 1 package may do (§8.4). Tool `entry` names the Rust method.
+id = "image-set"
+version = "0.1.0"
+api = 1
+title = "Labeled image drills"
+description = "Runs classification drills over labelled image sets, including the learner's own labelled folders."
+license = "MIT"
+platforms = ["desktop", "mobile"]
+permissions = ["fs-read"]
+use_when = "Perceptual sections that need many labeled examples: identifying eras, styles, species, materials, defects, diagram types."
+avoid_when = "No labeled set exists and none can be built from trustworthy captions."
+cost = "Low context; images load only on the learner's screen."
+
+[[tool]]
+name = "image_set_list"
+description = "List the available image sets (folder name = label), each with its labels and how many images each label has."
+agents = ["tutor", "practice"]
+input = "schemas/image_set_list.json"
+entry = "list"
+
+[[tool]]
+name = "image_set_drill"
+description = "Build a drill figure over one set: the learner answers in it. Returns the figure and the answer key to pass as the question's view target; grading returns per-item results and confusion pairs."
+agents = ["tutor", "practice"]
+input = "schemas/image_set_drill.json"
+entry = "drill"
+artifact = true
+
+[[view]]
+name = "drill"
+html = "views/drill.html"
+answer = true
+
+[prompts]
+tutor = "prompts/tutor.md"
+practice = "prompts/practice.md"

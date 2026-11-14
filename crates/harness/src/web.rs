@@ -299,7 +299,10 @@ fn looks_like_pdf_url(url: &str) -> bool {
 }
 
 /// Read the body up to `limit` bytes; `true` means the rest was dropped.
-async fn read_body(mut resp: reqwest::Response, limit: usize) -> Result<(Vec<u8>, bool), String> {
+pub(crate) async fn read_body(
+    mut resp: reqwest::Response,
+    limit: usize,
+) -> Result<(Vec<u8>, bool), String> {
     let mut body: Vec<u8> = Vec::new();
     let mut capped = false;
     let read = async {

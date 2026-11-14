@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "checkId": {
+      "type": "string",
+      "enum": ["permissions", "find-the-flag", "harden-sshd", "stop-the-service"],
+      "description": "The check of the running lab's scenario; its id is the scenario id."
+    }
+  },
+  "required": [
+    "checkId"
+  ],
+  "additionalProperties": false
+}

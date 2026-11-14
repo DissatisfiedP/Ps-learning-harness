@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "lang": {
+      "type": "string",
+      "description": "python, javascript, sql (SQLite, in memory) or nix"
+    },
+    "input": {
+      "type": "string",
+      "description": "code to evaluate; nix: an expression, or `name = expr` to bind a name for later inputs"
+    }
+  },
+  "required": [
+    "lang",
+    "input"
+  ],
+  "additionalProperties": false
+}

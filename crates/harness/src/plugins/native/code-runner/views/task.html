@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Code task</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 12px; font: 14px/1.45 var(--font-ui, system-ui, sans-serif); color: var(--ink, #222); background: var(--raised, #fff); }
+  h1 { font-size: 13px; font-weight: 600; margin: 0 0 6px; color: var(--ink-2, #444); text-transform: uppercase; letter-spacing: .04em; }
+  p.prompt { margin: 0 0 10px; white-space: pre-wrap; }
+  label { display: block; font-size: 12px; color: var(--ink-2, #555); margin: 10px 0 4px; }
+  textarea, pre, select { box-sizing: border-box; width: 100%; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink, #222); background: var(--paper, #fafafa); border: 1px solid var(--rule, #ccc); border-radius: 6px; padding: 8px; }
+  textarea { resize: vertical; min-height: 4em; tab-size: 4; }
+  textarea#code { min-height: 10em; }
+  textarea[readonly] { opacity: .85; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 16em; overflow: auto; }
+  pre.err { border-color: var(--danger, #b00); }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .row select { width: auto; flex: 1 1 10em; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--rule-strong, #999); background: var(--raised, #fff); color: var(--ink, #222); cursor: pointer; }
+  button.primary { background: var(--accent, #2a5bd7); border-color: var(--accent, #2a5bd7); color: var(--on-accent, #fff); }
+  button:disabled { opacity: .5; cursor: default; }
+  .meta { font-size: 12px; color: var(--ink-3, #777); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1 id="title">Code task</h1>
+<p class="prompt" id="prompt"></p>
+<div id="error-box" hidden>
+  <label>The error</label>
+  <pre class="err" id="error-output"></pre>
+</div>
+<label for="code" id="code-label">Code</label>
+<textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+<div id="predict-box" hidden>
+  <label for="prediction" id="prediction-label">Your prediction of the output (commit before running)</label>
+  <textarea id="prediction" spellcheck="false"></textarea>
+</div>
+<div id="explain-box" hidden>
+  <label for="explanation">What does the error mean, and what causes it?</label>
+  <textarea id="explanation"></textarea>
+</div>
+<div class="row">
+  <select id="stdin-choice" aria-label="Input"></select>
+  <button type="button" id="run">Run</button>
+  <button type="button" class="primary" id="submit">Submit</button>
+</div>
+<div id="custom-box" hidden>
+  <label for="stdin">Input (stdin)</label>
+  <textarea id="stdin" spellcheck="false"></textarea>
+</div>
+<div id="out-box" hidden>
+  <label>Output <span class="meta" id="out-meta"></span></label>
+  <pre id="output" aria-live="polite"></pre>
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const pending = new Map();
+  let nextId = 1;
+  let task = {};
+  let artifactId = '';
+  let answerMode = false;
+  let committed = false;
+  const send = (m) => { m.protocol = 1; parent.postMessage(m, '*'); };
+  const call = (fn, args) => new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    send({ type: 'call', id, fn, args });
+  });
+  const theme = (t) => { for (const [k, v] of Object.entries(t || {})) document.documentElement.style.setProperty('--' + k, v); };
+  const resize = () => send({ type: 'resize', height: document.documentElement.scrollHeight + 4 });
+  const kindTitle = { write: 'Write', fix: 'Fix', read: 'Read and predict', error: 'Read the error' };
+
+  function render(data) {
+    task = data || {};
+    $('title').textContent = `${kindTitle[task.kind] || 'Code'} · ${task.language || ''}`;
+    $('prompt').textContent = task.prompt || '';
+    $('code').value = task.starter || '';
+    const readOnly = task.kind === 'read' || task.kind === 'error';
+    $('code').readOnly = readOnly;
+    $('code-label').textContent = readOnly ? 'Code (read only)' : 'Code';
+    $('predict-box').hidden = !(task.predictFirst || task.kind === 'read');
+    $('explain-box').hidden = task.kind !== 'error';
+    $('error-box').hidden = task.kind !== 'error' || !task.errorOutput;
+    $('error-output').textContent = task.errorOutput || '';
+    const choice = $('stdin-choice');
+    choice.textContent = '';
+    for (const [i, t] of (task.tests || []).entries()) {
+      const o = document.createElement('option');
+      o.value = String(i);
+      o.textContent = `Input: ${t.name}`;
+      choice.append(o);
+    }
+    const custom = document.createElement('option');
+    custom.value = 'custom';
+    custom.textContent = 'Input: my own';
+    choice.append(custom);
+    choice.hidden = task.kind === 'error';
+    $('submit').hidden = !answerMode;
+    resize();
+  }
+
+  function stdin() {
+    const v = $('stdin-choice').value;
+    if (v === 'custom') return $('stdin').value;
+    return (task.tests || [])[Number(v)]?.input || '';
+  }
+
+  $('stdin-choice').addEventListener('change', () => { $('custom-box').hidden = $('stdin-choice').value !== 'custom'; resize(); });
+
+  $('run').addEventListener('click', async () => {
+    const needsPrediction = !$('predict-box').hidden && !committed;
+    if (needsPrediction && !$('prediction').value.trim()) {
+      $('out-box').hidden = false;
+      $('output').textContent = 'Write your prediction first; it is fixed once you run.';
+      resize();
+      return;
+    }
+    $('run').disabled = true;
+    $('out-meta').textContent = 'running…';
+    $('out-box').hidden = false;
+    try {
+      const r = await call('run', { artifactId, language: task.language, code: $('code').value, stdin: stdin(), prediction: $('prediction').value });
+      committed = true;
+      $('prediction').readOnly = !$('predict-box').hidden;
+      $('output').textContent = r.output || '(no output)';
+      $('output').classList.toggle('err', r.exit !== 0);
+      $('out-meta').textContent = r.timedOut ? '· stopped at the time limit' : r.truncated ? '· stopped at the output limit' : `· exit ${r.exit}`;
+      send({ type: 'state', summary: `ran the code: exit ${r.exit}${r.timedOut ? ' (time limit)' : ''}` });
+    } catch (e) {
+      $('output').textContent = String(e.message || e);
+      $('out-meta').textContent = '';
+    } finally {
+      $('run').disabled = false;
+      resize();
+    }
+  });
+
+  $('submit').addEventListener('click', () => {
+    if (task.kind === 'error' && !$('explanation').value.trim()) return;
+    if (task.kind === 'read' && !$('prediction').value.trim()) return;
+    $('submit').disabled = true;
+    $('run').disabled = true;
+    send({ type: 'submit', answer: { code: $('code').value, prediction: $('prediction').value, explanation: $('explanation').value } });
+  });
+
+  window.addEventListener('message', (event) => {
+    const m = event.data;
+    if (event.source !== parent || !m || typeof m !== 'object' || m.protocol !== 1) return;
+    if (m.type === 'init') {
+      theme(m.theme);
+      artifactId = m.artifact?.artifactId || '';
+      answerMode = Boolean(m.answer);
+      render(m.artifact?.data);
+    }
+    if (m.type === 'theme') theme(m.theme);
+    if (m.type === 'result') {
+      const p = pending.get(m.id);
+      if (!p) return;
+      pending.delete(m.id);
+      m.ok ? p.resolve(m.value) : p.reject(new Error(m.error));
+    }
+  });
+  resize();
+})();
+</script>
+</body>
+</html>

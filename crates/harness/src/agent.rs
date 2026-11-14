@@ -190,21 +190,26 @@ impl Harness {
         Ok(state)
     }
 
-    /// Register a native in-tree plugin (the trait stays for system-level
-    /// tools; none ship in this build).
+    /// Register a native in-tree plugin beside the shipped built-ins
+    /// (`plugins::native::builtin`); tests use it for their own natives. The
+    /// same consent rule applies: one that declares permissions stays
+    /// disabled until the learner enables it.
     pub fn register_native_plugin(
         &self,
         plugin: Arc<dyn crate::plugins::Plugin>,
     ) -> Result<(), Error> {
         let id = plugin.manifest().id.clone();
-        let hash = format!("native-{id}");
-        lock(&self.plugins).register(
+        let needs_consent = !plugin.manifest().permissions.is_empty()
+            && !lock(&self.config).settings.enabled_plugins.contains(&id);
+        let mut registry = lock(&self.plugins);
+        registry.register(
             plugin,
-            crate::plugins::PluginSource::Folder {
-                name: "native".into(),
-            },
-            hash,
+            crate::plugins::PluginSource::Builtin,
+            format!("builtin-{id}"),
         );
+        if needs_consent {
+            registry.disable(&id);
+        }
         Ok(())
     }
 
@@ -1830,10 +1835,12 @@ impl Harness {
         Ok(())
     }
 
-    /// Grade a view submission through the plugin's `grade(answer, target)`.
-    /// The plugin never records a verdict; the tutor still calls
-    /// `verdict_record` with the `questionId`.
-    fn grade_view_answer(
+    /// Grade a view submission through the plugin's `grade_artifact` (for a
+    /// Luau package, its `grade(answer, target)`), with the artifact's
+    /// committed tool input. Runs off the async runtime: a native grader may
+    /// run the learner's program. The plugin never records a verdict; the
+    /// tutor still calls `verdict_record` with the `questionId`.
+    async fn grade_view_answer(
         &self,
         session_id: &str,
         question_id: &str,
@@ -1867,9 +1874,15 @@ impl Harness {
         };
         let answer = payload.get("answer").cloned().unwrap_or(Value::Null);
         let target = view.get("target").cloned().unwrap_or(Value::Null);
-        let grade = plugin
-            .grade(&answer, &target)
-            .map_err(|e| Error::Invalid(format!("the plugin couldn't grade the answer: {e}")))?;
+        let grade = {
+            let (answer, target, id) = (answer.clone(), target, artifact_id.to_owned());
+            tokio::task::spawn_blocking(move || {
+                plugin.grade_artifact(&answer, &target, &id, &artifact.input)
+            })
+            .await
+            .map_err(|e| Error::Invalid(format!("the plugin couldn't grade the answer: {e}")))?
+            .map_err(|e| Error::Invalid(format!("the plugin couldn't grade the answer: {e}")))?
+        };
         Ok(json!({
             "questionId": question_id,
             "artifactId": artifact_id,
@@ -2269,7 +2282,10 @@ impl Harness {
             return Err(Error::Invalid("that question is no longer open".into()));
         }
         let content = match pending.args.get("view") {
-            Some(view) => self.grade_view_answer(session_id, call_id, view, &payload)?,
+            Some(view) => {
+                self.grade_view_answer(session_id, call_id, view, &payload)
+                    .await?
+            }
             None => answer_result(&pending.name, call_id, &pending.args, &payload)?,
         };
         let call = ToolCall {

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "language": {
+      "type": "string",
+      "enum": ["python", "javascript", "typescript", "tsx", "rust", "c"],
+      "description": "javascript also covers JSX"
+    },
+    "source": {
+      "type": "string",
+      "description": "the code itself (at most 256 KiB), e.g. what file_read returned"
+    },
+    "symbol": {
+      "type": "string",
+      "description": "a name (`push`) or a path of enclosing definitions, joined by `.` or `::` (`Stack.push`)"
+    },
+    "text": {
+      "type": "boolean",
+      "description": "also return each definition's full text; default false"
+    },
+    "firstLine": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "line number of the source's first line, when it is a range read with file_read `lines`; default 1"
+    }
+  },
+  "required": ["language", "source", "symbol"],
+  "additionalProperties": false
+}

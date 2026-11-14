@@ -178,7 +178,7 @@ A plugin is a **package**, not a prompt file: `plugin.toml` (manifest), `src/*.l
 What the prompts depend on:
 
 - **Catalog lines.** The planner sees one line per installed, enabled, platform-available plugin: title, id, tool names, platforms, `use_when`, `avoid_when`, `cost`.
-- **Fragments.** While a plugin is active in the current section, the tutor gets its `prompts/tutor.md` in `{{active_plugins}}` in Teach and Close (Coach's `prompts/practice.md` when the coach lands). Nothing from an inactive, disabled or missing plugin reaches a prompt.
+- **Fragments.** While a plugin is active in the current section, the tutor gets its `prompts/tutor.md` in `{{active_plugins}}` in Teach and Close. The coach gets the `prompts/practice.md` of the plugins that were active when the problem's target was taught (the scheduler records them in the problem's plan). Nothing from an inactive, disabled or missing plugin reaches a prompt.
 - **Tools.** In Teach, the active plugins' tools scoped to `tutor` are added to the tool list with the manifest's names and JSON Schemas. A tool name starts with `<id>_` (dashes → underscores), e.g. `circuit_draw`. A plugin error comes back as a tool error starting `plugin error:`; result text is capped at 16 KiB. The call op records the plugin's id and `platforms`. On mobile, a call to a plugin known not to run there is refused with "`<id>` only runs on desktop; teach without it", and the session locks on that device after the turn unless the learner already chose "Continue here anyway" (`docs/sync-build.md`, "Sessions on mobile").
 - **Artifact handles.** A tool declared `artifact = true` stores its figure as an `artifact` op (with the plugin's `platforms`) and its result ends with one line: `artifact: <id> — place it once with ![a short description](artifact:<id>) next to the sentence that refers to it`. The model places it with that Markdown image syntax; `shared/formatting.md` carries the placement rule. An unplaced artifact is appended after the turn's message. A `question_ask` view is refused for an artifact whose plugin doesn't list this device's platform.
 
@@ -189,23 +189,24 @@ Limits the loader and planner enforce:
 - at most **three tools per plugin**;
 - fragments of at most **250 words** (target about 200);
 - at most **three plugins per section**, plus the core tools;
-- a plugin only counts as active when it is installed, enabled and lists the current platform.
+- a plugin only counts as active when it is installed, enabled and lists the current platform. A built-in native that declares a permission (`exec`, `net`, `fs-read`) is **disabled until the learner enables it** in Settings → Plugins (behind the consent screen), so the planner's catalog doesn't list it and `plugin_request` refuses it before then.
 
 The learner sees each section's plugins as checkboxes on the plan card (`docs/ui-design.md` §7.2.9) and can remove them before approving; an uninstalled plugin proposed by the planner shows an install chip instead (§7.2.16).
 
 | Plugin | Gives | Platforms | Status |
 |---|---|---|---|
 | `circuit` | `circuit_draw` (schematic artifact + solved values), `circuit_solve` (values only), view with sliders, answer mode | desktop, mobile | Built, reference (`plugins/circuit/`); not bundled into the app |
-| `sandbox` | Local container or VM lab: `sandbox_start`, `sandbox_observe`, `sandbox_check` | desktop | Not built; native (`exec`) |
-| `code-runner` | Write, fix, read and error tasks graded by tests: `code_runner_task` | desktop, mobile (JS/TS/Python) | Not built; native (`exec`) |
-| `repl` | `repl_eval` (the tutor checks its own claims), `repl_task`; nix, python, sql, … | desktop | Not built; native (`exec`) |
-| `cas` | `cas_check` (SymPy) to verify math | desktop, mobile | Not built; native (`exec`) |
-| `live-search` | `live_search_web`, `live_search_fetch`, `live_search_images` inside the lesson | desktop, mobile | Not built; native (`net`) |
-| `image-set` | Labeled image drills: `image_set_list`, `image_set_drill` | desktop, mobile | Not built; native (`fs-read`, the learner's labelled folders) |
-| `argument-map` | Pinned premise/objection card: `argument_map_show` | desktop, mobile | Not built; Luau api 1 is enough |
+| `sandbox` | Container lab with a terminal card: `sandbox_start { scenario, image? }` (artifact; scenarios `permissions`, `find-the-flag`, `harden-sshd`, `stop-the-service`), `sandbox_observe { since? }` (the learner's commands and output), `sandbox_check { checkId }` (the scenario check, run in the lab; answer mode runs it on Submit); one lab per chat | desktop | Built in; native, `exec`, off until enabled (`plugins/native/sandbox.rs`); tutor and practice (≤ 250-word fragments `sandbox/prompts/`) |
+| `code-runner` | Write, fix, read and error tasks graded by tests: `code_runner_task { language, kind, prompt, starter?, solution?, tests, predictFirst? }` (artifact + answer-mode view; the tutor asks with `question_ask { view: { artifactId, task, target: {} } }`; grading re-runs the learner's code against the committed tests; python, javascript, typescript, sql, bash, only where installed) | desktop | Built in; native, `exec`, off until enabled (`plugins/native/code_runner.rs`); tutor and practice |
+| `repl` | `repl_eval { lang, input }` (the tutor's own persistent session: it checks its claims), `repl_task { lang, prompt, check }` (artifact + answer-mode view; `check` is evaluated in the learner's final session state); python, javascript, sql, nix | desktop | Built in; native, `exec`, off until enabled (`plugins/native/repl.rs`); tutor and practice |
+| `cas` | `cas_check { code }` (a short SymPy program; the tutor checks its own derivations and numbers) | desktop | Built in; native, `exec`, off until enabled (`plugins/native/cas.rs`); tutor and practice. Needs python3 with SymPy |
+| `live-search` | `live_search_web` (numbered sources), `live_search_fetch` (readable page text, URL-guarded), `live_search_images` (artifact: numbered images embedded as `data:` URIs; captions, source pages and credits in the text) | desktop, mobile | Built in; native, `net` (`plugins/native/live_search.rs`); tutor only |
+| `image-set` | Labeled image drills: `image_set_list` (sets in the data repo's `image-sets/`, folder = label), `image_set_drill` (artifact + answer-mode view; the text ends `target: {…}`, which the tutor copies exactly into `question_ask`'s `view.target`; grading returns per-item results and `confusions`) | desktop, mobile | Built in; native, `fs-read` (`plugins/native/image_set.rs`); tutor and practice |
+| `argument-map` | Pinned premise/objection card: `argument_map_show` (artifact; `blanks` for the learner to fill in) | desktop, mobile | Built, Luau (`plugins/argument-map/`); published through the owner's registry like `circuit`, not bundled |
+| `code-parse` | tree-sitter parsing: `code_parse_outline`, `code_parse_errors` (exact ranges), `code_parse_locate` (definition + uses) for Python, JS/JSX, TS, TSX, Rust, C | desktop, mobile | Built in; native, no permissions (`plugins/native/code_parse.rs`) |
 | `demo`, `figure` | Interactive demo jobs / exact SVG figure jobs | desktop, mobile | Not plugins in the current plan: Builder-role jobs (`jobs/demo-builder.md`, `jobs/figure-maker.md`). The brief rules the tutor follows when it requests one are in those files, after `{{brief}}` |
 
-The unbuilt rows are catalogue entries in `plugins/catalog/<id>/`: `plugin.toml`, `prompts/tutor.md` and `schemas/*.json`, i.e. each old brief in the package layout with its tools renamed to the `<id>_` rule. Nothing loads or tests that folder (`docs/plugins.md` §11).
+The practice fragment of each native is written for the coach (`coach/base.md`) and reaches it for the problems of ideas taught with that plugin (`docs/plugins.md` §12).
 
 **Web search: standard or plugin?** Verifying a fact (`research_request`) is standard everywhere, and returns a short cited brief. Searching *inside* the lesson (`live-search`) is a plugin, for subjects that need to show current or visual material throughout: fashion, current threats, fast-moving tools.
 

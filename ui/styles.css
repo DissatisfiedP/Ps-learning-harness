@@ -1362,6 +1362,7 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
 .library:first-child { border-block-start: var(--hair); }
 .library-edit { margin-block-start: var(--s3); }
 .library-cap { max-inline-size: 22ch; margin-block-start: var(--s4); }
+.image-sets-heading { margin-block-start: var(--s6); }
 .confirm, .consent {
   margin: auto;
   inline-size: min(520px, calc(100vw - 2 * var(--gutter)));
