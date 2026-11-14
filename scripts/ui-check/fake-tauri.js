@@ -205,6 +205,8 @@
     frontier: () => [],
     libraries: () => structuredClone(libraries),
     pick_folder: () => '/home/learner/huawei-ict',
+    pick_files: () => ['/home/learner/worksheet.txt'],
+    stage_file: ({ path }) => ({ kind: 'file', path, bytes: 2048, name: path.split('/').at(-1) }),
     // An import streams progress over its channel, then adds the library.
     library_import: ({ path, onProgress }) => {
       const slug = path.split('/').at(-1);
@@ -603,13 +605,13 @@
       return summaryOf(S);
     },
     practice_state: ({ sessionId }) => pview(need(sessionId)),
-    practice_submit: async ({ sessionId, text, confidence }) => {
+    practice_submit: async ({ sessionId, text, confidence, attachments }) => {
       const S = need(sessionId);
       ready(S);
       if (!text.trim()) throw new Error('the submission is empty');
       if (S.format === 'set' && !S.submitted) throw new Error('hand in the whole set first (practice_submit_set)');
       const open = S.problems.find((p) => p.status === 'open');
-      S.feed.push({ kind: 'learner', intent: 'submission', text, ...(confidence != null ? { confidence } : {}), at: stamp() });
+      S.feed.push({ kind: 'learner', intent: 'submission', text, ...(confidence != null ? { confidence } : {}), ...(attachments?.length ? { attachments } : {}), at: stamp() });
       emitOp(S, { op: 'practice', event: 'attempt', problemId: open?.id ?? '', text });
       await turn(S, async () => {
         await pause(60);

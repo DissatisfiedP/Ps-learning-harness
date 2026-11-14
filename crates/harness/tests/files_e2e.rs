@@ -133,25 +133,30 @@ async fn attachments_reach_the_model_and_grant_only_the_picked_outside_file() {
     assert!(script.unexpected.lock().unwrap().is_empty());
 }
 
-/// Practice has no file tools: a file reference is refused before anything
-/// is written, and a submission always needs text.
+/// Practice takes images, files and folders but never a library link, and a
+/// submission is never empty; a refused send leaves nothing behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn practice_takes_images_only() {
-    let root = root();
+async fn practice_refuses_a_library_link_and_an_empty_submission() {
+    let _ = root();
     let script = Arc::new(Script::default());
     let base = serve(Arc::clone(&script), Arc::new(Semaphore::new(0))).await;
     let (repo, config) = temp_dirs("practice");
     let h = harness(&repo, &config, &base).await;
-    std::fs::write(root.join("home/practice.md"), "notes").unwrap();
-    let file = h.stage_file(None, "~/practice.md").unwrap();
     let image = h.stage_image(PNG, Some("dot.png")).unwrap();
+    let library = harness::Attachment {
+        kind: "library".into(),
+        path: "notes".into(),
+        media_type: None,
+        bytes: None,
+        name: None,
+    };
 
     let err = h
-        .practice_submit("none", "check this", None, &[file])
+        .practice_submit("none", "check this", None, &[library])
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("images only"), "{err}");
+    assert!(err.contains("takes images, files and folders"), "{err}");
     let err = h
         .practice_submit("none", "  ", None, &[])
         .await

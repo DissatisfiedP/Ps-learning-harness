@@ -714,7 +714,7 @@ pub(crate) fn conversation(ops: &[Op]) -> Vec<Message> {
 
 /// As [`conversation`], resolving image attachments from `repo` and dropping
 /// them when the model is known to lack vision (W2/W3). `file_tools` says
-/// whether the agent can read attached files (Practice can't).
+/// whether the agent can read attached files.
 pub(crate) fn conversation_with(
     ops: &[Op],
     repo: Option<&Path>,
@@ -1116,13 +1116,13 @@ mod tests {
             name: Some("notes.md".into()),
         }];
         let ops = vec![Op::Message(m)];
-        // Practice (no file tools): the path line only.
+        // An agent without file tools: the path line only.
         let practice = conversation_with(&ops, None, true, false);
         assert_eq!(
             user_text(&practice[0]),
             "[attached file] /home/me/notes.md, 5 B"
         );
-        // The tutor and planner are told how to read it.
+        // The tutor, planner and coach are told how to read it.
         let tutor = user_text(&conversation(&ops)[0]);
         assert!(
             tutor.ends_with("— read it with file_read or file_find"),

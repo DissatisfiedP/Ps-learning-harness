@@ -1879,7 +1879,7 @@ function goHome() {
 
 // ---------- Practice ----------
 
-/** The shared composer, lent to the Practice screen's answer card (images only). */
+/** The shared composer, lent to the Practice screen's answer card (images, files and `@` mentions, as in Learn). */
 const composerHost = {
   mount(slot, { sessionId, label, placeholder, focus = false }) {
     slot.append(els.composer);

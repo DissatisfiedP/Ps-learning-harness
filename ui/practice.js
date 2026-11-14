@@ -9,10 +9,11 @@
 // and hands them in together, then shows the review problem by problem.
 //
 // The module owns its section (#practice): head, page, the answer card and the
-// desk. The one shared composer (images only in Practice) is moved into the
+// desk. The one shared composer (images and files, as in Learn) is moved into the
 // answer card by the host (`composerHost`), exactly as it moves between Home
 // and the Learn desk.
 
+import { attachmentList } from './attachment.js';
 import { resolveArtifacts } from './artifacts.js';
 import { confidenceField, confidenceLabel } from './cards.js';
 import { enhanceLive } from './content.js';
@@ -604,6 +605,8 @@ export function createPractice(deps) {
     else if (item.intent === 'dismiss') text = 'Gave up on this problem.';
     else text = text.replace(CONFIDENCE_TAIL, '');
     e.append(h('p', 'you-text', text));
+    const chips = attachmentList(item.attachments);
+    if (chips) e.append(chips);
     if (typeof item.confidence === 'number') e.append(h('p', 'you-meta', confidenceLabel(item.confidence)));
     return e;
   }

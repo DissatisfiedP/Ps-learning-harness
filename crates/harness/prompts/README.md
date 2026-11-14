@@ -214,7 +214,7 @@ The practice fragment of each native is written for the coach (`coach/base.md`) 
 
 Besides the learner's words, the tutor can receive three kinds of app-written lines, all in the same user message:
 
-- **Attachments.** Images arrive as image blocks after the message text. When the model can't see images (catalog says no vision) or the file is unreadable, the image becomes the line `[image attached] <name> (not sent to this model)`. Files and folders arrive as one line each, in a text block after the message text: `[attached file] <path>, <n> KiB — read it with file_read or file_find` (`<n> B` under 1 KiB; `[attached folder] <path> — …` with no size). The "— read it with …" hint is added only for agents that have the file tools (tutor, planner); Practice takes images only, and a file line replayed from an older Practice session ends after the size. `<path>` is `~/…` under home, relative to the workspace for a file inside it, and absolute elsewhere. Every message has text; an attachments-only message from an older build replays as just its images and lines. An image path is a repo path, not a document to read.
+- **Attachments.** Images arrive as image blocks after the message text. When the model can't see images (catalog says no vision) or the file is unreadable, the image becomes the line `[image attached] <name> (not sent to this model)`. Files and folders arrive as one line each, in a text block after the message text: `[attached file] <path>, <n> KiB — read it with file_read or file_find` (`<n> B` under 1 KiB; `[attached folder] <path> — …` with no size). The "— read it with …" hint is added only for agents that have the file tools (tutor, planner, coach; Practice takes images, files and folders on a submission). `<path>` is `~/…` under home, relative to the workspace for a file inside it, and absolute elsewhere. Every message has text; an attachments-only message from an older build replays as just its images and lines. An image path is a repo path, not a document to read.
 - **View state.** When the learner interacted with an interactive figure since their last message, the latest summary per artifact (one line, ≤ 500 characters) is added after the message text and a blank line, one line per artifact sorted by id: `[view state <artifactId>] <summary>`. It is added only in the request; the stored message is what the learner typed.
 - **Mentions** are just path references; a `@` mention produces the same line as a picked file or folder (and a mentioned or picked image file is sent as an image).
 - **Linked libraries.** A library chosen with "+" on Home is a `{ kind: "library", path: <id>, name }` attachment on the first message, and reaches the model as `` [linked library] <name> (`<id>`) — search it with library_search, read it with library_read `` (the hint only for agents with the library tools). It is a link to synced text, not a folder grant.
@@ -243,7 +243,7 @@ The learner's attachments are readable through `file_find` / `file_read`: home, 
 | `shared/library.md` | 250 | | |
 | `planner/base.md` | 2403 | `tutor/modes/perceptual.md` | 370 |
 | `planner/exam.md` | 510 | `tutor/modes/procedure.md` | 483 |
-| `coach/base.md` | 1940 | | |
+| `coach/base.md` | 2050 | | |
 | `compaction.md` | 288 | `jobs/researcher.md` | 1021 |
 | `jobs/graph-builder.md` | 1902 | `jobs/topic-splitter.md` | 198 |
 | `jobs/problem-checker.md` | 244 | `jobs/demo-builder.md` | 367 (302 + the moved demo brief rules) |
@@ -262,3 +262,5 @@ Raised on 2026-11-11 for learner comments: `tutor/base.md` (a comment or set-asi
 Added on 2026-11-11 for reference libraries (architecture §4.27): `shared/library.md` at 250 (239 today; the libraries list itself is generated and not counted).
 
 Raised on 2026-11-14 for exam mode (architecture §4.14): `planner/exam.md` 351 → 510 (how to weight nodes for the app's daily ranking, `practiceOnly` as a starting call, papers are not sections), `coach/base.md` 1676 → 1940 (the exam format: `marks`, the mark scheme as `rubric`, `marksAwarded`, marking by the library's scheme).
+
+Raised on 2026-11-14 for Practice attachments: `coach/base.md` 1940 → 2050 (the Attachments section: images and files are part of the submission, the same rations apply, read what you can, say what you can't).

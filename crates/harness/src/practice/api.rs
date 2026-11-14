@@ -379,9 +379,12 @@ impl Harness {
         if text.trim().is_empty() && attachments.is_empty() {
             return Err(Error::Invalid("the submission is empty".into()));
         }
-        if attachments.iter().any(|a| a.kind != "image") {
+        if attachments
+            .iter()
+            .any(|a| !matches!(a.kind.as_str(), "image" | "file" | "folder"))
+        {
             return Err(Error::Invalid(
-                "Practice can't read files or folders; attach images only".into(),
+                "Practice takes images, files and folders; a library is linked from Home".into(),
             ));
         }
         self.check_vision(attachments)?;
@@ -415,6 +418,10 @@ impl Harness {
         m.tag = Some(tag::SUBMISSION.into());
         m.attachments = attachments.to_vec();
         self.practice_append(session_id, Op::Message(m), false)?;
+        // A file or folder outside the home folder becomes a read root for
+        // this session, as in Learn, so the coach can read what was attached.
+        let grants = crate::attachments::grants_for(attachments);
+        crate::attachments::grant_roots(self, session_id, &grants)?;
         self.coach_turn(session_id).await
     }
 

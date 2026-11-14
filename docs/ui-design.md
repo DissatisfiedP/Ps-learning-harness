@@ -1029,7 +1029,7 @@ Page blocks, in order of the feed:
 
 #### 7.3.3 Stream: answering, hints, giving up
 
-While a problem is open the answer card (`.exercise.pending`) sits after the flow: the heading "Your answer", one line of help, **the five-button confidence scale** (the check question's control, `confidenceField` in `cards.js`, "Pick one when you give an answer."), the shared composer (images only; label "Your working or answer", Enter sends), and a row "Hint (n used)" and "I give up — show me".
+While a problem is open the answer card (`.exercise.pending`) sits after the flow: the heading "Your answer", one line of help, **the five-button confidence scale** (the check question's control, `confidenceField` in `cards.js`, "Pick one when you give an answer."), the shared composer (images and files as in Learn; label "Your working or answer", Enter sends), and a row "Hint (n used)" and "I give up — show me".
 
 - Send → `practice_submit({ text, confidence?, attachments })`. The confidence is whatever is picked and is cleared on send; a working trace or a question may go without one. A refused send (turn running, not ready) gives the text, the attachments and the confidence back with the reason.
 - Hint → `practice_hint`. **The UI shows how many hints were used, never which rung** (the coach picks R0–R5; `hintRung` is not shown). The count reads on the button and in the desk note ("Problem 2 · 1 hint used").
@@ -1066,7 +1066,7 @@ Opening a Practice row from Home's list (the row's meta reads "Practice · time"
 
 #### 7.3.6 Attachments
 
-**Images only.** Practice has no file tools: while the answer card holds the composer, "+" is hidden and the `@` list is off; pasted and dropped images become chips, a dropped non-image file gets "Practice can take images only.", and pending file/folder chips are removed with the same note. The backend refuses file and folder attachments in Practice. Images go as `attachments` on `practice_submit`.
+**Attachments.** The composer in Practice is the Learn composer: "+" picks files, `@` lists files and folders, pasted and dropped images become chips. A file or folder is a reference the coach reads (`file_read`); an image is shown to the coach, which can read handwriting and figures by looking. The one difference from Home is that "+" opens the file picker directly (a reference library is linked only from Home); the backend refuses a library chip in Practice. All go as `attachments` on `practice_submit`, and each sent submission shows its chips under the learner's text (`FeedItem.attachments`).
 
 #### 7.3.7 Errors
 
@@ -2187,7 +2187,7 @@ Nothing in this table scrolls, moves focus or animates.
    - deferred KaTeX warm-up via `requestIdleCallback`.
    Removing autoscroll must not add layout reads per paint.
 4. **No new dependencies beyond the vendored set, no bundler, no runtime font downloads.** System font stacks only (§5.1). Vendored marked, DOMPurify and KaTeX are unchanged; KaTeX's CSS is only overridden for `font-size` (§5.2). The outputs build added two vendored libraries, both loaded on demand (`docs/architecture.md` §4.24): Prism (`ui/vendor/prism/`, core plus per-language grammars loaded when a finished code block needs one) and Mermaid (`ui/vendor/mermaid/`, loaded on the first `mermaid` block). Nothing is fetched from the network.
-5. **Practice is the coach** (§7.3, §11b): the images-only composer rule stays (pasted or dropped images only; no "+", no `@` list), sent as `attachments` on `practice_submit`. The surface is §7.3 (`ui/practice.js`).
+5. **Practice is the coach** (§7.3, §11b): the shared composer is the Learn composer (images, files, `@`; no library link), sent as `attachments` on `practice_submit`. The surface is §7.3 (`ui/practice.js`).
 6. **IDs used by `app.js` stay or are renamed in the same change:** `#messages`, `#timeline`, `#plan-slot`, `#live`, `#composer`, `#prompt`, `#send`, `#home`, `#conversation`, `#plan-panel` (now a `dialog`), `#settings`. This is a clean cutover: remove `#toast`, `#sidebar`, `#scrim`, `#model-pill`, `#session-mode`, `#phase-strip`'s separate band, `.only-mobile`, and their dead CSS and JS.
 7. Do not copy code or text from LearnHarness (AGPL-3.0).
 
@@ -2201,7 +2201,7 @@ The coach (architecture §4.11–4.13, `crates/harness/prompts/coach/base.md`) r
 |---|---|
 | `start_practice({ targets?, format?, size? }) -> SessionSummary` | New Practice session. `targets`: graph node ids the learner picked on the Map (`[]`/absent: the scheduler picks what is due or weak). `format`: `"stream"` (default) or `"set"`; `"exam"` is refused (a timed paper starts from the exam goal's session with `start_exam`, §11c). `size`: set length, 2–10, default 5. Emits a `session` event first, then runs the coach until the first problem is posed. Refused when the graph is empty, an id is unknown, or no Tutor model is set |
 | `practice_state({ sessionId }) -> PracticeView` | The learner-visible state (below). Re-read it on `turnEnd` and on every `op` event whose `op.op === "practice"`, debounced ~50 ms as `session_state` is |
-| `practice_submit({ sessionId, text, confidence?, attachments? })` | One submission: a working trace, a question, or a claimed answer; the coach decides which. `confidence` is `10 \| 30 \| 50 \| 70 \| 90` (the five buttons) and is what calibration counts. Images only. Not for a set before it is submitted (use `practice_submit_set`) |
+| `practice_submit({ sessionId, text, confidence?, attachments? })` | One submission: a working trace, a question, or a claimed answer; the coach decides which. `confidence` is `10 \| 30 \| 50 \| 70 \| 90` (the five buttons) and is what calibration counts. `attachments` are images, files and folders (never a library link). Not for a set before it is submitted (use `practice_submit_set`) |
 | `practice_hint({ sessionId })` | The Hint button. Stream only: the coach picks the rung (R0–R5) and the app records the highest one it reports |
 | `practice_dismiss({ sessionId })` | "Skip this problem". Stream only. Concluded as `dismissed` (an Again rating, retested at the end) even if the coach does not call `problem_conclude` |
 | `practice_next({ sessionId })` | Next problem; only after the current one concluded. The scheduler chooses the target, the coach writes the problem |

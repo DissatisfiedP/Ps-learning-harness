@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::knowledge::KnowledgeMap;
 use crate::learner::{Format, Layer, MissClass, Verdict};
-use crate::sessions::{Op, Session, StoredMessage};
+use crate::sessions::{Attachment, Op, Session, StoredMessage};
 use crate::state::{Calibration, Level};
 
 use chrono::{DateTime, Duration, Utc};
@@ -102,6 +102,9 @@ pub enum FeedItem {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         confidence: Option<u8>,
+        /// What the learner attached to a submission (images, files, folders).
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
         at: String,
     },
     #[serde(rename_all = "camelCase")]
@@ -421,18 +424,21 @@ fn feed(ops: &[Op], set: bool) -> Vec<FeedItem> {
                         format!("Handed in {} answer(s).", answers.len())
                     },
                     confidence: None,
+                    attachments: Vec::new(),
                     at: p.at.clone(),
                 }),
                 PracticeEvent::Hint { .. } => out.push(FeedItem::Learner {
                     intent: "hint",
                     text: String::new(),
                     confidence: None,
+                    attachments: Vec::new(),
                     at: p.at.clone(),
                 }),
                 PracticeEvent::Dismiss { .. } => out.push(FeedItem::Learner {
                     intent: "dismiss",
                     text: String::new(),
                     confidence: None,
+                    attachments: Vec::new(),
                     at: p.at.clone(),
                 }),
                 PracticeEvent::Conclude {
@@ -450,6 +456,7 @@ fn feed(ops: &[Op], set: bool) -> Vec<FeedItem> {
                     intent: "submission",
                     text: submission_text(&m.content),
                     confidence: pending_confidence.take(),
+                    attachments: m.attachments.clone(),
                     at: m.at.clone(),
                 });
             }

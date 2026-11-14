@@ -2,8 +2,9 @@
 // sessions. Attachments are staged as soon as they arrive (images in a
 // device-local staging folder, files and folders referenced by path) but are
 // only sent with the next learner message; Send moves staged images into
-// the data repo, and removing a chip deletes its staged copy. Practice has
-// no file tools, so it takes images only (no '+', no '@'). The `@` list is
+// the data repo, and removing a chip deletes its staged copy. Practice uses
+// the same composer with the same '+' and '@' (its coach reads attached
+// files), but never links a library. The `@` list is
 // an ARIA combobox over the backend's mention search. On Home (a new Learn
 // session) '+' opens a menu: files, or a folder imported as a reference
 // library (library.js), or a library imported before; a library becomes a
@@ -130,10 +131,6 @@ async function addPath(path, { origin = 'pick', name = null } = {}) {
   if (!path) return;
   try {
     const attachment = await call('stage_file', { sessionId, path });
-    if (mode === 'practice' && attachment.kind !== 'image') {
-      say('Practice can take images only.', true);
-      return;
-    }
     if (name && !attachment.name) attachment.name = name;
     addItem(attachment, { origin });
     say('');
@@ -365,7 +362,6 @@ function queryMentions(query) {
 
 function updateMention() {
   if (!els) return;
-  if (mode === 'practice') return closeMention();
   const value = els.prompt.value;
   const pos = els.prompt.selectionStart;
   if (pos !== els.prompt.selectionEnd) return closeMention();
@@ -517,7 +513,7 @@ export function initComposer(h) {
     for (const file of files) {
       if (file.path) addPath(file.path, { origin: 'drop' });
       else if (file.type.startsWith('image/')) addImageFile(file);
-      else say(mode === 'practice' ? 'Practice can take images only.' : 'Can’t drop that file. Use “Add files”.', true);
+      else say('Can’t drop that file. Use “Add files”.', true);
     }
   });
 
@@ -538,15 +534,6 @@ const api = {
 
   setMode(next) {
     mode = next === 'practice' ? 'practice' : 'learn';
-    // Practice has no file tools: images only, no '+' and no '@'.
-    els.add.hidden = mode === 'practice';
-    if (mode === 'practice') {
-      closeMention();
-      if (items.some((it) => it.attachment.kind !== 'image')) {
-        items = items.filter((it) => it.attachment.kind === 'image');
-        say('Practice can take images only. File and folder chips were removed.');
-      }
-    }
     renderChips();
     updateAddButton();
   },

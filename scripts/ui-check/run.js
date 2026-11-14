@@ -1198,13 +1198,19 @@ async function practice() {
   expect(hint.coach === 1 && hint.button === 'Hint (1 used)' && hint.note === 'Problem 1 · 1 hint used' && hint.you.join() === 'Asked for a hint.' && hint.calls === 1, `after a hint: ${JSON.stringify(hint)}`);
 
   // An answer with its confidence → feedback, the verdict, the revealed solution; Next is the one primary.
+  // "+" is there in Practice, as in Learn: a picked file becomes a chip, is staged against this session and goes with the answer.
+  expect(await page.evaluate(shown('#add-files')), '"+" is shown in Practice');
+  await page.evaluate(click('add-files'));
+  await until('the file chip', () => page.evaluate(`${qa('#attach-chips .chip')}.length === 1`));
+  expect(JSON.stringify((await page.evaluate(argsOf('stage_file')))[0]) === JSON.stringify({ sessionId: 'P1', path: '/home/learner/worksheet.txt' }), 'the file is staged against the Practice session');
   await page.evaluate(type('The derivative is 6x cos(3x^2)'));
   await page.evaluate(`${q('#practice-answer .confidence input[value="70"]')}.click()`);
   await page.evaluate(click('send'));
   await until('the verdict', () => page.evaluate(shown('#practice-flow .concluded')));
   await until('the coach reply', () => page.evaluate(`/Yes\\. That is the answer/.test(${textOf('#practice-flow')})`));
   const sent = (await page.evaluate(argsOf('practice_submit')))[0];
-  expect(sent.sessionId === 'P1' && sent.text === 'The derivative is 6x cos(3x^2)' && sent.confidence === 70 && Array.isArray(sent.attachments), `practice_submit: ${JSON.stringify(sent)}`);
+  expect(sent.sessionId === 'P1' && sent.text === 'The derivative is 6x cos(3x^2)' && sent.confidence === 70 && sent.attachments?.length === 1 && sent.attachments[0].kind === 'file', `practice_submit: ${JSON.stringify(sent)}`);
+  expect(JSON.stringify(await page.evaluate(`${qa('#practice-flow .entry.user .message-chips .chip-name')}.map((e) => e.textContent)`)) === JSON.stringify(['worksheet.txt']), 'the sent submission shows its attachment');
   await page.shot('practice-concluded');
   const done = await page.evaluate(`(() => { const c = ${q('#practice-flow .concluded')};
     return { verdict: c.querySelector('.verdict').textContent, meta: c.querySelector('.result-meta').textContent, open: c.querySelector('details.reveal').open,

@@ -777,12 +777,14 @@ impl Harness {
                 "the arguments must be a JSON object",
             )));
         }
-        let state = SessionState::default();
         Ok(match name {
             "problem_commit" => self.problem_commit(session_id, args).await?,
             "problem_conclude" => Ran::plain(self.problem_conclude(session_id, args)?),
             "research_request" => Ran::plain(self.research_request(session_id, args)?),
             "file_find" | "file_read" => {
+                // What the learner attached outside their home folder is a
+                // read root for this session (`fileGrant` ops).
+                let state = crate::replay::replay_state(&self.store.ops(session_id)?);
                 Ran::plain(self.file_tool(session_id, &state, name, args).await)
             }
             "library_list" | "library_search" | "library_read" => {

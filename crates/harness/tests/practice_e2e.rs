@@ -1294,3 +1294,123 @@ async fn the_coach_gets_the_tools_of_the_plugins_that_were_active_when_the_idea_
     assert_eq!(h.practice_state(&id).unwrap().status, "open");
     assert!(script.unexpected.lock().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Attachments: images and files on a submission
+// ---------------------------------------------------------------------------
+
+/// A 1×1 PNG.
+const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submission_can_carry_a_photo_and_a_file_and_the_coach_reads_both() {
+    let r = rig("practice-attach").await;
+    seed_outcome(&r.repo, "seed", OHM, "recall", 1);
+    // The worksheet is outside the home folder: it becomes a read root.
+    let dir = std::env::temp_dir().join(format!("lh-practice-attach-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("worksheet.txt"), "Q1. R1 = 4.7k, R2 = 10k").unwrap();
+    let sheet = dir
+        .join("worksheet.txt")
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    queue(
+        &r.script,
+        "coach",
+        vec![
+            call(
+                "c1",
+                "problem_commit",
+                commit(A, "recall", 1, "a lamp chain", "FINAL-6V"),
+            ),
+            // After the submission: read the worksheet.
+            call("f1", "file_read", json!({ "path": sheet })),
+            Reply::Text("Your worksheet and photo agree: R1 is 4.7k."),
+        ],
+    );
+    queue(
+        &r.script,
+        "checker",
+        vec![
+            audit("a1", "not obvious", "Ohm's law", 0.8),
+            necessity("n1", false, "every route needs the split"),
+        ],
+    );
+    let id =
+        r.h.start_practice(&[A.into()], "stream", None)
+            .await
+            .unwrap()
+            .id;
+    let file = r.h.stage_file(Some(&id), &sheet).unwrap();
+    assert_eq!(file.kind, "file");
+    let photo = r.h.stage_image(PNG, Some("working.png")).unwrap();
+
+    // A library is linked from Home, never sent from Practice; nothing is
+    // recorded for the refused send.
+    let ops_before = r.h.load_session(&id).unwrap().ops.len();
+    let library = harness::Attachment {
+        kind: "library".into(),
+        path: "huawei-ict".into(),
+        media_type: None,
+        bytes: None,
+        name: Some("Huawei ICT".into()),
+    };
+    let err =
+        r.h.practice_submit(&id, "x", None, &[library])
+            .await
+            .unwrap_err()
+            .to_string();
+    assert!(err.contains("takes images, files and folders"), "{err}");
+    assert_eq!(r.h.load_session(&id).unwrap().ops.len(), ops_before);
+
+    r.h.practice_submit(&id, "See my working", None, &[photo.clone(), file.clone()])
+        .await
+        .unwrap();
+
+    // The coach was shown the photo and told where the file is.
+    let coach = r.script.requests_of("coach");
+    let first = &coach[1];
+    let user = first["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "user")
+        .unwrap();
+    let parts = user["content"].as_array().unwrap();
+    assert_eq!(
+        parts.iter().filter(|p| p["type"] == "image_url").count(),
+        1,
+        "{user}"
+    );
+    let text = texts(first);
+    assert!(
+        text.contains(&format!("[attached file] {sheet}"))
+            && text.contains("read it with file_read"),
+        "{text}"
+    );
+
+    // The file was readable through its grant.
+    let read = raw_results(&r.repo, &id, "file_read");
+    assert!(read[0].contains("R1 = 4.7k, R2 = 10k"), "{read:?}");
+    assert_eq!(r.h.session_state(&id).unwrap().file_grants, [sheet.clone()]);
+
+    // The learner's own page shows both attachments on the submission.
+    let view = serde_json::to_value(r.h.practice_state(&id).unwrap()).unwrap();
+    let sent = view["feed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == "learner" && f["intent"] == "submission")
+        .unwrap();
+    let kinds: Vec<&str> = sent["attachments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["image", "file"]);
+    assert!(r.script.unexpected.lock().unwrap().is_empty());
+}
