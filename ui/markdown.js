@@ -189,3 +189,26 @@ export function plainText(source, max = 140) {
     .trim();
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
+
+/** Whether `text` has a formula in it (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`). */
+export function hasMath(text) {
+  return new RegExp(MATH.source).test(String(text ?? ''));
+}
+
+/**
+ * HTML for a short text with its formulas typeset inline and nothing else
+ * interpreted: a title or a one-line statement (no Markdown, no blocks). A
+ * `$` left over in text that was cut short ("… $A…") is dropped.
+ */
+export function renderInline(text) {
+  const src = String(text ?? '');
+  const plain = (piece) => escapeHtml(/…|\.\.\./.test(src) ? piece.replace(/\$(?=\S)/g, '') : piece);
+  let html = '';
+  let at = 0;
+  for (const m of src.matchAll(MATH)) {
+    html += plain(src.slice(at, m.index));
+    html += typeset(m[1] ?? m[2] ?? m[3] ?? m[4], false).html;
+    at = m.index + m[0].length;
+  }
+  return html + plain(src.slice(at));
+}

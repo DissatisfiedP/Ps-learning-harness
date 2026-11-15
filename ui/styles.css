@@ -1788,3 +1788,17 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
 .ex-sketch figcaption { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); font: 400 var(--fs-small)/1.45 var(--font-ui); color: var(--ink-3); }
 .you-sketch { margin: var(--s2) 0 0; }
 .you-sketch figcaption { margin-block-start: var(--s1); font: 400 var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-3); }
+
+/* Map: an idea whose title has a formula is typeset as HTML over the canvas
+   (ui/map.js). The layer scales each label by the zoom, as the canvas does for
+   its own text; two lines at most, like a canvas label. */
+.map-math-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.map-math-label {
+  position: absolute; inset-block-start: 0; inset-inline-start: 0;
+  inline-size: max-content; max-inline-size: 150px;
+  transform-origin: 50% 0; text-align: center;
+  font: 500 13px/16px var(--font-ui); color: #F0ECE4;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+.map-math-label .katex { font-size: 1em; }
+@media (forced-colors: active) { .map-math-label { color: CanvasText; } }

@@ -281,6 +281,8 @@ export function createWorld(groups, links, { burst = true, topics = null } = {})
         key: id,
         id,
         title: src.title ?? id,
+        rawTitle: src.rawTitle ?? src.title ?? id,
+        hasMath: Boolean(src.hasMath),
         statement: src.statement ?? '',
         kind: src.kind ?? '',
         cluster,

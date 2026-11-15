@@ -126,5 +126,7 @@ function tex(s) {
 export function mathText(text) {
   const s = String(text ?? '');
   if (!s.includes('$') && !s.includes('\\')) return s;
-  return s.replace(MATH, (_, a, b, c, d, e) => tex(a ?? b ?? c ?? d ?? e).replace(/\s+/g, ' ').trim());
+  const out = s.replace(MATH, (_, a, b, c, d, e) => tex(a ?? b ?? c ?? d ?? e).replace(/\s+/g, ' ').trim());
+  // A title cut short can end inside a formula ("… $A…"): the `$` has no partner, so drop it.
+  return /…|\.\.\./.test(s) ? out.replace(/\$(?=\S)/g, '') : out;
 }

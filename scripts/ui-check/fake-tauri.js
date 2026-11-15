@@ -305,6 +305,7 @@
   // `&mathTitle=1` (the `touch` case): the first idea's title carries a formula.
   if (new URLSearchParams(location.search).get('mathTitle')) {
     for (const list of [graph.nodes, plan.nodes]) list.find((n) => n.id === 'limit').title = 'Limit $\\alpha_n \\to 0$';
+    graph.nodes.find((n) => n.id === 'limit').statement = 'The limit $\\lim_{x\\to a} f(x) = L$ exists.';
   }
   const claims = [
     { claim: 'A limit is the value the function reaches.', verdict: 'partial', note: 'It is the value approached; the function need not reach it.', source: 'a forum thread' },

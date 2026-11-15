@@ -23,6 +23,7 @@
 import { call, message } from './api.js';
 import { calibrationSummary, venueGroups } from './fieldguide.js';
 import { active, createWorld, hit, reheat, settle, tick } from './map-physics.js';
+import { ensureKatex, hasMath, renderInline } from './markdown.js';
 import { mathText } from './mathtext.js';
 
 const EMPTY = 'Nothing in the knowledge map yet.';
@@ -250,7 +251,23 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   zoomInButton.setAttribute('aria-label', 'Zoom in');
   zoomBox.append(currentButton, zoomOutButton, zoomInButton);
   zoomBox.hidden = true;
-  root.replaceChildren(canvas, hud, review2, fitButton, zoomBox, a11y, card, flyout, status);
+  const mathLayer = h('div', 'map-math-layer');
+  mathLayer.setAttribute('aria-hidden', 'true');
+  const mathEls = new Map(); // idea -> { el, w, h }
+  let cardNode = null;
+  root.replaceChildren(canvas, mathLayer, hud, review2, fitButton, zoomBox, a11y, card, flyout, status);
+  // KaTeX loads on first need; until then formulas are Unicode on the canvas and plain in the card.
+  ensureKatex()
+    .then(() => {
+      if (cardNode && !card.hidden) buildCard(cardNode);
+      request();
+    })
+    .catch(() => {});
+  // Its fonts arrive after the first typeset: sizes measured before them are stale.
+  document.fonts?.addEventListener('loadingdone', () => {
+    for (const m of mathEls.values()) m.w = 0;
+    request();
+  });
   const ctx = canvas.getContext('2d');
 
   const glow = { white: sprite('#F6EBD6') };
@@ -695,7 +712,11 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     }
     const when = day(e.at);
     if (when) li.append(h('span', 'map-card-origin-when', ` · ${when}`));
-    if (e.provenance?.quote) li.append(h('q', 'map-card-origin-quote', e.provenance.quote));
+    if (e.provenance?.quote) {
+      const quote = h('q', 'map-card-origin-quote');
+      quote.innerHTML = renderInline(e.provenance.quote);
+      li.append(quote);
+    }
     return li;
   }
 
@@ -1352,6 +1373,39 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     ctx.globalAlpha = 1;
   }
 
+  // ---------- typeset labels (KaTeX over the canvas) ----------
+
+  /** The HTML label of a title with a formula, measured once (laid out at zoom 1; the layer scales it). */
+  function mathLabel(n, kind) {
+    let m = mathEls.get(n);
+    if (!m) {
+      const el = h('div', 'map-math-label');
+      el.innerHTML = renderInline(n.rawTitle);
+      el.style.fontWeight = String(kind.weight);
+      el.style.visibility = 'hidden';
+      mathLayer.append(el);
+      m = { el, w: 0, h: 0 };
+      mathEls.set(n, m);
+    }
+    if (!m.w) {
+      m.w = m.el.offsetWidth;
+      m.h = m.el.offsetHeight;
+    }
+    return m;
+  }
+
+  /** Moves the labels placed this frame into position and hides the rest. */
+  function placeMathLabels(drawn) {
+    const shown = new Set(drawn.map((d) => d.n));
+    for (const [n, m] of mathEls) if (!shown.has(n)) m.el.style.visibility = 'hidden';
+    for (const { n, m, r } of drawn) {
+      const s = toScreen(n.x, n.y + r + 8);
+      m.el.style.transform = `translate(${(s.x - m.w / 2).toFixed(1)}px, ${s.y.toFixed(1)}px) scale(${cam.k.toFixed(4)})`;
+      m.el.style.opacity = forced ? '1' : String(seen(n));
+      m.el.style.visibility = 'visible';
+    }
+  }
+
   function drawNodes(k, dimOf, spot, placed) {
     const labelNodes = [];
     for (const n of world.nodes) {
@@ -1414,22 +1468,38 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     labelNodes.sort((a, b) => rank(b) - rank(a));
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
+    const drawn = [];
     for (const n of labelNodes) {
       const kind = kindOf(n);
-      ctx.font = `${kind.weight} 13px ${FONT_UI}`;
-      n.lines ??= wrap(ctx, n.title, 150);
-      const widest = Math.max(...n.lines.map((line) => ctx.measureText(line).width));
+      // A title with a formula is typeset as HTML over the canvas (measured, then placed like any label).
+      const rich = n.hasMath && window.katex ? mathLabel(n, kind) : null;
+      let widest;
+      let height;
+      if (rich) {
+        widest = rich.w;
+        height = rich.h;
+      } else {
+        ctx.font = `${kind.weight} 13px ${FONT_UI}`;
+        n.lines ??= wrap(ctx, n.title, 150);
+        widest = Math.max(...n.lines.map((line) => ctx.measureText(line).width));
+        height = n.lines.length * 16;
+      }
       const r = n.r * n.scale;
       const a = toScreen(n.x - widest / 2, n.y + r + 6);
-      const b = toScreen(n.x + widest / 2, n.y + r + 8 + n.lines.length * 16);
+      const b = toScreen(n.x + widest / 2, n.y + r + 8 + height);
       const box = { x0: a.x, x1: b.x, y0: a.y, y1: b.y };
       if (placed.some((p) => p.x0 < box.x1 && box.x0 < p.x1 && p.y0 < box.y1 && box.y0 < p.y1)) continue;
       placed.push(box);
+      if (rich) {
+        drawn.push({ n, m: rich, r });
+        continue;
+      }
       ctx.globalAlpha = forced ? 1 : seen(n);
       ctx.fillStyle = forced ? 'CanvasText' : C.text;
       n.lines.forEach((line, i) => ctx.fillText(line, n.x, n.y + r + 8 + i * 16));
     }
     ctx.globalAlpha = 1;
+    placeMathLabels(drawn);
   }
 
   function drawEffects(t) {
@@ -1566,10 +1636,13 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   }
 
   function buildCard(n) {
-    const title = h('p', 'map-card-title', n.title);
+    cardNode = n;
+    const title = h('p', 'map-card-title');
+    title.innerHTML = renderInline(n.rawTitle);
     const meta = h('p', 'map-card-meta', `${kindName(n)} · ${n.cluster.path}`);
     const level = levelLine(n.key);
-    const statement = h('p', 'map-card-statement', n.statement || 'No description recorded.');
+    const statement = h('p', 'map-card-statement');
+    statement.innerHTML = renderInline(n.statement || 'No description recorded.');
     const similarities = contrastTitles.get(n.key) ?? [];
     const links = h('p', 'map-card-links');
     links.append(
@@ -1651,7 +1724,11 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     flyoutFor = { node, dir };
     const head = h('p', 'map-flyout-title', dir === 'needs' ? 'Depends on' : 'Leads to');
     const ul = h('ul', 'map-flyout-list');
-    for (const x of list) ul.append(h('li', '', x.title));
+    for (const x of list) {
+      const li = h('li');
+      li.innerHTML = renderInline(x.rawTitle ?? x.title);
+      ul.append(li);
+    }
     flyout.replaceChildren(head, ul);
     flyout.hidden = false;
     placeFlyout();
@@ -2220,6 +2297,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     renderLearning();
     cancelHide();
     entries = new Map();
+    mathEls.clear();
+    mathLayer.replaceChildren();
     sparks = [];
     rings = [];
     hover = focusNode = focusCluster = hoverTopic = null;
@@ -2228,9 +2307,15 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     flyoutFor = null;
     card.hidden = true;
     flyout.hidden = true;
-    // Titles are drawn as plain text on the canvas: formulas become Unicode.
+    // The canvas falls back to plain text (formulas as Unicode) until KaTeX is
+    // there; a title with a formula is typeset as HTML over the canvas once it is.
     const topics = (graph?.topics ?? []).map((t) => ({ ...t, title: mathText(t.title) }));
-    const nodes = (graph?.nodes ?? []).map((n) => ({ ...n, title: mathText(n.title) }));
+    const nodes = (graph?.nodes ?? []).map((n) => ({
+      ...n,
+      rawTitle: n.title,
+      hasMath: hasMath(n.title),
+      title: mathText(n.title),
+    }));
     const edges = graph?.edges ?? [];
     venuesByTopic = new Map(Object.entries(graph?.topicVenues ?? {}));
     // Only a prerequisite orders the two ideas: it is the arrow, the flyout and

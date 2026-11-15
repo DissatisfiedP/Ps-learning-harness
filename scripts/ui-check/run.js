@@ -1953,6 +1953,20 @@ async function touchCase() {
   await until('the map', () => page.evaluate(`Boolean(${q('#map-page .map-a11y input[data-key="limit"]')})`));
   const entry = await page.evaluate(`${q('#map-page .map-a11y input[data-key="limit"]')}.closest('label').textContent`);
   expect(/Limit αₙ → 0/.test(entry), `map title: ${entry}`);
+  // KaTeX typesets the label over the canvas and the card's title and statement.
+  await page.evaluate(`${q('#map-page .map-a11y input[data-key="limit"]')}.click()`); // selected: its label is always drawn
+  await until('the typeset label', () => page.evaluate(`Boolean(document.querySelector('#map-page .map-math-label .katex')) && document.querySelector('#map-page .map-math-label').style.visibility === 'visible'`));
+  const typeset = await page.evaluate(`(() => { const l = document.querySelector('#map-page .map-math-label'); const b = l.getBoundingClientRect();
+    const c = l.cloneNode(true); c.querySelectorAll('.katex-mathml').forEach((x) => x.remove());
+    return { text: c.textContent, size: [Math.round(b.width), Math.round(b.height)], hidden: l.closest('[aria-hidden]')?.className }; })()`);
+  expect(!/[$\\]/.test(typeset.text) && /^Limit/.test(typeset.text) && typeset.size[0] > 20 && typeset.size[1] > 8 && typeset.hidden === 'map-math-layer', `typeset label: ${JSON.stringify(typeset)}`);
+  await page.evaluate(`${q('#map-page .map-a11y input[data-key="limit"]')}.focus()`);
+  await until('the card', () => page.evaluate(`Boolean(document.querySelector('#map-page .map-card-statement .katex'))`));
+  const cardText = await page.evaluate(`(() => { const seen = (el) => { const c = el.cloneNode(true); c.querySelectorAll('.katex-mathml').forEach((x) => x.remove()); return c.textContent; };
+    const card = document.querySelector('#map-page .map-card'); return { title: Boolean(card.querySelector('.map-card-title .katex')), shown: seen(card.querySelector('.map-card-title')) + ' | ' + seen(card.querySelector('.map-card-statement')) }; })()`);
+  expect(cardText.title && !/[$\\]/.test(cardText.shown), `card math: ${JSON.stringify(cardText)}`);
+  await until('the origin quote typeset', () => page.evaluate(`Boolean(document.querySelector('#map-page .map-card-origin-quote .katex'))`));
+  await page.shot('map-math');
   const errors = await page.evaluate('window.__errors');
   expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
   await page.close();
