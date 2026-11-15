@@ -669,12 +669,18 @@ fn copy_tree(from: &Path, to: &Path) {
 fn circuit_archive(dir: &Path, version: &str, edit: fn(String) -> String) -> (String, String) {
     let package = dir.join(format!("src-{version}"));
     copy_tree(&circuit_dir(), &package);
-    let manifest = std::fs::read_to_string(package.join("plugin.toml")).unwrap();
-    let manifest = manifest.replacen(
-        "version = \"0.1.0\"",
-        &format!("version = \"{version}\""),
-        1,
-    );
+    // Whatever version the repo package declares, the archive declares `version`.
+    let manifest: String = std::fs::read_to_string(package.join("plugin.toml"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("version = ") {
+                format!("version = \"{version}\"\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
     std::fs::write(package.join("plugin.toml"), edit(manifest)).unwrap();
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     {

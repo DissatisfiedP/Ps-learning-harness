@@ -35,7 +35,8 @@ function divider(r2) {
       { id: 'GND', type: 'ground', from: [0, 0], to: [0, 0] },
       { id: 'P1', type: 'probe', from: [2, 2], to: [2, 0], label: 'Vout' },
     ],
-    result: { probes: { Vout: (12 * r2) / (3000 + r2) }, warnings: [] },
+    // An empty Luau table is stored as {} (see fake-tauri.js).
+    result: { probes: { Vout: (12 * r2) / (3000 + r2) }, units: { Vout: 'V' }, warnings: {} },
   };
 }
 

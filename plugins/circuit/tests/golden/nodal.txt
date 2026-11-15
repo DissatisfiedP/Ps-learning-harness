@@ -1,0 +1,11 @@
+Solved (DC).
+Probes: Vout = 2.4 V.
+Nodes (to ground): A [R1, Vin] = 12 V, B [R1, R2, R_L] = 2.4 V.
+Currents (from → to through each part): R1 = 3.2 mA, R2 = 2.4 mA, R_L = 800 µA, Vin = 3.2 mA.
+Powers (absorbed; negative = supplied): R1 = 30.7 mW, R2 = 5.76 mW, R_L = 1.92 mW, Vin = −38.4 mW.
+Series (same current): Vin – R1.
+Parallel (same voltage): R2 ∥ R_L = 750 Ω.
+Thevenin equivalent seen by R_L, + at (2,2), − at (2,0): Vth = 3 V, Rth = 750 Ω; Norton: IN = 4 mA in parallel with Rth; a matched load (750 Ω) would absorb 3 mW.
+Nodal analysis: reference node = ground (0 V); unknowns: V(A), V(B).
+KCL at B: (V(B) − V(A))/R1 + V(B)/R2 + V(B)/R_L = 0
+Vin fixes V(A) = 12 V

@@ -16,7 +16,10 @@
               "type": "object",
               "additionalProperties": false,
               "required": ["frequencyHz"],
-              "properties": { "frequencyHz": { "type": "number", "exclusiveMinimum": 0 } }
+              "properties": {
+                "frequencyHz": { "type": "number", "exclusiveMinimum": 0 },
+                "rms": { "type": "boolean", "description": "source magnitudes are RMS; default false (peak), which halves every AC power" }
+              }
             }
           }
         }
@@ -24,25 +27,46 @@
     },
     "components": {
       "type": "array",
+      "description": "Points are [x, y] on an integer grid: x to the right, y upwards. Pins sharing a point are joined, and a pin lying on a wire is joined to it. Lay parts out horizontally or vertically, two grid steps long. Parts joining the same two points are parallel and are drawn side by side. Labels take subscripts: R_1, V_out, I_{sc}.",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["id", "type", "from"],
-        "description": "Points on a grid; parts whose ends share a point are joined. Two-terminal parts (R, C, L, V, I, wire, switch) need `from` and `to`.",
         "properties": {
-          "id": { "type": "string" },
-          "type": { "type": "string", "enum": ["R", "C", "L", "V", "I", "opamp", "ground", "wire", "switch", "probe"] },
-          "from": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "V: − terminal; I: the source draws its current out of this node; opamp: + input; ground: the grounded point; probe: the point measured" },
-          "to": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "V: + terminal (V raises `to` above `from`); I: the source pushes its current into this node; opamp: − input; ground: ignored; probe: reference point, default ground (reads V(from) − V(to))" },
+          "id": { "type": "string", "description": "unique; what control.part, probe.part, annotations and answer targets refer to" },
+          "type": {
+            "type": "string",
+            "enum": ["R", "C", "L", "V", "I", "VCVS", "VCCS", "CCVS", "CCCS", "opamp", "ground", "wire", "switch", "probe", "node", "terminal"],
+            "description": "R, C, L, V, I, wire, switch and the four dependent sources need `from` and `to`. VCVS/CCVS are dependent voltage sources, VCCS/CCCS dependent current sources (first letter: what controls them). `node` names the node at `from` with `label`; `terminal` draws an open terminal there."
+          },
+          "from": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "V and VCVS/CCVS: − terminal; I and VCCS/CCCS: the current leaves this node; opamp: + input; ground, node, terminal: the point; probe: the point measured" },
+          "to": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "V and VCVS/CCVS: + terminal (the source raises `to` above `from`); I and VCCS/CCCS: the current is pushed into this node; opamp: − input; probe: reference point, default ground (reads V(from) − V(to))" },
           "third": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "op-amp output; from is +, to is −" },
           "value": { "type": "number", "description": "SI units: Ω, F, H (must be > 0), V, A" },
+          "gain": { "type": "number", "description": "dependent sources: output = gain × control. VCVS V/V, VCCS S (A/V), CCVS Ω (V/A), CCCS A/A" },
+          "control": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "dependent sources: what the source follows. `part` names a two-terminal part by id: its voltage V(from) − V(to) for VCVS/VCCS, its current from `from` to `to` for CCVS/CCCS (a wire works: its current is then solved). Or, voltage-controlled only, the two points `plus` and `minus`.",
+            "properties": {
+              "part": { "type": "string" },
+              "plus": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+              "minus": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+              "label": { "type": "string", "description": "name of the controlling quantity in the figure, e.g. v_x or i_x; default v_{part} or i_{part}" }
+            }
+          },
           "label": { "type": "string" },
-          "closed": { "type": "boolean" },
-          "hidden": { "type": "boolean", "description": "probe only: draw '?' and keep the value from the learner (the tool text still reports it)" },
+          "closed": { "type": "boolean", "description": "switch only; default true" },
+          "toggle": { "type": "boolean", "description": "switch only: the learner may open and close it in the view" },
+          "off": { "type": "boolean", "description": "V or I only: the source is switched off (V a short, I open) and drawn faded and crossed out, as in superposition" },
+          "hidden": { "type": "boolean", "description": "probe only: draw '?' and keep the value from the learner (the tool text still reports it). While any probe is hidden the figure and view show no solved node voltages or currents at all." },
+          "part": { "type": "string", "description": "probe only: read this part (by id) instead of a point; `from` is then ignored" },
+          "quantity": { "type": "string", "enum": ["voltage", "current", "power"], "description": "probe with `part`: its voltage V(from) − V(to) (default), its current from `from` to `to`, or the power it absorbs (negative when it supplies)" },
           "adjustable": {
             "type": "object",
             "additionalProperties": false,
             "required": ["min", "max"],
+            "description": "gives the learner a slider for `value` (R, C, L, V, I) or `gain` (dependent sources)",
             "properties": {
               "min": { "type": "number" },
               "max": { "type": "number" },
@@ -58,6 +82,58 @@
             }
           }
         }
+      }
+    },
+    "show": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the figure adds to the bare schematic.",
+      "properties": {
+        "nodes": { "type": "boolean", "description": "mark every node and letter the unnamed ones A, B, C… (the tool text then uses the same names)" },
+        "voltages": { "type": "boolean", "description": "write each node's solved voltage beside its name (implies nodes)" },
+        "currents": { "type": "boolean", "description": "draw an arrow with the solved current on every part; a DC arrow points the way the current really flows" },
+        "values": { "type": "boolean", "description": "default true; false captions parts with their names only" }
+      }
+    },
+    "annotations": {
+      "type": "array",
+      "description": "Marks drawn over the schematic; they never change the solution. Points may be fractional here.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["current", "voltage", "path", "loop", "cross", "highlight", "note"],
+            "description": "current: arrow on `part` in its from→to direction. voltage: + at `from` end, − at `to` end of `part`, or between points `from` (+) and `to` (−). path: a translucent arrowed band through `points` (a current path; `closed` joins the ends). loop: a mesh-current arc centred `at` a point. cross: an X over `part`/`parts`, or over the region from `from` to `to`. highlight: a dashed box around `parts` or from `from` to `to` (a supernode, a block being replaced). note: `text` centred `at` a point."
+          },
+          "part": { "type": "string", "description": "a component id" },
+          "parts": { "type": "array", "items": { "type": "string" } },
+          "from": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+          "to": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+          "at": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+          "points": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }, "minItems": 2 },
+          "label": { "type": "string", "description": "e.g. i_1, v_x" },
+          "text": { "type": "string" },
+          "reverse": { "type": "boolean", "description": "current, voltage: the opposite reference direction (to→from)" },
+          "value": { "type": "boolean", "description": "current, voltage: also show the solved value in that reference direction" },
+          "direction": { "type": "string", "enum": ["cw", "ccw"], "description": "loop; default cw" },
+          "closed": { "type": "boolean", "description": "path" },
+          "color": { "type": "string", "enum": ["red", "blue", "green", "orange", "purple", "gray"] }
+        }
+      }
+    },
+    "nodal": { "type": "boolean", "description": "letter the nodes and add the node-voltage equations (KCL per node, supernodes, source constraints) to the tool text" },
+    "superposition": { "type": "boolean", "description": "add each independent source's contribution to every voltage/current probe to the tool text" },
+    "equivalent": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Add the Thevenin/Norton equivalent to the tool text: of the circuit seen by the part `load` (which is removed), or seen from the points `from` (+) and `to` (−).",
+      "properties": {
+        "load": { "type": "string", "description": "a two-terminal component id" },
+        "from": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "to": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }
       }
     }
   }

@@ -6,7 +6,7 @@
 <title>Circuit</title>
 <style>
   :root {
-    --paper: #fff; --ink: #1c1b19; --ink-2: #45423d; --rule: #e3dfd6; --accent: #2d5b4c;
+    --paper: #fff; --ink: #1c1b19; --ink-2: #45423d; --rule: #e3dfd6; --accent: #2d5b4c; --on-accent: #fff;
     --font-ui: system-ui, sans-serif;
   }
   html, body { margin: 0; padding: 0; background: var(--paper); color: var(--ink); font: 14px/1.4 var(--font-ui); }
@@ -14,15 +14,20 @@
   .schematic { overflow-x: auto; }
   .schematic svg { max-width: 100%; height: auto; color: var(--ink); }
   .controls { display: grid; gap: 8px; margin-top: 12px; }
-  .control { display: grid; grid-template-columns: 7rem 1fr 4.5rem; gap: 8px; align-items: center; }
+  .control { display: grid; grid-template-columns: 7rem 1fr 5.5rem; gap: 8px; align-items: center; }
   .control label { font-weight: 600; }
   input[type="range"] { width: 100%; accent-color: var(--accent); }
   output { text-align: right; font-variant-numeric: tabular-nums; }
+  .toggles { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 12px; }
+  .toggles label { display: inline-flex; gap: 6px; align-items: center; }
+  .toggles input { accent-color: var(--accent); }
   table { border-collapse: collapse; margin-top: 12px; width: 100%; }
   caption { text-align: left; font-weight: 600; padding-bottom: 4px; }
   th, td { text-align: left; padding: 4px 8px; border-top: 1px solid var(--rule); font-variant-numeric: tabular-nums; }
+  th { font-weight: 600; }
+  sub { font-size: 0.75em; line-height: 0; }
   .warnings { color: var(--ink-2); margin-top: 8px; }
-  .submit { margin-top: 12px; padding: 8px 14px; border: 0; border-radius: 4px; background: var(--accent); color: var(--paper); font: inherit; font-weight: 600; cursor: pointer; }
+  .submit { margin-top: 12px; padding: 8px 14px; border: 0; border-radius: 4px; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
   .submit:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
   @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
 </style>
@@ -31,9 +36,15 @@
 <div id="app">
   <div class="schematic" id="schematic" role="img" aria-label="Circuit schematic"></div>
   <div class="controls" id="controls"></div>
+  <div class="toggles" id="toggles" role="group" aria-label="Show on the schematic"></div>
   <table id="probes" hidden>
     <caption>Solved values</caption>
     <thead><tr><th scope="col">Probe</th><th scope="col">Value</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <table id="parts" hidden>
+    <caption>Parts</caption>
+    <thead><tr><th scope="col">Part</th><th scope="col">Current</th><th scope="col">Power absorbed</th></tr></thead>
     <tbody></tbody>
   </table>
   <p class="warnings" id="warnings" role="status"></p>
@@ -44,14 +55,14 @@
   let artifact = null;
   let spec = null;
   let answerMode = false;
-  let lastResult = null;
   const pending = new Map();
   let nextId = 1;
 
-  const app = document.getElementById('app');
   const schematic = document.getElementById('schematic');
   const controls = document.getElementById('controls');
+  const toggles = document.getElementById('toggles');
   const probeTable = document.getElementById('probes');
+  const partTable = document.getElementById('parts');
   const warnings = document.getElementById('warnings');
   const submit = document.getElementById('submit');
 
@@ -73,37 +84,65 @@
   };
   const resize = () => send({ type: 'resize', height: Math.ceil(document.body.scrollHeight) });
 
-  function real(v) {
-    if (typeof v === 'number') return v;
-    if (v && typeof v.re === 'number') return v.re;
-    return Number(v) || 0;
-  }
   function complex(v) {
     if (typeof v === 'number') return { re: v, im: 0 };
     if (v && typeof v.re === 'number') return { re: v.re, im: v.im || 0 };
     return { re: 0, im: 0 };
   }
-  const UNITS = { R: 'Ω', C: 'F', L: 'H', V: 'V', I: 'A' };
+  const UNITS = { R: 'Ω', C: 'F', L: 'H', V: 'V', I: 'A', VCVS: '', VCCS: 'S', CCVS: 'Ω', CCCS: '' };
+  const DEPENDENT = new Set(['VCVS', 'VCCS', 'CCVS', 'CCCS']);
   const PREFIXES = [[1e9, 'G'], [1e6, 'M'], [1e3, 'k'], [1, ''], [1e-3, 'm'], [1e-6, 'µ'], [1e-9, 'n'], [1e-12, 'p']];
+  // Three significant digits, like the figure.
+  const digits = (n) => String(Number(n.toPrecision(3)));
   function eng(v, unit) {
     const x = complex(v);
-    const mag = Math.hypot(x.re, x.im);
-    const sign = Math.abs(x.im) <= 1e-9 && x.re < 0 ? '−' : '';
-    let scale = 1;
-    let prefix = '';
-    if (mag > 0) {
-      [scale, prefix] = PREFIXES.find(([s]) => mag >= s) || PREFIXES[PREFIXES.length - 1];
-    }
-    const n = Math.round((mag / scale) * 1000) / 1000;
-    return sign + n + ' ' + prefix + unit;
+    const mag = Number(Math.hypot(x.re, x.im).toPrecision(3));
+    const sign = Math.abs(x.im) <= 1e-9 && x.re < 0 && mag > 0 ? '−' : '';
+    if (!unit) return sign + digits(mag);
+    if (mag < 1e-12) return '0 ' + unit;
+    const [scale, prefix] = PREFIXES.find(([s]) => mag >= s) || [1, ''];
+    return sign + digits(mag / scale) + ' ' + prefix + unit;
   }
-  function valueText(v) {
+  function valueText(v, unit) {
     const x = complex(v);
     if (Math.abs(x.im) > 1e-9) {
-      return eng(x, 'V') + ' ∠' + (Math.round(Math.atan2(x.im, x.re) * 180 / Math.PI)) + '°';
+      const phase = digits(Math.atan2(x.im, x.re) * 180 / Math.PI).replace('-', '−');
+      return eng(x, unit) + ' ∠ ' + phase + '°';
     }
-    return eng(x, 'V');
+    return eng(x, unit);
   }
+
+  // The subscript rule of the figure: R_1, V_out, I_{sc 2}.
+  function runs(text) {
+    const out = [];
+    const re = /_(?:\{([^{}]*)\}|([A-Za-z0-9]+))/g;
+    let at = 0;
+    for (let m = re.exec(text); m; m = re.exec(text)) {
+      if (m.index === 0) continue;
+      out.push({ text: text.slice(at, m.index), sub: false });
+      out.push({ text: m[1] !== undefined ? m[1] : m[2], sub: true });
+      at = m.index + m[0].length;
+    }
+    out.push({ text: text.slice(at), sub: false });
+    return out.filter((run) => run.text !== '');
+  }
+  // Fills `element` with `text`, subscripts as <sub>.
+  function setLabel(element, text) {
+    element.textContent = '';
+    for (const run of runs(String(text))) {
+      if (run.sub) {
+        const sub = document.createElement('sub');
+        sub.textContent = run.text;
+        element.append(sub);
+      } else {
+        element.append(run.text);
+      }
+    }
+  }
+  const nameOf = (c) => c.label || c.id || c.type;
+  // An empty Luau table reaches the view as {}, never []: a list that may be
+  // empty is read through this.
+  const list = (value) => (Array.isArray(value) ? value : []);
 
   function applyTheme(theme) {
     if (!theme) return;
@@ -112,15 +151,27 @@
     }
   }
 
+  // The request the solver and the renderer get: the learner's parts and
+  // what the figure shows.
+  const circuit = () => ({
+    components: spec.components,
+    analysis: spec.analysis,
+    show: spec.show,
+    annotations: spec.annotations,
+  });
+
   function renderControls() {
     controls.textContent = '';
     for (const c of spec.components) {
-      if (!c.adjustable) continue;
+      if (!c.adjustable || c.type === 'switch') continue;
+      // A dependent source's slider moves its gain; any other part's, its value.
+      const field = DEPENDENT.has(c.type) ? 'gain' : 'value';
       const row = document.createElement('div');
       row.className = 'control';
       const unit = UNITS[c.type] || '';
       const label = document.createElement('label');
-      label.textContent = (c.label || c.id) + (unit ? ' (' + unit + ')' : '');
+      setLabel(label, nameOf(c));
+      if (unit) label.append(' (' + unit + ')');
       const input = document.createElement('input');
       input.type = 'range';
       const min = c.adjustable.min;
@@ -128,7 +179,7 @@
       input.min = String(min);
       input.max = String(max);
       input.step = String(c.adjustable.step || (max - min) / 100);
-      input.value = String(c.value ?? min);
+      input.value = String(c[field] ?? min);
       input.id = 'slider-' + c.id;
       label.htmlFor = input.id;
       const out = document.createElement('output');
@@ -140,7 +191,30 @@
       };
       show();
       input.addEventListener('input', () => {
-        c.value = Number(input.value);
+        c[field] = Number(input.value);
+        show();
+        solve();
+      });
+      row.append(label, input, out);
+      controls.append(row);
+    }
+    for (const c of spec.components) {
+      if (c.type !== 'switch' || !c.toggle) continue;
+      const row = document.createElement('div');
+      row.className = 'control';
+      const label = document.createElement('label');
+      setLabel(label, nameOf(c));
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = c.closed !== false;
+      input.id = 'switch-' + c.id;
+      label.htmlFor = input.id;
+      const out = document.createElement('output');
+      out.htmlFor = input.id;
+      const show = () => { out.textContent = input.checked ? 'closed' : 'open'; };
+      show();
+      input.addEventListener('change', () => {
+        c.closed = input.checked;
         show();
         solve();
       });
@@ -149,10 +223,31 @@
     }
   }
 
+  // What the learner may add to the schematic. Nothing is offered while a
+  // probe is hidden: the solver then sends no node voltages or currents.
+  const TOGGLES = [['nodes', 'Node names'], ['voltages', 'Node voltages'], ['currents', 'Currents']];
+  function renderToggles() {
+    toggles.textContent = '';
+    if (spec.components.some((c) => c.type === 'probe' && c.hidden)) return;
+    for (const [key, text] of TOGGLES) {
+      const label = document.createElement('label');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = Boolean(spec.show[key]);
+      input.addEventListener('change', () => {
+        spec.show[key] = input.checked;
+        solve(false);
+      });
+      label.append(input, text);
+      toggles.append(label);
+    }
+  }
+
   function setSchematic(markup) {
     schematic.innerHTML = markup || '';
     const svg = schematic.querySelector('svg');
     if (svg) svg.setAttribute('aria-hidden', 'true');
+    resize();
   }
 
   // Slider moves can outrun the bridge; only the newest solve runs and is shown.
@@ -162,49 +257,70 @@
     const mine = ++solveSeq;
     const stale = () => mine !== solveSeq;
     try {
-      const result = await call('solve', { components: spec.components, analysis: spec.analysis }, stale);
+      const result = await call('solve', circuit(), stale);
       if (result === SKIPPED || stale()) return;
       showResult(result, report);
-      const markup = await call('render', { components: spec.components, result }, stale);
+      const markup = await call('render', { ...circuit(), result }, stale);
       if (!stale() && typeof markup === 'string') setSchematic(markup);
     } catch (e) {
       if (!stale()) warnings.textContent = 'The circuit could not be solved.';
     }
   }
 
+  function fillTable(table, rows) {
+    table.hidden = rows.length === 0;
+    const body = table.querySelector('tbody');
+    body.textContent = '';
+    for (const [name, ...cells] of rows) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      setLabel(th, name);
+      tr.append(th);
+      for (const cell of cells) {
+        const td = document.createElement('td');
+        td.textContent = cell;
+        tr.append(td);
+      }
+      body.append(tr);
+    }
+  }
+
   // `report` is true only after the learner moved something: opening a
   // session must not send a state line for every figure on screen.
   function showResult(result, report) {
-    lastResult = result;
+    const units = result.units || {};
     const rows = [];
     for (const [name, value] of Object.entries(result.probes || {})) {
-      rows.push([name, valueText(value)]);
+      rows.push([name, valueText(value, units[name] || 'V')]);
     }
     // Hidden probes are the learner's unknown: the solver never sends their value.
     for (const c of spec.components) {
-      if (c.type === 'probe' && c.hidden) rows.push([c.label || c.id || 'probe', '?']);
+      if (c.type === 'probe' && c.hidden) rows.push([nameOf(c), '?']);
     }
     rows.sort((a, b) => a[0].localeCompare(b[0]));
-    if (rows.length) {
-      probeTable.hidden = false;
-      const body = probeTable.querySelector('tbody');
-      body.textContent = '';
-      for (const [name, value] of rows) {
-        const tr = document.createElement('tr');
-        const th = document.createElement('th');
-        th.scope = 'row';
-        th.textContent = name;
-        const td = document.createElement('td');
-        td.textContent = value;
-        tr.append(th, td);
-        body.append(tr);
-      }
-    }
-    warnings.textContent = (result.warnings || []).join(' ');
+    fillTable(probeTable, rows);
+
+    const powers = result.powers || {};
+    const parts = Object.entries(result.currents || {})
+      .map(([name, current]) => [
+        name,
+        valueText(current, 'A'),
+        powers[name] === undefined ? '' : eng(complex(powers[name]).re, 'W'),
+      ])
+      .sort((a, b) => a[0].localeCompare(b[0]));
+    fillTable(partTable, parts);
+
+    warnings.textContent = list(result.warnings).join(' ');
     if (report) {
       const changed = spec.components
-        .filter((c) => c.adjustable)
-        .map((c) => (c.label || c.id) + ' = ' + eng(Number(c.value), UNITS[c.type] || ''));
+        .filter((c) => (c.type === 'switch' ? c.toggle : c.adjustable))
+        .map((c) => {
+          // Labels as the tutor wrote them (`R_1`), so it recognises them.
+          if (c.type === 'switch') return nameOf(c) + (c.closed !== false ? ' closed' : ' open');
+          const field = DEPENDENT.has(c.type) ? 'gain' : 'value';
+          return nameOf(c) + ' = ' + eng(Number(c[field]), UNITS[c.type] || '');
+        });
       const summary = changed.concat(rows.map(([name, value]) => name + ' = ' + value)).join(', ');
       if (summary) send({ type: 'state', summary: summary.slice(0, 500) });
     }
@@ -213,19 +329,23 @@
 
   function onInit(message) {
     artifact = message.artifact || {};
-    spec = {
-      components: JSON.parse(JSON.stringify(artifact.data?.components || [])),
-      analysis: artifact.data?.analysis || { dc: true },
-    };
+    const data = artifact.data || {};
+    spec = JSON.parse(JSON.stringify({
+      components: list(data.components),
+      analysis: data.analysis || { dc: true },
+      show: data.show && !Array.isArray(data.show) ? data.show : {},
+      annotations: list(data.annotations),
+    }));
     answerMode = Boolean(message.answer);
     applyTheme(message.theme);
-    schematic.setAttribute('aria-label', artifact.data?.title || 'Circuit schematic');
+    schematic.setAttribute('aria-label', data.title || 'Circuit schematic');
     renderControls();
+    renderToggles();
     submit.hidden = !answerMode;
-    if (artifact.data?.result) {
-      showResult(artifact.data.result, false);
+    if (data.result) {
+      showResult(data.result, false);
       const mine = solveSeq;
-      call('render', { components: spec.components, result: artifact.data.result }, () => mine !== solveSeq)
+      call('render', { ...circuit(), result: data.result }, () => mine !== solveSeq)
         .then((markup) => { if (mine === solveSeq && typeof markup === 'string') setSchematic(markup); }, () => {});
     } else {
       solve(false);

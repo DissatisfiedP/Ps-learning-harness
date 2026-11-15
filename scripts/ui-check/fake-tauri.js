@@ -10,7 +10,7 @@
 
   const plugins = [
     {
-      id: 'circuit', title: 'Circuits', description: 'Draw, solve and explore DC and AC circuits.', version: '0.1.0', api: 1,
+      id: 'circuit', title: 'Circuits', description: 'Draw, solve and annotate DC and AC circuits.', version: '0.2.0', api: 1,
       platforms: ['desktop', 'mobile'], permissions: [], enabled: true, source: 'folder circuit', packageHash: 'check',
       hasView: true, tools: ['circuit_draw', 'circuit_solve'],
     },
@@ -50,12 +50,14 @@
   // The circuit solver for the one fixture this check draws: a source V1
   // over R1 and R2 with a Vout probe across R2. The real solver is covered
   // by plugins/circuit/tests and crates/harness/tests/plugins_e2e.rs.
+  // `warnings` is `{}` because that is how the core sends an empty Luau
+  // table; a view that expects `[]` there breaks in the app, not here.
   const part = (args, id) => args.components.find((c) => c.id === id);
   const solve = (args) => {
     const v = part(args, 'V1').value;
     const r1 = part(args, 'R1').value;
     const r2 = part(args, 'R2').value;
-    return { probes: { Vout: (v * r2) / (r1 + r2) }, warnings: [] };
+    return { probes: { Vout: (v * r2) / (r1 + r2) }, units: { Vout: 'V' }, warnings: {} };
   };
   const render = (args) => {
     const vout = args.result?.probes?.Vout;

@@ -1,18 +1,18 @@
 id = "circuit"
-version = "0.1.0"
+version = "0.2.0"
 api = 1
 title = "Circuits"
-description = "Draw, solve and explore DC and AC circuits."
+description = "Draw, solve and annotate DC and AC circuits, with dependent sources and the working of nodal, mesh, superposition and Thevenin analysis."
 license = "MIT"
 platforms = ["desktop", "mobile"]
 permissions = []
-use_when = "The learner must reason about voltages and currents in a circuit: dividers, loading, RC/RL filters, op-amps."
-avoid_when = "The section is about circuit theory in words only, or the learner has not met Ohm's law."
+use_when = "The learner must reason about voltages, currents or power in a circuit: series and parallel parts, dividers, nodal or mesh analysis, superposition, Thevenin/Norton, dependent sources, RC/RL filters, op-amps."
+avoid_when = "The section is about circuit theory in words only, the circuit needs diodes, transistors or transients over time, or the learner has not met Ohm's law."
 cost = "instant"
 
 [[tool]]
 name = "circuit_draw"
-description = "Draw a schematic and solve it. Returns probe values, node voltages, branch currents and warnings (AC values as magnitude ∠ phase). The figure is an artifact; place it in your reply with ![alt](artifact:<id>)."
+description = "Draw a schematic and solve it. Parts: R, C, L, independent and dependent voltage/current sources, op-amps, switches, named nodes and terminals. The figure can letter the nodes, show solved voltages and currents, and carry annotations (current paths, mesh loops, polarity marks, crossed-out parts, highlighted regions). Returns probe values, node voltages, branch currents, powers, series/parallel groups and warnings (AC values as magnitude ∠ phase), plus on request the nodal equations, superposition shares and the Thevenin/Norton equivalent. The figure is an artifact; place it in your reply with ![alt](artifact:<id>)."
 agents = ["tutor", "practice"]
 input = "schemas/circuit.json"
 entry = "circuit_draw"
@@ -20,7 +20,7 @@ artifact = true
 
 [[tool]]
 name = "circuit_solve"
-description = "Solve a circuit with no figure. Returns probe values, node voltages, branch currents and warnings. Use it to check your own arithmetic."
+description = "Solve a circuit with no figure. Returns the same text as circuit_draw: probes, node voltages, branch currents, powers, series/parallel groups, warnings, and on request nodal equations, superposition and Thevenin/Norton. Use it to check your own arithmetic."
 agents = ["tutor", "practice"]
 input = "schemas/circuit.json"
 entry = "circuit_solve"

@@ -36,9 +36,11 @@ local function grade(answer: model.Request?, target: Target?): Verdict
 
   local probe = goal.probe
   if probe then
-    local got = solver.solve(model.circuit(submitted)).probes[probe]
-    local shown = if got ~= nil then format.value(got, "V") else "missing"
-    return { correct = matches(got), detail = probe .. " is " .. shown .. "; expected " .. format.eng(want, "V") }
+    local solution = solver.solve(model.circuit(submitted)).solution
+    local got = solution.probes[probe]
+    local unit = solution.units[probe] or "V"
+    local shown = if got ~= nil then format.value(got, unit) else "missing"
+    return { correct = matches(got), detail = probe .. " is " .. shown .. "; expected " .. format.eng(want, unit) }
   end
 
   local component = goal.component
@@ -46,7 +48,8 @@ local function grade(answer: model.Request?, target: Target?): Verdict
     local got: number? = nil
     for _, part in submitted.components or {} do
       if part.id == component then
-        got = tonumber(part.value)
+        -- A dependent source is set by its gain, any other part by its value.
+        got = tonumber(if model.DEPENDENT[part.type] then part.gain else part.value)
       end
     end
     local shown = if got then tostring(got) else "missing"

@@ -7,8 +7,11 @@ local model = require("./model")
 export type Domain = {
   ac: boolean,
   omega: number, -- rad/s; 0 for DC
+  frequencyHz: number,
   zero: num.Number,
   one: num.Number,
+  -- S = powerScale · V · I*: 1 for DC and RMS phasors, ½ for peak phasors.
+  powerScale: number,
 }
 
 local phasor = {}
@@ -16,19 +19,25 @@ local phasor = {}
 function phasor.domain(analysis: model.Analysis): Domain
   local ac = analysis.ac
   if ac then
+    local frequency = tonumber(ac.frequencyHz) or 0
     return {
       ac = true,
-      omega = 2 * math.pi * (tonumber(ac.frequencyHz) or 0),
+      omega = 2 * math.pi * frequency,
+      frequencyHz = frequency,
       zero = { re = 0, im = 0 },
       one = { re = 1, im = 0 },
+      powerScale = if ac.rms then 1 else 0.5,
     }
   end
-  return { ac = false, omega = 0, zero = 0, one = 1 }
+  return { ac = false, omega = 0, frequencyHz = 0, zero = 0, one = 1, powerScale = 1 }
 end
 
 -- A V or I source: its `value` in DC; in AC its `ac` phasor, whose magnitude
--- defaults to `value`.
+-- defaults to `value`. A source switched `off` is 0.
 function phasor.source(part: model.Part, domain: Domain): num.Number
+  if part.off then
+    return domain.zero
+  end
   if not domain.ac then
     return tonumber(part.value) or 0
   end
