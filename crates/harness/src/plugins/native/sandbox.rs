@@ -1400,7 +1400,13 @@ LH_TEST_LISTEN="$port" LH_TEST_PIDFILE="$LAB_ROOT/httpd.pid" '@EXE@' --exact plu
     #[tokio::test]
     async fn a_failing_setup_reports_the_error_and_removes_the_container() {
         let fake = Fake::new();
-        std::fs::remove_file(fake.state().join("bin/busybox")).unwrap();
+        // A busybox that can't start its server. Removing the stand-in would
+        // let the script fall through to a busybox on the host's PATH.
+        std::fs::write(
+            fake.state().join("bin/busybox"),
+            format!("#!{}\nexit 1\n", exec::which("sh").unwrap().display()),
+        )
+        .unwrap();
         let sb = fake.sandbox();
         let out = call(
             &sb,
