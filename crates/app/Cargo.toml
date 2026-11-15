@@ -3,11 +3,18 @@ name = "ps-learning-harness"
 version.workspace = true
 edition.workspace = true
 
-# Tauri mobile loads the app as a library (`run`); the desktop binary in
-# main.rs only calls it.
+# Tauri mobile loads the app as a library (`run`). The desktop binary does not
+# link it: main.rs compiles the same source in. That keeps `rlib` out of the
+# crate types, and Cargo runs LTO only for a library without one.
 [lib]
 name = "ps_learning_harness_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["staticlib", "cdylib"]
+
+# Same source as the library, whose tests cover it.
+[[bin]]
+name = "ps-learning-harness"
+path = "src/main.rs"
+test = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

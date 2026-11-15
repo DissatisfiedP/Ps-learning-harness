@@ -27,10 +27,10 @@ all = { level = "warn", priority = -1 }
 debug = false
 
 # What ships: optimised for size, without symbols. On x86_64 Linux the desktop
-# binary goes from 55.9 MiB to 24.5 MiB. LTO reaches that binary only: Cargo
-# skips it for the library target the Android and iOS builds use, because that
-# target is also an `rlib` (crates/app/Cargo.toml), so those get the other
-# three settings. Panics still unwind: pdf.rs catches the PDF extractor's.
+# binary goes from 55.9 MiB to 24.5 MiB. LTO also reaches the library the
+# Android and iOS builds load, because that target has no `rlib` crate type
+# (crates/app/Cargo.toml). Panics still unwind: pdf.rs catches the PDF
+# extractor's.
 [profile.release]
 opt-level = "s"
 lto = "fat"
