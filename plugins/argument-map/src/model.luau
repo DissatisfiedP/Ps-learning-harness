@@ -37,10 +37,14 @@ local model = {}
 model.CONCLUSION = CONCLUSION
 
 local function nonEmpty(value: any, what: string): string
-  if type(value) ~= "string" or value:match("^%s*$") then
+  if type(value) ~= "string" then
     error(what .. " needs non-empty text", 0)
   end
-  return value
+  local text: string = value
+  if text:match("^%s*$") then
+    error(what .. " needs non-empty text", 0)
+  end
+  return text
 end
 
 -- The id a reply is addressed by in `blanks`.
@@ -62,11 +66,13 @@ function model.card(request: Request): Card
     if type(id) ~= "string" or id == "" then
       error(what .. " needs an `id`", 0)
     end
-    if seen[id] then
-      error(string.format("id `%s` is used twice (%s and %s)", id, seen[id], what), 0)
+    local key: string = id
+    local earlier = seen[key]
+    if earlier then
+      error(string.format("id `%s` is used twice (%s and %s)", key, earlier, what), 0)
     end
-    seen[id] = what
-    return id
+    seen[key] = what
+    return key
   end
 
   local blanks: { [string]: boolean } = {}

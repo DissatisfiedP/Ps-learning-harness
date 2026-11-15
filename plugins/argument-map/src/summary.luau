@@ -42,7 +42,8 @@ function summary.text(request: model.Request, data: model.Card): string
 
   local hidden: { string } = {}
   local listed: { [string]: boolean } = {}
-  for _, id in request.blanks or {} do
+  local blanks: { string } = request.blanks or {}
+  for _, id in blanks do
     if not listed[id] then
       listed[id] = true
       table.insert(hidden, string.format("%s = “%s”", id, full[id]))

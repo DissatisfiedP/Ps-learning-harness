@@ -22,7 +22,7 @@ local TITLE_CHAR = 8.6
 local FAMILY = "system-ui, sans-serif"
 
 type Style = {
-  outline: { [string]: string | number },
+  outline: svg.Attributes,
   label: string,
   labelSize: number?,
   heading: string?,
@@ -30,8 +30,8 @@ type Style = {
 
 local card = {}
 
-local function textAttrs(extra: { [string]: string | number }?): { [string]: string | number }
-  local attrs: { [string]: string | number } = {
+local function textAttrs(extra: svg.Attributes?): svg.Attributes
+  local attrs: svg.Attributes = {
     fill = "currentColor",
     stroke = "none",
     ["font-family"] = FAMILY,
@@ -82,7 +82,7 @@ local function box(body: { string }, level: number, y: number, part: model.Part,
   local labelAttrs = textAttrs({ ["font-weight"] = 700, ["font-size"] = style.labelSize or FONT })
   table.insert(body, svg.text(x + PAD, baseline, style.label, labelAttrs))
   for i, line in lines do
-    local attrs: { [string]: string | number } = {}
+    local attrs: svg.Attributes = {}
     if line.heading then
       attrs["font-weight"] = 600
     elseif part.hidden then
