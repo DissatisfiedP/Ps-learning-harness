@@ -1064,6 +1064,7 @@ fn wire_events(harness: &Harness, events: &Events) {
 /// `mobile_entry_point`, by the Android/iOS host.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    harness::logging::init(harness::logging::Level::INFO);
     tauri::Builder::default()
         // Plugin views get their own document and CSP; see VIEW_CSP. Building
         // the document reads the package from disk, so it runs off the main

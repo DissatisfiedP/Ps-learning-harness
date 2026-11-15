@@ -17,6 +17,7 @@ mod jobs;
 pub mod knowledge;
 pub mod learner;
 pub mod library;
+pub mod logging;
 mod mobile;
 mod models;
 mod pdf;

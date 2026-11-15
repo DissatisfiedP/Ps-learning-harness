@@ -13,6 +13,9 @@ thiserror.workspace = true
 tokio.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing = "0.1"
+# logging.rs: plain lines on stderr. No colours, level filters by target or
+# `log` bridge, so none of their dependencies.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 ulid = "1"
 base64 = "0.22"
 flate2 = "1"

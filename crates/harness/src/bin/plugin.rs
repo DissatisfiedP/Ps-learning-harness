@@ -10,6 +10,8 @@ use std::process::ExitCode;
 use harness::plugins::manifest;
 
 fn main() -> ExitCode {
+    // A package's `log.debug` lines are for whoever runs its tests.
+    harness::logging::init(harness::logging::Level::DEBUG);
     let mut args = std::env::args().skip(1);
     let command = args.next();
     let dir = args.next();
