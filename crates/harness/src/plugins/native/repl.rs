@@ -40,6 +40,9 @@ const PYTHON_DRIVER: &str = include_str!("repl/drivers/python.py");
 const NODE_DRIVER: &str = include_str!("repl/drivers/node.js");
 const RES: &str = "\u{1e}LHRES\u{1e}";
 const END: &str = "\u{1e}LHEND\u{1e}";
+/// A function sqlite doesn't have: calling it puts an error naming it on
+/// stderr, which marks where the replayed history's errors end.
+const SQL_END: &str = "lh_end_of_replay";
 /// Time one input may take.
 pub const INPUT_TIMEOUT: Duration = Duration::from_secs(10);
 const NIX_TIMEOUT: Duration = Duration::from_secs(30);
@@ -267,18 +270,28 @@ impl Session {
         exec::run(&spec, &[], "")
     }
 
+    /// Replays `history`, then runs `tail`, in a fresh in-memory database.
+    /// The replayed inputs print and fail again as they first did, so both
+    /// streams of the returned output are cut down to what `tail` produced:
+    /// stdout after a printed marker, stderr after the error of a call to
+    /// [`SQL_END`] (the shell can't print to stderr in safe mode).
     fn sql_run(&self, history: &[String], tail: &str) -> Result<exec::Output, String> {
         let mut script = String::new();
         for h in history {
             script.push_str(h);
             script.push_str("\n;\n");
         }
-        script.push_str(&format!(".print {END}\n{tail}\n;\n"));
+        script.push_str(&format!(".print {END}\nSELECT {SQL_END}();\n{tail}\n;\n"));
         let spec = Spec::new(&self.program)
             .args(["-safe", "-batch", ":memory:"])
             .timeout(INPUT_TIMEOUT)
             .output_cap(INPUT_OUTPUT_CAP * 4);
-        exec::run(&spec, &[], &script)
+        let mut out = exec::run(&spec, &[], &script)?;
+        if let Some(at) = out.stdout.find(END) {
+            out.stdout.replace_range(..at + END.len(), "");
+        }
+        out.stderr = after_sql_end(&out.stderr).to_owned();
+        Ok(out)
     }
 
     /// Evaluate one input and record it in the transcript.
@@ -312,12 +325,7 @@ impl Session {
                     unreachable!()
                 };
                 let out = self.sql_run(history, input)?;
-                let text = out.combined();
-                let after = text
-                    .find(END)
-                    .map_or(text.as_str(), |at| &text[at + END.len()..])
-                    .trim_matches('\n')
-                    .to_owned();
+                let after = out.combined().trim_matches('\n').to_owned();
                 let ok = !sql_error(&after) && !out.timed_out;
                 if !out.timed_out {
                     if let Engine::Sql(history) = &mut self.engine {
@@ -439,12 +447,7 @@ impl Session {
                     history,
                     &format!(".mode list\n.headers off\nSELECT ({check});"),
                 )?;
-                let text = out.combined();
-                let value = text
-                    .find(END)
-                    .map_or(text.as_str(), |at| &text[at + END.len()..])
-                    .trim()
-                    .to_owned();
+                let value = out.combined().trim().to_owned();
                 let passed = !sql_error(&value)
                     && !out.timed_out
                     && !matches!(value.as_str(), "" | "0" | "0.0" | "false");
@@ -499,6 +502,22 @@ fn sql_error(text: &str) -> bool {
             || l.starts_with("Error:")
             || l.contains("cannot run") && l.contains("safe mode")
     })
+}
+
+/// What follows the [`SQL_END`] error in sqlite's stderr: past the last line
+/// naming it (the error, and the statement newer shells quote under it) and
+/// the caret line under that quote. All of `stderr` when the marker is absent.
+fn after_sql_end(stderr: &str) -> &str {
+    let Some(at) = stderr.rfind(SQL_END) else {
+        return stderr;
+    };
+    let rest = stderr[at..].split_once('\n').map_or("", |(_, rest)| rest);
+    let (line, more) = rest.split_once('\n').unwrap_or((rest, ""));
+    if line.trim_start().starts_with("^---") {
+        more
+    } else {
+        rest
+    }
 }
 
 /// `name = expr` (an identifier, one `=` not part of `==`), else `None`.

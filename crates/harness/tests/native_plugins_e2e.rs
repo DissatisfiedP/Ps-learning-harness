@@ -421,11 +421,19 @@ async fn a_repl_task_is_graded_by_the_native_on_the_cards_final_state() {
         )
         .unwrap();
     assert_eq!(entered["ok"], true, "{entered}");
+    // The next question waits for the tutor's verdict on this one.
     s.push(
         "tutor",
         Reply::Calls(
             "",
-            vec![("q2", "question_ask", repl_question(&card, "Again."))],
+            vec![
+                (
+                    "r1",
+                    "verdict_record",
+                    json!({ "questionId": "q1", "verdict": "wrong", "note": "summed 0 to 9" }),
+                ),
+                ("q2", "question_ask", repl_question(&card, "Again.")),
+            ],
         ),
     );
     h.answer(&id, "q1", json!({ "answer": { "submitted": true } }))
@@ -456,8 +464,8 @@ async fn a_repl_task_is_graded_by_the_native_on_the_cards_final_state() {
         2,
         "{right}"
     );
-    // Grading is evidence for the tutor, never a recorded verdict.
-    assert!(tool_ops(&h, &id, "verdict_record").is_empty());
+    // Grading is evidence for the tutor: the one verdict is the tutor's own.
+    assert_eq!(results(&h, &id, "verdict_record").len(), 1);
 
     // Withdrawing consent stops the card: no more inputs, no more grading.
     h.set_plugin_enabled("repl", false).unwrap();
