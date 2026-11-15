@@ -1,6 +1,6 @@
 # Plugins
 
-Status: build document, last revised 2026-11-06. Describes the plugin system as built in `crates/harness/src/plugins/`, the reference package in `plugins/circuit/`, and the host API version 1. Checked against the code on 2026-11-06; where this file and the code disagree, the code is the authority and this file is the bug.
+Status: build document, last revised 2026-11-15. Describes the plugin system as built in `crates/harness/src/plugins/`, the reference package in `plugins/circuit/`, and the host API version 1. Checked against the code on 2026-11-06, and §3, §4, §6.1 and §9 again on 2026-11-15 by running the `plugin` checker; where this file and the code disagree, the code is the authority and this file is the bug.
 
 A plugin is a package (a directory or a `.tar.gz`) that can add any of:
 
@@ -116,7 +116,7 @@ return {
 - Sandbox: a path never steps above the package root (`<file>: a require path can't leave the plugin package`), and the file a module resolves to, after following symlinks, must lie inside the package's `src/` (``module `<path>` resolves outside the plugin's src/``); under `plugin test`, `tests/` is allowed too.
 - The result is cached per resolved file for the VM's life, however the path reached it; a module returning nothing is cached as `true`.
 
-Removed globals: `io`, `os`, `debug`, `package`, `dofile`, `loadfile`, `loadstring`, `load`, `collectgarbage`. The VM is built with `StdLib::ALL_SAFE` and `sandbox(true)`.
+Removed globals: `io`, `os`, `debug`, `package`, `dofile`, `loadfile`, `loadstring`, `load`, `collectgarbage`. The VM is built with `StdLib::ALL_SAFE` and `sandbox(true)`. Two globals that remain are not result channels: `print` writes to the host process's standard output (the terminal under `plugin test`, nowhere a learner or the model sees in the app), and `math.random` is seeded differently in every VM, so anything that must be reproducible uses `@harness/rand` (§4.4).
 
 ### 3.1 Tool calls
 
@@ -127,6 +127,10 @@ Arguments arrive as the JSON value converted to Lua: objects become tables, arra
 
 A Lua error becomes a tool error whose text starts `plugin error:`. The model may retry; the guest cannot crash the app.
 
+The `input` schema is what the model is shown. The core does **not** validate a call's arguments against it (the core's own tools check their arguments in code, and a plugin does the same): a missing field is `nil` and a wrong type is whatever the model sent, so the entry function checks what it reads and raises an error the model can act on. A view's `submit` value and a `question_ask` `target` are likewise passed to `grade` unchecked (§7.4).
+
+An error raised by a host function (§4) is an error object, not a string: `pcall` returns it as userdata, `tostring(err)` is the message followed by a traceback, and `string.find(err, …)` fails. Match on `tostring(err)`.
+
 ## 4. Host API, api 1
 
 The host API is five modules, each required by name (there are no host globals): `local json = require("@harness/json")`. They are pure: JSON, SVG building, real/complex arithmetic and a dense solve, a seeded PRNG and a debug log. No I/O, no clock, no randomness from the environment. Their types are `crates/harness/plugin-api/<name>.luau` (§1). The tables below name each module by the local it is usually bound to.
@@ -135,7 +139,7 @@ The host API is five modules, each required by name (there are no host globals):
 
 | Signature | Result |
 |---|---|
-| `json.encode(value) -> string` | Compact JSON. A non-empty table whose keys are all positive integers encodes as an array (values in iteration order); any other table encodes as an object with its string keys only (integer keys in a mixed table are dropped); an empty table is `{}`; functions and other unsupported values become `null`. Object keys come out sorted |
+| `json.encode(value) -> string` | Compact JSON, by the conversion of §3.1: a table whose keys are exactly the integers `1..n` encodes as an array; any other table encodes as an object, its integer keys written as strings (so `{ [1] = "a", [3] = "c" }` is `{"1":"a","3":"c"}`, and a table with both kinds of key keeps both). An **empty table is `{}`, never `[]`**: a consumer that expects a list (a view reading `data.items`) must accept `{}` for an empty one. Functions and other unsupported values become `null`; NaN and infinities become `null`. Object keys come out sorted |
 | `json.decode(text) -> value` | Parses JSON; invalid JSON raises an error (`invalid JSON: …`) |
 
 Examples:
@@ -162,7 +166,9 @@ Strings are escaped; attributes are emitted in sorted key order so output is det
 | `svg.text(x, y, text, attrs?) -> string` | Text is escaped; useful attrs: `text-anchor`, `font-size`, `fill`, `stroke`, `class` |
 | `svg.escape(text) -> string` | Escapes `&`, `<`, `>` |
 
-Attribute values may be strings, numbers or booleans. An attribute whose name starts with `on` raises an error; the builder accepts `href` and `xlink:href` only when they start with `#` or `data:image/`. The core sanitizer (§6.2) then applies its own rules to the finished figure, which are stricter: it keeps a link only for `#…` or `data:image/png|jpeg|gif|webp;base64,…`, so anything else the builder let through (e.g. `data:image/svg+xml`) is dropped before storage, and a plugin cannot smuggle a script.
+Attribute values may be strings, numbers or booleans; a value of any other type is skipped. An attribute whose name starts with `on` in any letter case raises an error (a prefix match, so `only` is refused too); the builder accepts `href` and `xlink:href` only when they start with `#` or `data:image/`. The core sanitizer (§6.2) then applies its own rules to the finished figure, which are stricter: it keeps a link only for `#…` or `data:image/png|jpeg|gif|webp;base64,…`, so anything else the builder let through (e.g. `data:image/svg+xml`) is dropped before storage, and a plugin cannot smuggle a script.
+
+Numbers print with the shortest digits that round-trip and no exponent (`10 / 3` is `3.3333333333333335`; NaN and infinities print as `NaN` and `inf`, which no renderer accepts), so round coordinates before drawing. An attribute in `attrs` that repeats one the function sets itself (`x` for `svg.rect`, `d` for `svg.path`) is emitted twice; the sanitizer keeps the first, which is the one from `attrs`. There is no builder for `polygon`, `polyline`, `ellipse`, `tspan`, `defs` and the like: write them as strings and pass their text through `svg.escape`.
 
 ```lua
 local svg = require("@harness/svg")
@@ -180,7 +186,7 @@ Every `Number` below is a plain Lua number (real part; imaginary part 0) or a **
 | Signature | Notes |
 |---|---|
 | `num.c(re, im?) -> Number` | `im` defaults to 0 |
-| `num.add(a, b) -> Number` / `sub` / `div` | |
+| `num.add(a, b) -> Number` / `sub` / `div` | No error for division by zero: `num.div(x, 0)` is a complex table whose parts are both NaN, for a real `x` too |
 | `num.mul(a, b) -> Number \| Vector \| Matrix` | number × number (real or complex), matrix × flat vector → vector, or matrix × matrix → matrix. A matrix is a table of rows; a flat vector is a table of numbers. A ragged matrix, a number times a matrix or mismatched shapes raise `mul: …` with the problem named |
 | `num.abs(a) -> number` | magnitude |
 | `num.phaseDeg(a) -> number` | argument in degrees |
@@ -188,7 +194,7 @@ Every `Number` below is a plain Lua number (real part; imaginary part 0) or a **
 | `num.real(a) -> number` / `imag(a) -> number` | |
 | `num.linsolve(a, b) -> Vector` | `a` is an `n×n` matrix (rows of `Number`), `b` an `n` vector; partial-pivoting LU. Shapes must match; a singular matrix raises "the matrix is singular (no unique solution)" |
 
-Pass a table to these functions only as a complex number (`{re, im}`) or as a matrix/vector where one is expected: a table without `re`/`im` reads as complex zero.
+Pass a table to these functions only as a complex number (`{re, im}`) or as a matrix/vector where one is expected. A table without a numeric `re` is not a number: it raises `add expects numbers` (and the like for the other functions); `im` alone defaults to 0. Because a result collapses to a plain number when its imaginary part is below `1e-12`, code that handles results must accept both forms (`num.real`, `num.imag` and `num.abs` take either).
 
 ```lua
 local num = require("@harness/num")
@@ -202,10 +208,10 @@ local magnitude = num.abs(z)
 
 | Signature | Notes |
 |---|---|
-| `rand.seeded(seed) -> Rng` | Deterministic xorshift64; the seed (a non-negative integer) comes from the caller, never the clock; `0` is treated as `1` |
+| `rand.seeded(seed) -> Rng` | Deterministic xorshift64; the seed comes from the caller, never the clock. It must be a whole number from 0 to 2^64 − 1 (a negative, fractional or larger one is an argument error); `0` is treated as `1` |
 | `rng.next() -> number` | Uniform in `[0, 1)` |
 | `rng.range(lo, hi) -> number` | Uniform real in `[lo, hi)` |
-| `rng.int(lo, hi) -> integer` | Integer in `[lo, hi]`, inclusive (modulo reduction, so very slightly biased for huge spans) |
+| `rng.int(lo, hi) -> integer` | Integer in `[lo, hi]`, inclusive, for any two 64-bit integers (modulo reduction, so very slightly biased for huge spans); `lo` when `hi < lo` |
 
 Call the generator's functions with `.` (`rng.int(1, 6)`), not `:`; a method call passes the table as the first argument and `range`/`int` then fail.
 
@@ -213,7 +219,7 @@ Use a seed derived from the task (for example the problem number) when a figure 
 
 ### 4.5 `@harness/log`
 
-`log.debug(value) -> ()` writes one line to the app's `tracing` log with target `plugin`. It is never shown to the model or the learner; use it for development, not as a result channel.
+`log.debug(value) -> ()` converts `value` to JSON (§3.1) and emits it as one `debug` event on the core's `tracing` log with target `plugin`. It is never shown to the model or the learner; use it for development, not as a result channel. Where it goes depends on the binary (`harness::logging::init`, events to stderr): `plugin test` shows debug events, so a package's `log.debug` lines appear in the terminal as `<time> DEBUG plugin: <json>`; the app shows `info` and above, so they appear only when it is started with `PS_LEARN_LOG=debug`.
 
 ## 5. Limits
 
@@ -266,7 +272,7 @@ The core stores an `artifact` op:
 }
 ```
 
-- `data` is whatever the view needs to work: the circuit plugin stores the components, the analysis and the solved result.
+- `data` is whatever the view needs to work: the circuit plugin stores the components, the analysis, what the figure shows, its annotations and the learner-safe part of the solved result. It is JSON by the conversion of §3.1, so an empty list in it is `{}`, and its numbers read back exactly as stored.
 - The tool result the model sees is its `text`, a blank line (omitted when `text` is empty), then the placement line from `artifacts::placement_line`:
   `artifact: 01J… — place it once with ![a short description](artifact:01J…) next to the sentence that refers to it`
 - `input` is the tool call's arguments, verbatim; `packageHash` is the content hash of the package directory (§8.3).
@@ -274,7 +280,7 @@ The core stores an `artifact` op:
 - An artifact created in a turn but never referenced is appended after that turn's message, in creation order.
 - An unknown id renders as the alt text in brackets. A plugin that is uninstalled later still shows its artifact: the fallback SVG is in the op, and **replay never re-runs a plugin**.
 
-The renderer (`[[renderer]].entry`) takes the artifact's stored `data` and returns an SVG string. The manifest requires it for every artifact tool, and the loader can call it (`LuauPlugin::render`). The stored fallback is still the `artifact.svg` the tool returned, so replay stays exact; the `circuit` view additionally calls `render` after a slider move to redraw its schematic (`[[view]].calls` includes `"render"`).
+The renderer (`[[renderer]].entry`) takes the artifact's stored `data` and returns an SVG string. The manifest requires it for every artifact tool, but the app itself never calls it (`LuauPlugin::render` has no caller): the stored fallback is always the `artifact.svg` the tool returned, so replay stays exact. It is called only when a view lists it in `[[view]].calls`, as the `circuit` view does to redraw its schematic after a slider move, and by the package's own tests.
 
 ### 6.2 Sanitizing
 
@@ -507,21 +513,28 @@ cargo run -p harness --bin plugin -- test <dir>
 `test` runs `validate`, then:
 
 - a Luau type check when a `luau-analyze` binary is on `PATH`: every `.luau` file under `src/` and `tests/` (subfolders included), in luau-analyze's default mode (nonstrict; a file opts into `--!strict` itself) and default (new) type solver. luau-analyze resolves `@harness/*` through a `.luaurc` above the requiring file, so the check runs on a copy of those files in a temporary folder next to the bundled type modules and a generated `.luaurc` (`harness` → the type modules); it works the same for a package anywhere on disk, and reports paths in the package. A non-zero exit fails the run with `luau-analyze failed:` and its report. If the binary is missing, the CLI prints `luau-analyze: not installed (install the Luau CLI to type-check; tests still run)` and runs the tests anyway; it is not in the dev shell today (`nix shell nixpkgs#luau` provides it).
-- every `tests/*.luau` file, sorted by name, in one sandboxed VM with the same host modules and `require` (§3), so a test reaches the package with `require("../src/main")`; test files may also require helpers inside `tests/`. A missing `tests/` or one with no `.luau` file fails the run. A test file is evaluated; it must return a function, a table of named functions (run in sorted key order), or `nil` (nothing runs). The first failing `assert` or error stops the run. Each file has 10 s.
-- test VMs also have `require("@harness/test")` (an error at runtime). Its `golden(name, text)` compares `text` with `tests/golden/<name>` and fails naming the first differing line (`got:` / `want:`), or `golden file tests/golden/<name> missing`. Run with `PLUGIN_UPDATE_GOLDEN=1` to write the file instead. `name` must stay inside `tests/golden/` (no `..`, leading `/` or backslash).
+- every `.luau` file directly in `tests/` (subfolders are not searched), sorted by name, in one sandboxed VM with the same host modules and `require` (§3), so a test reaches the package with `require("../src/main")`. Test files may also require helpers, but a helper placed directly in `tests/` is itself run as a test file: keep helpers in a subfolder, or have them return a function that passes. A missing `tests/` or one with no `.luau` file fails the run. A test file is evaluated; it must return a function or a table of named functions (run in sorted key order; an empty table is an error). A file with several statements and no `return` runs nothing more, but a file that is a single expression (`assert(1 == 1)`) returns that expression's value and fails with `a test file must return a function or a table of functions`. The first failing `assert` or error stops the run. Each file has 10 s.
+- test VMs also have `require("@harness/test")` (an error at runtime). Its `golden(name, text)` compares `text` with `tests/golden/<name>` and fails naming the first differing line (`got:` / `want:`), or `golden file tests/golden/<name> missing`. Run with `PLUGIN_UPDATE_GOLDEN=1` to write the file instead. `name` must stay inside `tests/golden/`: no leading `/`, no backslash, and no `..` anywhere in it (so `a..txt` is refused too).
+- a package's `log.debug` lines go to stderr as they happen (§4.5); the report below goes to stdout.
 
 ```console
-$ cargo run -q -p harness --bin plugin -- test plugins/circuit
-manifest ok: circuit 0.1.0 (2 tools)
-luau-analyze: not installed (install the Luau CLI to type-check; tests still run)
-7 test(s) passed:
-  plugins/circuit/tests/circuit.luau::divider
-  plugins/circuit/tests/circuit.luau::floating_node_warns
-  plugins/circuit/tests/circuit.luau::golden_divider_svg
-  plugins/circuit/tests/circuit.luau::grade_probe
-  plugins/circuit/tests/circuit.luau::inverting_opamp
-  plugins/circuit/tests/circuit.luau::loaded_divider
-  plugins/circuit/tests/circuit.luau::rc_lowpass_cutoff
+$ cargo run -q -p harness --bin plugin -- test plugins/argument-map
+manifest ok: argument-map 0.1.0 (1 tools)
+luau-analyze: ok
+13 test(s) passed:
+  plugins/argument-map/tests/argument_map.luau::blanks_hide_text_from_the_learner_but_not_the_model
+  plugins/argument-map/tests/argument_map.luau::duplicate_ids_are_refused
+  plugins/argument-map/tests/argument_map.luau::empty_argument_is_refused
+  plugins/argument-map/tests/argument_map.luau::golden_hume_blanks_card
+  plugins/argument-map/tests/argument_map.luau::golden_hume_card
+  plugins/argument-map/tests/argument_map.luau::long_text_wraps_inside_the_box
+  plugins/argument-map/tests/argument_map.luau::objections_are_optional
+  plugins/argument-map/tests/argument_map.luau::objections_sit_under_their_target
+  plugins/argument-map/tests/argument_map.luau::render_redraws_the_stored_card
+  plugins/argument-map/tests/argument_map.luau::summary_names_counts_and_attacks
+  plugins/argument-map/tests/argument_map.luau::unknown_blank_is_refused
+  plugins/argument-map/tests/argument_map.luau::unknown_target_is_refused
+  plugins/argument-map/tests/argument_map.luau::wrap_counts_characters_not_bytes
 ```
 
 `tests/` is required by the authoring contract even though the loader does not read it at runtime.

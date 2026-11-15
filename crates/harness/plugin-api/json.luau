@@ -6,9 +6,10 @@
 local json = {}
 
 --[=[
-	Compact JSON. A non-empty table whose keys are all positive integers
-	encodes as an array; any other table encodes as an object (string keys
-	only, sorted); functions and other unsupported values become `null`.
+	Compact JSON. A table whose keys are exactly the integers 1..n encodes
+	as an array; any other table encodes as an object (integer keys written
+	as strings, keys sorted). An empty table is `{}`, never `[]`. Functions
+	and other unsupported values become `null`.
 ]=]
 function json.encode(value: any): string
 	return nil :: any
