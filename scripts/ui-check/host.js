@@ -3,9 +3,11 @@
 // DevTools protocol and reads `window.__check`.
 //
 // ?case=ipc        the IPC escape probe view (plugins/fixtures/ipc-probe)
-// ?case=placement  a finished turn with three artifacts, in the op order
+// ?case=placement  a finished turn with four artifacts, in the op order
 //                  crates/harness/tests/plugins_e2e.rs asserts for the core:
-//                  the reply places A1 mid-paragraph; A2 and A3 are unplaced.
+//                  the reply places A1 mid-paragraph; A2, A3 and A4 are
+//                  unplaced. A3's plugin is not installed; A4's view throws
+//                  while handling `init`.
 
 import { artifactFigure } from '../artifacts.js';
 import { artifactsEl } from '../content.js';
@@ -47,10 +49,12 @@ function artifact(n, pluginId, tool, data) {
   };
 }
 
+const PLUGIN_OF = { circuit_draw: 'circuit', sketch_draw: 'sketch', faulty_show: 'faulty' };
+
 function tool(callId, name, args, n) {
   return [
     { op: 'tool', opId: `op-${callId}`, at, callId, name, args },
-    artifact(n, name.startsWith('circuit') ? 'circuit' : 'sketch', name, args),
+    artifact(n, PLUGIN_OF[name], name, args),
     {
       op: 'tool', opId: `op-${callId}-r`, at, callId, name,
       result: { content: `artifact: A${n} — place it once with ![a short description](artifact:A${n}) next to the sentence that refers to it`, isError: false },
@@ -65,6 +69,8 @@ async function placement() {
     ...tool('d1', 'circuit_draw', divider(1000), 1),
     ...tool('d2', 'circuit_draw', divider(3000), 2),
     ...tool('k1', 'sketch_draw', {}, 3),
+    // An empty Luau list, as the core stores it.
+    ...tool('f1', 'faulty_show', { warnings: {} }, 4),
     {
       op: 'message', opId: 'm3', at, role: 'assistant',
       content: 'With R2 = 1 kΩ the divider ![Divider with R2 = 1 kΩ](artifact:A1) gives 3 V at Vout, a quarter of the supply.',

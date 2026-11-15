@@ -967,15 +967,17 @@ impl Harness {
         })
     }
 
-    /// The inlined view document for the `pluginview` URI scheme. Kept out of
-    /// `plugin_view` so the iframe's HTML is never sent over the UI command
-    /// channel — only the sandboxed scheme response carries it.
+    /// The inlined view document for the `pluginview` URI scheme, with the
+    /// start-up guard in front. Kept out of `plugin_view` so the iframe's
+    /// HTML is never sent over the UI command channel — only the sandboxed
+    /// scheme response carries it.
     pub fn view_document(&self, plugin_id: &str) -> Result<Vec<u8>, Error> {
         let plugin = self.enabled_plugin(plugin_id)?;
         if plugin.manifest().view.is_empty() {
             return Err(Error::Invalid("that plugin has no view".into()));
         }
-        Ok(plugin.view_html().map_err(Error::Invalid)?.into_bytes())
+        let html = plugin.view_html().map_err(Error::Invalid)?;
+        Ok(plugins::with_view_guard(&html).into_bytes())
     }
 
     /// A bridge call from a view (allow-listed by the manifest; the plugin

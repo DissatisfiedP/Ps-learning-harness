@@ -67,7 +67,8 @@ function untrack(host) {
  *
  * `answer` turns on the submit channel; `onSubmit(value)` is called with the
  * view's answer. `onState(summary)` defaults to recording `view_state` on the
- * session.
+ * session. `onFail(message)` is called once the host has taken itself down
+ * because the view threw while starting; the caller shows the fallback.
  */
 export async function createViewHost({
   pluginId,
@@ -78,6 +79,7 @@ export async function createViewHost({
   onSubmit = null,
   onState = null,
   onError = null,
+  onFail = null,
 }) {
   const view = await call('plugin_view', { pluginId });
   const wrap = document.createElement('div');
@@ -173,6 +175,15 @@ export async function createViewHost({
             iframe.removeAttribute('aria-disabled');
             onSubmitResult(false, message(err));
           });
+        break;
+      }
+      case 'error': {
+        // From the core's start-up guard (view_guard.js): the view threw while
+        // loading or handling `init`, so what it shows can't be relied on.
+        const text = typeof data.message === 'string' ? data.message.slice(0, 300) : '';
+        console.warn(`plugin view ${pluginId} failed to start:`, text);
+        destroy();
+        if (onFail) onFail(text);
         break;
       }
       default:

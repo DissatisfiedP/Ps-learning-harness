@@ -20,6 +20,14 @@
       hasView: true, tools: ['ipc_probe_show'],
     },
   ];
+  // The placement case's plugin whose view throws on `init` (run.js FAULTY_VIEW).
+  if (new URLSearchParams(location.search).get('case') === 'placement') {
+    plugins.push({
+      id: 'faulty', title: 'Faulty view', description: 'Check fixture.', version: '0.1.0', api: 1,
+      platforms: ['desktop', 'mobile'], permissions: [], enabled: true, source: 'folder faulty', packageHash: 'check',
+      hasView: true, tools: ['faulty_show'],
+    });
+  }
   // `?builtins=1`: the compiled-in plugins, as the core lists them -- one
   // that needs no permissions (on from the start), two that declare some
   // (off until the learner consents).
@@ -45,6 +53,7 @@
   const views = {
     circuit: { name: 'circuit', html: '', calls: ['solve', 'render'], answer: true },
     'ipc-probe': { name: 'ipc-probe', html: '', calls: [], answer: false },
+    faulty: { name: 'faulty', html: '', calls: [], answer: false },
   };
 
   // The circuit solver for the one fixture this check draws: a source V1

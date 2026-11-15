@@ -54,7 +54,8 @@ function textFigure(alt) {
 
 /**
  * Builds the figure for one artifact op and, when possible, upgrades it to
- * the plugin's interactive view. The fallback is visible immediately.
+ * the plugin's interactive view. The fallback is visible immediately, and
+ * comes back if the view fails to start (`ctx.onViewFail` is then called).
  */
 export function artifactFigure(op, alt, ctx = {}) {
   if (!op) return textFigure(alt);
@@ -86,6 +87,7 @@ export function artifactFigure(op, alt, ctx = {}) {
   const canView = plugin && plugin.enabled !== false && plugin.hasView && plugin.onPlatform !== false;
   if (!canView) return figure;
 
+  const fallback = [...figure.childNodes];
   createViewHost({
     pluginId: op.pluginId,
     artifact: op,
@@ -93,6 +95,11 @@ export function artifactFigure(op, alt, ctx = {}) {
     answer: Boolean(ctx.answer),
     sessionId: ctx.sessionId ?? null,
     onSubmit: ctx.onSubmit ?? null,
+    onFail: () => {
+      figure.classList.remove('interactive');
+      figure.replaceChildren(...fallback);
+      ctx.onViewFail?.();
+    },
   })
     .then((host) => {
       if (!figure.isConnected) {

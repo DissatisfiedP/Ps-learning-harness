@@ -316,6 +316,46 @@ fn inline_assets(html: &str, dir: &Path) -> String {
     out
 }
 
+/// The start-up guard every view document carries (`view_guard.js`).
+const VIEW_GUARD: &str = include_str!("view_guard.js");
+
+/// `html` with the guard as its first script: right after `<head>`, or after
+/// the doctype when the document has no head tag, so it runs before anything
+/// of the view's.
+pub(crate) fn with_view_guard(html: &str) -> String {
+    let at = tag_end(html, "<head")
+        .or_else(|| tag_end(html, "<!doctype"))
+        .unwrap_or(0);
+    let mut out = String::with_capacity(html.len() + VIEW_GUARD.len() + 17);
+    out.push_str(&html[..at]);
+    out.push_str("<script>");
+    out.push_str(VIEW_GUARD);
+    out.push_str("</script>");
+    out.push_str(&html[at..]);
+    out
+}
+
+/// The offset just past the first `name` tag (ASCII case-insensitive; a longer
+/// tag name such as `<header` doesn't count).
+fn tag_end(html: &str, name: &str) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = bytes[from..]
+        .windows(name.len())
+        .position(|w| w.eq_ignore_ascii_case(name.as_bytes()))
+    {
+        let after = from + pos + name.len();
+        match bytes.get(after) {
+            Some(b'>') => return Some(after + 1),
+            Some(b) if b.is_ascii_whitespace() => {
+                return html[after..].find('>').map(|i| after + i + 1)
+            }
+            _ => from = after,
+        }
+    }
+    None
+}
+
 /// The text of `rel` inside the package `dir`, or `None` when it is missing
 /// or resolves (through `..`, an absolute path or a symlink) outside it.
 fn package_text(dir: &Path, rel: &str) -> Option<String> {
@@ -748,6 +788,21 @@ mod tests {
             "{out}"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_view_guard_is_the_first_script_of_a_view() {
+        let first_script = |html: &str| {
+            let out = with_view_guard(html);
+            let guard = format!("<script>{VIEW_GUARD}</script>");
+            assert_eq!(out.replacen(&guard, "", 1), html);
+            out.find("<script>").unwrap()
+        };
+        let full = "<!DOCTYPE html><html><header>x</header><HEAD lang=\"en\"><script>VIEW</script></head></html>";
+        assert_eq!(first_script(full), full.find("<script>").unwrap());
+        let headless = "<!doctype html>\n<p>x</p><script>VIEW</script>";
+        assert_eq!(first_script(headless), "<!doctype html>".len());
+        assert_eq!(first_script("<p>é</p><script>VIEW</script>"), 0);
     }
 
     #[test]

@@ -393,6 +393,8 @@ function viewAnswer(item, { onAnswer, ctx }) {
       ...ctx,
       answer: true,
       onSubmit: (answer) => onAnswer(item.callId, { answer }),
+      // As below: the fallback picture can't take an answer.
+      onViewFail: () => figure.append(h('p', 'waiting', 'This figure’s view failed to start. Try updating its plugin in Settings → Plugins.')),
     }),
   );
   const plugin = getPlugin(artifact.pluginId);

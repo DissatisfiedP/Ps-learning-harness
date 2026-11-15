@@ -13,9 +13,10 @@
 //              app or IPC origins, and the fake bridge must see only the
 //              view host's own commands.
 //   placement  a turn whose reply places A1 mid-paragraph: A1 sits in the
-//              sentence, A2 and A3 follow the message in creation order, and
+//              sentence, A2, A3 and A4 follow the message in creation order,
 //              keyboard moves of A1's R2 slider re-solve through the bridge,
-//              update the probe and post a `state` line.
+//              update the probe and post a `state` line, and A4, whose view
+//              throws while handling `init`, goes back to its fallback.
 //   sync       the whole app (index.html with the fake bridge) in each sync
 //              state: the Home sync icon (states, names, a one-line header
 //              at 1440, 390 and 320 px) and its panel (placement, closing,
@@ -56,15 +57,27 @@ const APP_CSP = JSON.parse(read('crates/app/tauri.conf.json')).app.security.csp;
 const VIEW_CSP = read('crates/app/src/lib.rs').match(/const VIEW_CSP: &str = "([^"]+)";/)?.[1];
 if (!APP_CSP || !VIEW_CSP) throw new Error('could not read the app CSP or VIEW_CSP');
 
+// The core serves every view with its start-up guard in front
+// (`with_view_guard` in crates/harness/src/plugins/mod.rs).
+const VIEW_GUARD = read('crates/harness/src/plugins/view_guard.js');
+const guarded = (html) => html.replace(/<head(\s[^>]*)?>/i, (tag) => `${tag}<script>${VIEW_GUARD}</script>`);
+
+// A view that throws while handling `init`, as circuit 0.1.0's did when a
+// result's empty `warnings` list arrived as {}.
+const FAULTY_VIEW = `<!doctype html><html><head><title>Faulty</title></head><body><p>half drawn</p><script>
+addEventListener('message', (event) => { if (event.data?.type === 'init') event.data.artifact.data.warnings.join(' '); });
+</script></body></html>`;
+
 const PLUGIN_DIRS = { circuit: 'plugins/circuit', 'ipc-probe': 'plugins/fixtures/ipc-probe' };
 function viewHtml(id) {
+  if (id === 'faulty') return guarded(FAULTY_VIEW);
   const dir = PLUGIN_DIRS[id];
   if (!dir) return null;
   const manifest = Bun.TOML.parse(read(`${dir}/plugin.toml`));
   const html = read(`${dir}/${manifest.view[0].html}`);
   // The core inlines package assets; these fixtures have none to inline.
   if (/<script[^>]+\bsrc=|<link[^>]+\bhref=/i.test(html)) throw new Error(`${id}: view references assets; inline them for this check`);
-  return html;
+  return guarded(html);
 }
 
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json' };
@@ -279,9 +292,16 @@ async function placement() {
   console.log(`  layout ${JSON.stringify(layout)}`);
   expect(layout.block === 'P' && layout.inProse, 'A1 is not inside the reply paragraph');
   expect(layout.before.endsWith('the divider') && layout.after.startsWith('gives 3 V'), 'A1 is not mid-sentence');
-  expect(JSON.stringify(layout.appended) === '["A2","A3"]', 'A2, A3 are not appended after the message in order');
-  expect(JSON.stringify(layout.all) === '["A1","A2","A3"]', 'each artifact must render exactly once');
+  expect(JSON.stringify(layout.appended) === '["A2","A3","A4"]', 'A2, A3, A4 are not appended after the message in order');
+  expect(JSON.stringify(layout.all) === '["A1","A2","A3","A4"]', 'each artifact must render exactly once');
   expect(layout.fallbackA3, 'A3 (plugin not installed) should show its fallback SVG');
+
+  // A4's view is loaded, throws, and the figure shows the fallback again.
+  await until('the faulty view to load', () => hits.some((h) => h.host === 'pluginview.localhost' && h.path === '/faulty'));
+  await until('A4 back on its fallback', () => page.evaluate(`(() => {
+    const fig = document.querySelector('figure[data-artifact-id="A4"]');
+    return !fig.classList.contains('interactive') && !fig.querySelector('iframe') && fig.querySelector('svg')?.textContent === 'fallback A4';
+  })()`));
 
   await until('A1 view', () => page.evaluate(`Boolean(document.querySelector('figure[data-artifact-id="A1"].interactive iframe'))`));
   const frame = await inFrame(page, 'figure[data-artifact-id="A1"] iframe');
@@ -317,7 +337,7 @@ async function placement() {
   expect(Math.abs(parseFloat(row.replace(/^Vout\s*/, '')) - vout) < 0.01 * vout, `probe row "${row}" ≠ Vout ${vout}`);
   const stated = parseFloat((state?.summary ?? '').match(/Vout = ([\d.]+)/)?.[1]);
   expect(state?.artifactId === 'A1' && Math.abs(stated - vout) < 0.01 * vout, `last state line for A1 "${state?.summary}" ≠ Vout ${vout}`);
-  console.log(`placement: A1 in the sentence, A2 and A3 appended in order; slider R2 → Vout ${vout.toFixed(3)} V through the bridge`);
+  console.log(`placement: A1 in the sentence, A2, A3 and A4 appended in order; A4's failed view replaced by its fallback; slider R2 → Vout ${vout.toFixed(3)} V through the bridge`);
 }
 
 // --- sync --------------------------------------------------------------------
