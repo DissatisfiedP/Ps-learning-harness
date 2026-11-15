@@ -71,20 +71,34 @@ function load(el, before = null) {
 }
 
 /**
- * Loads KaTeX (script and stylesheet) once; resolves when `window.katex` is
- * ready and its CSS applies. Neither is on the startup path: Home renders no
- * math, so the stylesheet does not block the first paint. The stylesheet goes
- * before styles.css, whose `.katex` size override must keep winning. A failed
- * part is retried on the next call.
+ * Fetches every KaTeX face the stylesheet declares. A face is otherwise
+ * fetched when the first glyph needs it, so the first formula paints blank
+ * (`font-display: block`) and anything measured then (the Map's labels) is
+ * measured in the fallback font. A face that fails is left to the fallback.
+ */
+function loadFonts() {
+  const faces = [...document.fonts].filter((face) => face.family.includes('KaTeX_'));
+  return Promise.allSettled(faces.map((face) => face.load()));
+}
+
+/**
+ * Loads KaTeX (script, stylesheet and fonts) once; resolves when
+ * `window.katex` is ready, its CSS applies and its fonts are in. None of it
+ * is on the startup path: Home renders no math, so the stylesheet does not
+ * block the first paint. The stylesheet goes before styles.css, whose
+ * `.katex` size override must keep winning. A failed part is retried on the
+ * next call.
  */
 export function ensureKatex() {
   cssLoad ??= load(
     Object.assign(document.createElement('link'), { rel: 'stylesheet', href: KATEX_CSS }),
     document.querySelector('link[rel="stylesheet"]'),
-  ).catch((e) => {
-    cssLoad = null;
-    throw e;
-  });
+  )
+    .then(loadFonts)
+    .catch((e) => {
+      cssLoad = null;
+      throw e;
+    });
   if (!window.katex) {
     jsLoad ??= load(Object.assign(document.createElement('script'), { src: KATEX_URL })).catch((e) => {
       jsLoad = null;
