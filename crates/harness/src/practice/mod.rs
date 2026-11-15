@@ -224,6 +224,10 @@ pub struct SetAnswer {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u8>,
+    /// A scratch-pad drawing sent as (or with) the answer: a staged image
+    /// until the answer is saved or handed in, then a repo attachment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch: Option<crate::sessions::Attachment>,
 }
 
 /// What an exam paper was started on: the exam goal's session (its plan

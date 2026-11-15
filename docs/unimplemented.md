@@ -18,8 +18,18 @@ built, except the items below. What remains is mostly **proof**, not code.
   against a real model: level tagging, hunt eligibility, the "parts I already know" split, plan edits, debrief
   sorting, artifact placement, the graph builder, the researcher, **the practice coach, the problem checker, exam
   papers and marking**, and whether the measurer and planner actually skip what the learner model shows as held.
-- **The UI is verified in headless Chromium only**, against a mocked Tauri bridge (thirteen `scripts/ui-check`
+- **The UI is verified in headless Chromium only**, against a mocked Tauri bridge (fifteen `scripts/ui-check`
   cases) — never in WebKitGTK and never on a device. Plugin-view isolation likewise: Chromium, not WebKitGTK.
+- **No real pen has touched the scratch pad** (`docs/ui-design.md` §7.2.19), which is on the Learn and Practice
+  screens (sets and exam papers included). The `pad` and `pad-practice` checks draw with mouse events and synthetic
+  pen `PointerEvent`s. Unverified: that WebKitGTK, WKWebView and Android WebView report a pen as
+  `pointerType: "pen"`, that the barrel button is `buttons & 2`, the second barrel `& 4` and the eraser end `& 32`
+  (Settings → Pen has a test box for finding out), that a barrel press while hovering reaches the page, and that
+  `getCoalescedEvents` is there. A drawing sent to a model has not been read by a real vision model.
+- **A touch-screen pinch on WebKitGTK may still magnify the whole window.** The Map and the plan diagram handle two
+  fingers, ctrl+wheel, Safari gestures and the app shell's touchpad `app-pinch`, and `ui/zoomguard.js` cancels any
+  other pinch; none of it has run on a real touch screen under WebKitGTK, and `crates/app/src/pinch.rs` only takes
+  touchpad pinches (it can't swallow touch events without hiding them from the page).
 - **Sync is proven against local servers only.** Git against a temp bare repository, WebDAV against an
   in-process test server: no real host (GitHub, Koofr, Nextcloud), no TLS server, no phone. The mobile session
   lock ran only with an injected platform. libgit2 and OpenSSL are built from source on Android, but nothing has

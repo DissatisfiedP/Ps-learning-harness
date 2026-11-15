@@ -23,6 +23,8 @@
 // lanes it joins, with a join connector from every input lane. Each lane is
 // laid out with the same layered pass on its own sections.
 
+import { mathText } from './mathtext.js';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const LEVELS = {
@@ -200,7 +202,7 @@ export function planDiagram(
       const section = sectionOf(plan, n.id);
       return {
         id: n.id,
-        title: n.title,
+        title: mathText(n.title),
         kind: n.kind,
         section,
         status: nodeStatus(n.id),
@@ -219,7 +221,7 @@ export function planDiagram(
     }
     items = sections.map((s) => ({
       id: s.id,
-      title: s.title ?? s.id,
+      title: mathText(s.title ?? s.id),
       kind: s.mode,
       section: s.id,
       status: sectionStatus(s.id),
@@ -741,23 +743,61 @@ export function attachPanZoom(stage, view, { minScale = null, maxScale = 2.6, pa
     apply();
   }
 
+  // Every zoom gesture over the stage zooms the diagram and is cancelled for
+  // the page (the same rules as the Map, ui-design §7.6): ctrl/⌘+wheel (a
+  // trackpad pinch in Chromium and WebKit), Safari's gesture events, two
+  // fingers, and `app-pinch` from the app shell (a Linux touchpad pinch).
   stage.addEventListener(
     'wheel',
     (e) => {
       e.preventDefault();
       const box = stage.getBoundingClientRect();
-      zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX - box.left, e.clientY - box.top);
+      const pinchy = e.ctrlKey || e.metaKey;
+      const dy = e.deltaY * (e.deltaMode === 1 ? 16 : 1);
+      // A pinch reports small deltas (about 1 per percent); a wheel notch about 100.
+      const step = pinchy ? Math.max(-25, Math.min(25, dy)) * 0.01 : dy * 0.0015;
+      zoomAt(Math.exp(-step), e.clientX - box.left, e.clientY - box.top);
     },
     { passive: false },
   );
 
+  const pointers = new Map(); // pointer id -> stage-local position
+  let pinch = null; // two fingers: { d, scale, at } with `at` the art point under their midpoint
+  const local = (e) => {
+    const box = stage.getBoundingClientRect();
+    return { x: e.clientX - box.left, y: e.clientY - box.top };
+  };
+  const midpoint = () => {
+    const [a, b] = [...pointers.values()];
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+  };
+
   stage.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
-    dragging = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: x, oy: y, moved: false };
+    pointers.set(e.pointerId, local(e));
     stage.setPointerCapture(e.pointerId);
+    if (pointers.size === 2) {
+      const m = midpoint();
+      pinch = { d: m.d, scale, at: { x: (m.x - x) / scale, y: (m.y - y) / scale } };
+      if (dragging) delete stage.dataset.dragging;
+      dragging = null;
+      return;
+    }
+    if (pointers.size > 2) return;
+    dragging = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: x, oy: y, moved: false };
     stage.dataset.dragging = 'true';
   });
   stage.addEventListener('pointermove', (e) => {
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, local(e));
+    if (pinch && pointers.size === 2) {
+      // Zoom about the midpoint, which also pans with the fingers.
+      const m = midpoint();
+      scale = clampScale((pinch.scale * m.d) / pinch.d);
+      x = m.x - pinch.at.x * scale;
+      y = m.y - pinch.at.y * scale;
+      apply();
+      return;
+    }
     if (!dragging || e.pointerId !== dragging.id) return;
     const dx = e.clientX - dragging.x;
     const dy = e.clientY - dragging.y;
@@ -767,6 +807,18 @@ export function attachPanZoom(stage, view, { minScale = null, maxScale = 2.6, pa
     apply();
   });
   const endDrag = (e) => {
+    pointers.delete(e.pointerId);
+    if (pinch && pointers.size < 2) {
+      pinch = null;
+      // The finger left behind pans from where it is, not from where the drag began.
+      const [id, p] = [...pointers].at(0) ?? [];
+      if (id !== undefined) {
+        const box = stage.getBoundingClientRect();
+        dragging = { id, x: p.x + box.left, y: p.y + box.top, ox: x, oy: y, moved: true };
+        stage.dataset.dragging = 'true';
+      }
+      return;
+    }
     if (!dragging || (e.pointerId !== undefined && e.pointerId !== dragging.id)) return;
     stage.releasePointerCapture?.(dragging.id);
     delete stage.dataset.dragging;
@@ -774,6 +826,49 @@ export function attachPanZoom(stage, view, { minScale = null, maxScale = 2.6, pa
   };
   stage.addEventListener('pointerup', endDrag);
   stage.addEventListener('pointercancel', endDrag);
+
+  let gesture = null;
+  stage.addEventListener(
+    'gesturestart',
+    (e) => {
+      e.preventDefault();
+      gesture = pointers.size < 2 ? { scale, at: local(e) } : null;
+    },
+    { passive: false },
+  );
+  stage.addEventListener(
+    'gesturechange',
+    (e) => {
+      e.preventDefault();
+      if (gesture && pointers.size < 2) zoomAt((gesture.scale * e.scale) / scale, gesture.at.x, gesture.at.y);
+    },
+    { passive: false },
+  );
+  stage.addEventListener(
+    'gestureend',
+    (e) => {
+      e.preventDefault();
+      gesture = null;
+    },
+    { passive: false },
+  );
+  let native = null;
+  const onNativePinch = (e) => {
+    if (!stage.isConnected) {
+      window.removeEventListener('app-pinch', onNativePinch);
+      return;
+    }
+    const { phase, scale: s, x: px, y: py } = e.detail ?? {};
+    if (phase === 'begin') {
+      native = null;
+      if (pointers.size >= 2 || !stage.getClientRects().length || !stage.contains(document.elementFromPoint(px, py))) return;
+      const box = stage.getBoundingClientRect();
+      native = { scale, at: { x: px - box.left, y: py - box.top } };
+    } else if (phase === 'update' && native && Number.isFinite(s) && s > 0) {
+      zoomAt((native.scale * s) / scale, native.at.x, native.at.y);
+    } else if (phase === 'end') native = null;
+  };
+  window.addEventListener('app-pinch', onNativePinch);
 
   stage.addEventListener('keydown', (e) => {
     const step = 60;

@@ -600,27 +600,52 @@ impl Harness {
             }
             seen.push(&a.problem_id);
         }
+        // Drawings go with the answers: checked and moved out of staging
+        // before anything is recorded.
+        let mut images: Vec<Attachment> = Vec::new();
+        for r in &s.problems {
+            let sketch = answers
+                .iter()
+                .find(|a| a.problem_id == r.id)
+                .and_then(|a| a.sketch.as_ref());
+            if let Some(sketch) = sketch {
+                crate::attachments::check_sketch_image(sketch)?;
+                images.push(sketch.clone());
+            }
+        }
+        self.commit_attachments(&images)?;
         let mut lines: Vec<String> = Vec::new();
+        let mut drawn = 0;
         for r in &s.problems {
             let n = r.index + 1;
-            match answers
-                .iter()
-                .find(|a| a.problem_id == r.id && !a.text.trim().is_empty())
-            {
+            let answered = answers.iter().find(|a| {
+                a.problem_id == r.id && (!a.text.trim().is_empty() || a.sketch.is_some())
+            });
+            match answered {
                 Some(a) => {
+                    let text = if a.text.trim().is_empty() {
+                        "(drawn: see the sketch)"
+                    } else {
+                        a.text.trim()
+                    };
                     self.practice_event(
                         session_id,
                         PracticeEvent::Attempt {
                             problem_id: r.id.clone(),
-                            text: a.text.trim().to_owned(),
+                            text: text.to_owned(),
                             confidence: a.confidence,
                         },
                     )?;
-                    lines.push(format!(
+                    let mut line = format!(
                         "Problem {n} (`{}`): {}",
                         r.id,
-                        submission_text(&a.text, a.confidence)
-                    ));
+                        submission_text(text, a.confidence)
+                    );
+                    if a.sketch.is_some() {
+                        drawn += 1;
+                        line.push_str(&format!("\n[sketch: image {drawn} of this message]"));
+                    }
+                    lines.push(line);
                 }
                 None => lines.push(format!("Problem {n} (`{}`): (no answer)", r.id)),
             }
@@ -648,11 +673,11 @@ impl Harness {
                 "Review it now: for each problem call problem_conclude with its `problemId` (an unanswered one is `dontknow`), then give your overall review in one message: verdict, first break and miss class for each.",
             )
         };
-        self.practice_append(
-            session_id,
-            app_message(tag::SET, format!("{header} {task}\n\n{}", lines.join("\n"))),
-            false,
-        )?;
+        let mut message = app_message(tag::SET, format!("{header} {task}\n\n{}", lines.join("\n")));
+        if let Op::Message(m) = &mut message {
+            m.attachments = images;
+        }
+        self.practice_append(session_id, message, false)?;
         let turn = self.coach_turn(session_id).await;
         // A problem with no answer is a give-up whatever the coach wrote.
         let s = PracticeState::replay(&self.store.ops(session_id)?);

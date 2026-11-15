@@ -172,6 +172,8 @@
     { id: 'openai', name: 'OpenAI', source: null, keyUrl: 'https://platform.openai.com/api-keys', defaultBaseUrl: 'https://api.openai.com/v1' },
   ];
   const settings = { roles: {} };
+  let stagedImages = 0;
+  const stagedData = new Map();
   // Where keys are kept; run.js switches it to the 0600-file fallback.
   const secretStorage = { backend: 'os', label: 'the Secret Service (desktop keyring)', secure: true, notice: null };
   let finishLogin = null;
@@ -207,6 +209,17 @@
     pick_folder: () => '/home/learner/huawei-ict',
     pick_files: () => ['/home/learner/worksheet.txt'],
     stage_file: ({ path }) => ({ kind: 'file', path, bytes: 2048, name: path.split('/').at(-1) }),
+    // Scratch-pad drawings: staged like pasted images, then loaded by path.
+    stage_image: ({ data, name }) => {
+      const path = `attachments/2026/STAGED${++stagedImages}.png`;
+      stagedData.set(path, data);
+      return { kind: 'image', path, mediaType: 'image/png', bytes: data.length, name };
+    },
+    unstage_image: ({ path }) => {
+      stagedData.delete(path);
+      return null;
+    },
+    attachment_data: ({ path }) => stagedData.get(path) ?? '',
     // An import streams progress over its channel, then adds the library.
     library_import: ({ path, onProgress }) => {
       const slug = path.split('/').at(-1);
@@ -289,6 +302,10 @@
     ],
     tracks: [],
   };
+  // `&mathTitle=1` (the `touch` case): the first idea's title carries a formula.
+  if (new URLSearchParams(location.search).get('mathTitle')) {
+    for (const list of [graph.nodes, plan.nodes]) list.find((n) => n.id === 'limit').title = 'Limit $\\alpha_n \\to 0$';
+  }
   const claims = [
     { claim: 'A limit is the value the function reaches.', verdict: 'partial', note: 'It is the value approached; the function need not reach it.', source: 'a forum thread' },
     { claim: 'Limits only exist for continuous functions.', verdict: 'wrong', note: 'A removable gap still has a limit.' },
@@ -325,6 +342,13 @@
     { op: 'tool', opId: 'o11', at, agent: 'tutor', callId: 'm1', name: 'message_send', args: { message: readingMessage } },
     { op: 'message', opId: 'o12', at, role: 'assistant', tag: 'sent', content: readingMessage },
     { op: 'tool', opId: 'o13', at, agent: 'tutor', callId: 'm1', result: { content: 'Shown to the learner.', isError: false } },
+    // `&padFigure=1` (the `pad` case): the tutor also made a figure, which
+    // the scratch pad can use as its background.
+    ...(new URLSearchParams(location.search).get('padFigure')
+      ? [{ op: 'artifact', opId: 'o13a', at, artifactId: 'A1', pluginId: 'static', pluginVersion: '1', packageHash: 'x', tool: 'render',
+        input: {}, data: { title: 'Voltage divider' },
+        fallbackSvg: '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120" viewBox="0 0 240 120" fill="none" stroke="currentColor"><rect x="20" y="20" width="60" height="30"/><rect x="20" y="70" width="60" height="30"/><path d="M80 35H160M80 85H160M160 35V85"/><text x="170" y="64" fill="currentColor" stroke="none">Vout</text></svg>' }]
+      : []),
     { op: 'tool', opId: 'o14', at, agent: 'tutor', callId: 'c1', name: 'question_ask',
       args: { role: readingRole, level: 'explain', nodeId: 'limit', format: 'free', prompt: 'Why does the secant slope settle?', answer: 'The step shrinks to zero.' } },
   ];
@@ -335,7 +359,16 @@
   };
   const learnHandlers = {
     list_sessions: () => [structuredClone(session)],
-    answer: () => null,
+    // An answer that carries drawings comes back as its stored result, the
+    // way the backend's `answer_result` writes it.
+    answer: ({ callId, payload }) => {
+      if (payload?.sketches) {
+        const content = { questionId: callId, answer: payload.answer, thinking: payload.thinking, dontKnow: false,
+          sketches: payload.sketches.map((s) => ({ in: s.in, path: s.attachment.path })) };
+        emit({ kind: 'op', sessionId: 'L1', op: { op: 'tool', opId: 'o99', at, agent: 'tutor', callId, result: { content: JSON.stringify(content), isError: false } } });
+      }
+      return null;
+    },
     subscribe_events: ({ onEvent }) => {
       channels.push(onEvent);
       return null;

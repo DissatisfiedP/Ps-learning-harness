@@ -5,6 +5,7 @@
 
 import { available, call, message } from './api.js';
 import { expandSection, setSectionSummary } from './disclosure.js';
+import { selectTab } from './tabs.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -347,6 +348,7 @@ async function acknowledge(button) {
 /** Opens Settings at the Sync section (expanded), or at its needs-attention list. */
 export async function openSyncSettings(at = 'section') {
   await openSettings();
+  selectTab('sync', { remember: false });
   const toggle = expandSection('sync');
   const target = at === 'attention' && !attention.hidden ? attentionHeading : toggle;
   target.scrollIntoView({ block: 'start' });

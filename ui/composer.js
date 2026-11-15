@@ -572,4 +572,15 @@ const api = {
   restore(list) {
     for (const a of list ?? []) addItem(a);
   },
+
+  /** Adds an image the app made itself (a scratch-pad drawing) as a chip. */
+  addStaged(attachment, thumb = null) {
+    addItem(attachment, { origin: 'sketch', thumb });
+    say('');
+  },
+
+  /** False only when the Tutor model is known not to see images. */
+  canSeeImages() {
+    return vision.tutor !== false;
+  },
 };

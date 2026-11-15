@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use chrono::{Datelike, Utc};
+use providers::ContentBlock;
+use serde_json::Value;
 use ulid::Ulid;
 
 use crate::files;
@@ -346,6 +348,115 @@ pub fn grant_roots(
         )?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Scratch-pad drawings sent with a question's answer
+// ---------------------------------------------------------------------------
+
+/// Where on a question a drawing belongs: with the learner's reasoning or
+/// with the answer itself.
+const SKETCH_TARGETS: [&str; 2] = ["reasoning", "answer"];
+
+/// A drawing must be a staged or sent image of this repo's `attachments/`.
+pub(crate) fn check_sketch_image(image: &Attachment) -> Result<(), Error> {
+    if image.kind != "image" || image_file_name(&image.path).is_none() {
+        return Err(Error::Invalid("not an image attachment".into()));
+    }
+    Ok(())
+}
+
+/// A scratch-pad drawing sent with an answer (`payload.sketches`), staged
+/// like any pasted image.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Sketch {
+    pub on: &'static str,
+    pub image: Attachment,
+}
+
+/// The drawings in an answer payload: `[{ "in": "reasoning" | "answer",
+/// "attachment": <staged image> }]`, at most one per place.
+pub(crate) fn sketches(payload: &Value) -> Result<Vec<Sketch>, Error> {
+    let Some(list) = payload.get("sketches").filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let list = list
+        .as_array()
+        .ok_or_else(|| Error::Invalid("sketches must be a list".into()))?;
+    let mut out: Vec<Sketch> = Vec::new();
+    for item in list {
+        let on = item
+            .get("in")
+            .and_then(Value::as_str)
+            .and_then(|t| SKETCH_TARGETS.iter().copied().find(|k| *k == t))
+            .ok_or_else(|| {
+                Error::Invalid("a sketch goes with the reasoning or the answer".into())
+            })?;
+        if out.iter().any(|s| s.on == on) {
+            return Err(Error::Invalid(format!("send one sketch with the {on}")));
+        }
+        let image: Attachment =
+            serde_json::from_value(item.get("attachment").cloned().unwrap_or(Value::Null))
+                .map_err(|_| Error::Invalid("not an image attachment".into()))?;
+        check_sketch_image(&image)?;
+        out.push(Sketch { on, image });
+    }
+    Ok(out)
+}
+
+/// The `sketches` field of a stored answer: where each drawing sits and its
+/// repo path.
+pub(crate) fn sketches_json(sketches: &[Sketch]) -> Value {
+    Value::Array(
+        sketches
+            .iter()
+            .map(|s| serde_json::json!({ "in": s.on, "path": s.image.path }))
+            .collect(),
+    )
+}
+
+/// What the model gets after a stored answer that carried drawings: one
+/// label and the image per drawing, or a line saying it wasn't sent (no
+/// vision, or the file is gone). Empty for any other tool result.
+pub(crate) fn sketch_blocks(repo: Option<&Path>, vision: bool, content: &str) -> Vec<ContentBlock> {
+    if !content.contains("\"sketches\"") {
+        return Vec::new();
+    }
+    let Some(list) = serde_json::from_str::<Value>(content)
+        .ok()
+        .and_then(|v| v.get("sketches").cloned())
+        .and_then(|v| v.as_array().cloned())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in list {
+        let (Some(on), Some(path)) = (
+            item.get("in").and_then(Value::as_str),
+            item.get("path").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let a = Attachment {
+            kind: "image".into(),
+            path: path.to_owned(),
+            media_type: None,
+            bytes: None,
+            name: None,
+        };
+        match repo.and_then(|r| image_block(r, &a)) {
+            Some((media_type, data)) if vision => {
+                out.push(ContentBlock::text(format!(
+                    "[sketch the learner drew with their {on}]"
+                )));
+                out.push(ContentBlock::Image { media_type, data });
+            }
+            _ => out.push(ContentBlock::text(format!(
+                "[sketch drawn with the learner's {on}] (not sent to this model)"
+            ))),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

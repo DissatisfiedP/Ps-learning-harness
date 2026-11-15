@@ -5,6 +5,7 @@
 
 import { artifactFigure } from './artifacts.js';
 import { enhanceLive } from './content.js';
+import { sketchFigure, sketchSlot } from './attachment.js';
 import { calibrationBlock, fieldGuide } from './fieldguide.js';
 import { escapeHtml, renderMarkdown } from './markdown.js';
 import { getPlugin } from './pluginstore.js';
@@ -304,14 +305,22 @@ function questionForm(item, onAnswer, reading = null) {
     rows: answerChoice(args) ? 2 : 6,
     placeholder: answerChoice(args) ? 'How did you get there?' : 'Work it out here.',
   });
+  const slots = { reasoning: sketchSlot('your reasoning') };
   if (answerChoice(args)) {
-    form.append(thinking.wrap);
+    form.append(thinking.wrap, slots.reasoning.el);
   } else {
     const f = textareaField('Your answer', { rows: 2, placeholder: 'Your best guess is fine.' });
     answerInput = f.input;
+    slots.answer = sketchSlot('your answer');
     thinking.input.dataset.first = '';
-    form.append(thinking.wrap, f.wrap);
+    form.append(thinking.wrap, slots.reasoning.el, f.wrap, slots.answer.el);
   }
+  // The scratch pad hands a drawing to the open question; it goes with the
+  // answer when the learner submits. `set` returns the one it replaced.
+  form.sketchApi = {
+    targets: Object.keys(slots),
+    set: (on, attachment, url) => slots[on]?.set(attachment, url) ?? null,
+  };
 
   const conf = confidenceField();
   const confRadios = conf.radios;
@@ -329,7 +338,7 @@ function questionForm(item, onAnswer, reading = null) {
     const answer = answerInput ? answerInput.value.trim() : (options.find((r) => r.checked)?.value ?? '');
     const chosen = confRadios.find((r) => r.checked);
     if (!dontKnow) {
-      if (!answer) {
+      if (!answer && !slots.answer?.get()) {
         status.set('Write an answer or pick “I don’t know”.');
         (answerInput ?? options[0])?.focus({ preventScroll: true });
         return;
@@ -341,6 +350,10 @@ function questionForm(item, onAnswer, reading = null) {
       }
     }
     const payload = { answer, thinking: thinking.input.value.trim(), dontKnow };
+    const sketches = Object.entries(slots)
+      .filter(([, slot]) => slot.get())
+      .map(([on, slot]) => ({ in: on, attachment: slot.get() }));
+    if (sketches.length) payload.sketches = sketches;
     // What the learner thought while reading the teaching: its own channel,
     // never merged into the reasoning on the question.
     const readingText = reading?.().trim();
@@ -469,14 +482,14 @@ export function questionCard(item, { onAnswer, readOnly, ctx = {}, reading = nul
   if (item.answer) {
     const a = item.answer;
     const answerText = a.answer || (a.dontKnow ? 'I don’t know.' : '');
-    block.append(
-      youBlock([
-        [answerText, 'you-text'],
-        [a.thinkingWhileReading ? `While reading: ${a.thinkingWhileReading}` : '', 'you-meta'],
-        [a.thinking ? `Reasoning: ${a.thinking}` : '', 'you-meta'],
-        [confidenceLine(a), 'you-meta'],
-      ]),
-    );
+    const you = youBlock([
+      [answerText, 'you-text'],
+      [a.thinkingWhileReading ? `While reading: ${a.thinkingWhileReading}` : '', 'you-meta'],
+      [a.thinking ? `Reasoning: ${a.thinking}` : '', 'you-meta'],
+      [confidenceLine(a), 'you-meta'],
+    ]);
+    for (const sketch of a.sketches ?? []) you.append(sketchFigure(sketch));
+    block.append(you);
     if (item.verdict) {
       block.append(verdictLine(item));
       if (args.explanation) block.append(prose(args.explanation, 'prose feedback'));

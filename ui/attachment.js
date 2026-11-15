@@ -118,3 +118,72 @@ export function attachmentList(attachments) {
   if (!ul.children.length) return null;
   return ul;
 }
+
+/**
+ * A drawing sent with an answer, `{ in: "reasoning" | "answer", path }`, as
+ * a small captioned picture. The image loads from the data repo.
+ */
+export function sketchFigure(sketch) {
+  const figure = document.createElement('figure');
+  figure.className = 'you-sketch';
+  const img = document.createElement('img');
+  img.alt = `Your sketch, sent with your ${sketch.in}`;
+  img.hidden = true;
+  loadThumb({ kind: 'image', path: sketch.path }, img);
+  const caption = document.createElement('figcaption');
+  caption.textContent = `Sketch · with your ${sketch.in}`;
+  figure.append(img, caption);
+  return figure;
+}
+
+/**
+ * A scratch-pad drawing waiting to go with `label` ("your reasoning", "your
+ * answer to problem 2"): a small picture with a Remove button. Removing
+ * tells the page (`sketch-discard`, detail: the attachment) so the staged
+ * image can be dropped. `set` returns the drawing it replaced; `restore`
+ * loads one that was kept (a draft) and says whether it could.
+ */
+export function sketchSlot(label) {
+  const el = document.createElement('figure');
+  el.className = 'ex-sketch';
+  el.hidden = true;
+  const img = document.createElement('img');
+  img.alt = `Your sketch, sent with ${label}`;
+  const bar = document.createElement('figcaption');
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'btn text';
+  remove.textContent = 'Remove sketch';
+  const text = document.createElement('span');
+  text.textContent = `Sketch goes with ${label}`;
+  bar.append(text, remove);
+  el.append(img, bar);
+  let attachment = null;
+  const set = (next, url) => {
+    const previous = attachment;
+    attachment = next;
+    img.src = url;
+    el.hidden = false;
+    return previous;
+  };
+  remove.addEventListener('click', () => {
+    const gone = attachment;
+    attachment = null;
+    el.hidden = true;
+    img.removeAttribute('src');
+    if (gone) el.dispatchEvent(new CustomEvent('sketch-discard', { bubbles: true, detail: gone }));
+  });
+  return {
+    el,
+    get: () => attachment,
+    set,
+    restore: (kept) =>
+      call('attachment_data', { path: kept.path })
+        .then((url) => {
+          if (typeof url !== 'string' || !url) return false;
+          set(kept, url);
+          return true;
+        })
+        .catch(() => false),
+  };
+}

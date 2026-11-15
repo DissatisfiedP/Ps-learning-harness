@@ -993,6 +993,7 @@ mod tests {
                 problem_id: "p1".into(),
                 text: "6 V".into(),
                 confidence: Some(70),
+                sketch: None,
             }],
         }));
         let mid = at(&ops, 600);

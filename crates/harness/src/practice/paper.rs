@@ -251,6 +251,14 @@ impl Harness {
                 )));
             }
         }
+        // A drawing in the draft is moved out of staging now, so the draft
+        // (and the hand-in at the deadline) survive a restart.
+        let mut images = Vec::new();
+        for sketch in answers.iter().filter_map(|a| a.sketch.as_ref()) {
+            crate::attachments::check_sketch_image(sketch)?;
+            images.push(sketch.clone());
+        }
+        self.commit_attachments(&images)?;
         if exam.draft == answers {
             return Ok(());
         }

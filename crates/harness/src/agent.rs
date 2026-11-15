@@ -2354,7 +2354,21 @@ impl Harness {
                 self.grade_view_answer(session_id, call_id, view, &payload)
                     .await?
             }
-            None => answer_result(&pending.name, call_id, &pending.args, &payload)?,
+            None => {
+                let content = answer_result(&pending.name, call_id, &pending.args, &payload)?;
+                // A drawing from the scratch pad rides with the answer: the
+                // tutor must be able to see it, and it only leaves staging
+                // once the answer is accepted.
+                if pending.name == "question_ask" {
+                    let images: Vec<_> = crate::attachments::sketches(&payload)?
+                        .into_iter()
+                        .map(|s| s.image)
+                        .collect();
+                    self.check_vision(&images)?;
+                    self.commit_attachments(&images)?;
+                }
+                content
+            }
         };
         let call = ToolCall {
             id: pending.call_id.clone(),
@@ -3375,7 +3389,8 @@ pub(crate) fn answer_result(
         .get("dontKnow")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if !dont_know && answer.is_empty() {
+    let sketches = crate::attachments::sketches(payload)?;
+    if !dont_know && answer.is_empty() && !sketches.iter().any(|s| s.on == "answer") {
         return Err(Error::Invalid(
             "write an answer, or choose \"I don't know\"".into(),
         ));
@@ -3397,6 +3412,9 @@ pub(crate) fn answer_result(
         .filter(|t| !t.trim().is_empty())
     {
         out["thinkingWhileReading"] = json!(t.trim());
+    }
+    if !sketches.is_empty() {
+        out["sketches"] = crate::attachments::sketches_json(&sketches);
     }
     if !dont_know {
         if let Some(c) = payload.get("confidence").and_then(Value::as_f64) {
@@ -3707,6 +3725,51 @@ mod tests {
                 .get("verdict")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_sketch_travels_with_the_answer_and_can_be_the_answer() {
+        let free = json!({"format":"free","answer":"x"});
+        let sketch = |on: &str| {
+            json!({ "in": on, "attachment": {
+                "kind": "image", "path": "attachments/2026/01ABC.png", "mediaType": "image/png",
+            }})
+        };
+        // An answer drawn instead of typed is accepted.
+        let r = answer_result(
+            "question_ask",
+            "q",
+            &free,
+            &json!({"answer":"","sketches":[sketch("answer")]}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["sketches"],
+            json!([{ "in": "answer", "path": "attachments/2026/01ABC.png" }])
+        );
+        // A drawing with the reasoning does not stand in for the answer.
+        assert!(answer_result(
+            "question_ask",
+            "q",
+            &free,
+            &json!({"answer":"","sketches":[sketch("reasoning")]})
+        )
+        .is_err());
+        // Only repo-shaped image paths, one per place, only the two places.
+        let escape = json!({ "in": "answer", "attachment": { "kind": "image", "path": "../../secret.png" } });
+        for bad in [
+            json!([escape]),
+            json!([sketch("answer"), sketch("answer")]),
+            json!([sketch("margin")]),
+        ] {
+            assert!(answer_result(
+                "question_ask",
+                "q",
+                &free,
+                &json!({"answer":"y","sketches":bad})
+            )
+            .is_err());
+        }
     }
 
     #[test]

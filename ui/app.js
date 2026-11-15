@@ -11,6 +11,8 @@
 
 import { available, call, channel, message } from './api.js';
 import { initComposer } from './composer.js';
+import { initScratchpad, detach as padDetach, refresh as padRefresh } from './scratchpad.js';
+import { blockPageZoom } from './zoomguard.js';
 import { artifactsEl } from './content.js';
 import { ensurePrism } from './highlight.js';
 import { ensureKatex, plainText } from './markdown.js';
@@ -381,6 +383,7 @@ async function deleteSession(id) {
 function closeCurrent() {
   practice.close();
   exam.close();
+  padDetach();
   const s = state.current;
   if (!s) return;
   s.live?.dispose();
@@ -443,6 +446,7 @@ function showConversation() {
   setComposerContext(false);
   s.composerShown = true;
   renderDesk({ quiet: true });
+  padRefresh();
   if (learnLive) renderPhase();
   syncBusy();
 }
@@ -480,6 +484,7 @@ function readingItem(s) {
 
 function renderItem(item) {
   const s = state.current;
+  if (item.kind === 'assistant' || item.kind === 'artifacts') padRefresh();
   const onAnswer = (callId, payload) => cmd('answer', { sessionId: s.id, callId, payload });
   const ctx = { artifacts: s.tl.artifacts, sessionId: s.id };
   switch (item.kind) {
@@ -812,6 +817,7 @@ function onSessionSummary(summary) {
     sessions.upsert(summary);
     setTitle(s, summary.title);
     composer?.setSession(summary.id);
+    padRefresh();
     syncBusy();
     return;
   }
@@ -1141,23 +1147,6 @@ function renderPhase() {
     planFailed: s.planFailed,
     error: s.stError,
   });
-}
-
-/**
- * Title first (§6.2): when the title would truncate or the head would wrap,
- * the phase list shows only the current step (the others stay for screen
- * readers). Runs from a ResizeObserver on the head, its title and the list.
- */
-function fitHead() {
-  const nav = els.phase;
-  if (nav.hidden || els.conversation.hidden) return;
-  nav.classList.remove('compact');
-  const t = els.title;
-  const top = t.offsetTop;
-  const wraps = [...t.parentElement.children].some(
-    (c) => !c.hidden && !c.classList.contains('head-status') && c.offsetTop > top + t.offsetHeight / 2,
-  );
-  if (wraps || t.scrollWidth > t.clientWidth + 1) nav.classList.add('compact');
 }
 
 // ---------- plugins (plan chip, Settings changes) ----------
@@ -1628,9 +1617,81 @@ function practiseEnded(s) {
   });
 }
 
+// ---------- scratch pad ----------
+
+/** The session's figures that have a picture the pad can draw on. */
+function padFigures() {
+  const s = state.current;
+  if (!s) return [];
+  return [...s.tl.artifacts.values()]
+    .filter((op) => /<svg[\s>]/i.test(op.fallbackSvg ?? ''))
+    .map((op, i) => ({
+      id: op.artifactId,
+      title: `Figure ${i + 1}: ${op.data?.title || op.tool || 'figure'}`,
+      svg: op.fallbackSvg,
+    }));
+}
+
+/** The open question's form, when it takes a sketch. */
+function sketchForm(s) {
+  const item = pendingItem(s);
+  if (item?.kind !== 'question' || item.args.view) return null;
+  return item.el?.querySelector('.ex-form') ?? null;
+}
+
+/** Where a drawing can go right now: the open question's reasoning or answer, a problem's answer, else the next message. */
+function padTargets() {
+  if (practice.isOpen()) return practice.padTargets();
+  const s = state.current;
+  if (!s) return [];
+  if (pendingItem(s)) {
+    const labels = { reasoning: 'With my reasoning', answer: 'With my answer' };
+    return (sketchForm(s)?.sketchApi?.targets ?? []).map((id) => ({ id, label: labels[id] }));
+  }
+  return [{ id: 'message', label: 'With my next message' }];
+}
+
+async function padSend(target, png, { figure }) {
+  const name = figure ? `Scratch pad on ${figure}.png` : 'Scratch pad.png';
+  const unstage = (a) => call('unstage_image', { path: a.path }).catch(() => {});
+  if (practice.isOpen()) {
+    const attachment = await call('stage_image', { data: png, name });
+    if (target === 'message') {
+      composer.addStaged(attachment, png);
+      return 'Added to your message. It goes when you send.';
+    }
+    try {
+      const { replaced, note } = practice.padAttach(target, attachment, png);
+      if (replaced) unstage(replaced);
+      return note;
+    } catch (e) {
+      unstage(attachment);
+      throw e;
+    }
+  }
+  const s = state.current;
+  if (!s) throw new Error('Open a session first.');
+  const attachment = await call('stage_image', { data: png, name });
+  if (target === 'message') {
+    composer.addStaged(attachment, png);
+    return 'Added to your next message.';
+  }
+  const form = sketchForm(s);
+  if (!form?.sketchApi?.targets.includes(target)) {
+    unstage(attachment);
+    throw new Error('That question is no longer open.');
+  }
+  const replaced = form.sketchApi.set(target, attachment, png);
+  if (replaced) unstage(replaced);
+  // A check that waits behind "Show the question" opens so the sketch is seen.
+  form.closest('.exercise.collapsed')?.querySelector('.ex-open')?.click();
+  return `Added to your ${target}. It goes with your answer when you submit.`;
+}
+
 function renderDesk({ quiet = false, free = notEngaged() } = {}) {
   const s = state.current;
   if (!s) return;
+  padRefresh();
   const d = deskState(s);
   const wasShown = s.composerShown;
   s.composerShown = Boolean(d.composer);
@@ -1959,6 +2020,7 @@ const practice = createPractice({
   announce,
   composerHost,
   onBusy: syncBusy,
+  onPadChange: padRefresh,
   onBack: goHome,
   openSettings,
   start: ({ targets, format }) => startPractice({ targets, format, report: (text) => practice.say(text) }),
@@ -2170,9 +2232,25 @@ function practiseSelection() {
 
 function wire() {
   els.page = $('#page');
-  const headFit = new ResizeObserver(fitHead);
-  for (const el of [els.title.parentElement, els.title, els.phase]) headFit.observe(el);
   composer = initComposer({ onUseWorkspace: useMentionedWorkspace });
+  blockPageZoom();
+  initScratchpad({
+    sessionId: () => (practice.isOpen() ? practice.id() : state.current?.id ?? null),
+    canUse: () =>
+      practice.isOpen()
+        ? !els.practice.hidden
+        : Boolean(state.current?.id && !state.current.readOnly && !els.conversation.hidden),
+    host: () => (practice.isOpen() ? els.practice : els.conversation),
+    figures: padFigures,
+    targets: padTargets,
+    send: padSend,
+    canSeeImages: () => composer?.canSeeImages() ?? true,
+  });
+  // A sketch removed from an answer, a set draft or a paper is a staged
+  // image nobody will send (a committed one is untouched: only staging is cleared).
+  document.addEventListener('sketch-discard', (e) => {
+    call('unstage_image', { path: e.detail.path }).catch(() => {});
+  });
   wireSessionMenu();
   els.composer.addEventListener('submit', submit);
   els.prompt.addEventListener('input', () => {

@@ -13,7 +13,7 @@
 // answer card by the host (`composerHost`), exactly as it moves between Home
 // and the Learn desk.
 
-import { attachmentList } from './attachment.js';
+import { attachmentList, sketchFigure, sketchSlot } from './attachment.js';
 import { resolveArtifacts } from './artifacts.js';
 import { confidenceField, confidenceLabel } from './cards.js';
 import { enhanceLive } from './content.js';
@@ -251,7 +251,8 @@ export function createPractice(deps) {
       view: null,
       messages: data?.messages ?? [],
       artifacts: new Map(),
-      answers: new Map(), // problemId -> { text, confidence } as handed in (from the op log)
+      answers: new Map(), // problemId -> { text, confidence, sketch } as handed in (from the op log)
+      slots: new Map(), // a set's problem id -> its sketch slot, for the scratch pad
       nodes: new Map(),
       drafts: loadDrafts(summary.id),
       settleAfter: 0, // a coach message was persisted: drop the streamed copy once a read at or after this sequence shows it
@@ -312,7 +313,7 @@ export function createPractice(deps) {
   function learnOp(op) {
     if (op.op === 'artifact' && op.artifactId) s.artifacts.set(op.artifactId, op);
     else if (op.op === 'practice' && op.event === 'setSubmit') {
-      for (const a of op.answers ?? []) s.answers.set(a.problemId, { text: a.text ?? '', confidence: a.confidence ?? null });
+      for (const a of op.answers ?? []) s.answers.set(a.problemId, { text: a.text ?? '', confidence: a.confidence ?? null, sketch: a.sketch ?? null });
     }
   }
 
@@ -439,6 +440,7 @@ export function createPractice(deps) {
     renderError();
     renderAnswer();
     renderControls();
+    deps.onPadChange?.();
   }
 
   const running = () => Boolean(s && (s.running || s.view?.turnRunning));
@@ -703,8 +705,8 @@ export function createPractice(deps) {
   // ----- set cards -----
 
   function persistDraft(id, patch) {
-    const d = { text: '', confidence: null, ...s.drafts.get(id), ...patch };
-    if (!d.text && d.confidence == null) s.drafts.delete(id);
+    const d = { text: '', confidence: null, sketch: null, ...s.drafts.get(id), ...patch };
+    if (!d.text && d.confidence == null && !d.sketch) s.drafts.delete(id);
     else s.drafts.set(id, d);
     saveDrafts(s.id, s.drafts);
     renderControls();
@@ -725,10 +727,20 @@ export function createPractice(deps) {
     ta.dataset.first = '';
     ta.addEventListener('input', () => persistDraft(p.problemId, { text: ta.value }));
     field.append(label, ta);
+    // A drawing kept with the draft; one the device no longer has (staging
+    // is cleared at a restart) is dropped rather than shown broken.
+    const slot = sketchSlot(`your answer to problem ${p.index + 1}`);
+    s.slots.set(p.problemId, slot);
+    slot.el.addEventListener('sketch-discard', () => persistDraft(p.problemId, { sketch: null }));
+    if (draft?.sketch) {
+      slot.restore(draft.sketch).then((ok) => {
+        if (!ok) persistDraft(p.problemId, { sketch: null });
+      });
+    }
     const conf = confidenceField({ legend: 'How sure are you? (optional)' });
     conf.set(draft?.confidence ?? null);
     for (const r of conf.radios) r.addEventListener('change', () => persistDraft(p.problemId, { confidence: conf.value() }));
-    form.append(field, conf.el);
+    form.append(field, slot.el, conf.el);
     block.append(form);
     return block;
   }
@@ -738,8 +750,9 @@ export function createPractice(deps) {
     const a = s.answers.get(p.problemId);
     const you = h('div', 'you');
     you.append(h('p', 'you-label', 'You'));
-    you.append(h('p', 'you-text', a?.text?.trim() ? a.text : 'No answer.'));
+    you.append(h('p', 'you-text', a?.text?.trim() ? a.text : a?.sketch ? '' : 'No answer.'));
     if (typeof a?.confidence === 'number') you.append(h('p', 'you-meta', confidenceLabel(a.confidence)));
+    if (a?.sketch) you.append(sketchFigure({ in: 'answer', path: a.sketch.path }));
     block.append(you);
     if (p.result) block.append(resultBlock(p, p.result.verdict));
     else block.append(h('p', 'writing', 'Reviewing…'));
@@ -997,7 +1010,7 @@ export function createPractice(deps) {
       case 'set-open': {
         const answered = v.problems.filter((p) => {
           const d = s.drafts.get(p.problemId);
-          return d?.text?.trim();
+          return d?.text?.trim() || d?.sketch;
         }).length;
         const size = v.problems.length;
         const rest = size - answered;
@@ -1117,10 +1130,15 @@ export function createPractice(deps) {
     const answers = [];
     for (const p of v.problems) {
       const d = s.drafts.get(p.problemId);
-      if (!d?.text?.trim() && d?.confidence == null) continue;
-      answers.push({ problemId: p.problemId, text: d.text ?? '', ...(d.confidence != null ? { confidence: d.confidence } : {}) });
+      if (!d?.text?.trim() && d?.confidence == null && !d?.sketch) continue;
+      answers.push({
+        problemId: p.problemId,
+        text: d.text ?? '',
+        ...(d.confidence != null ? { confidence: d.confidence } : {}),
+        ...(d.sketch ? { sketch: d.sketch } : {}),
+      });
     }
-    for (const a of answers) s.answers.set(a.problemId, { text: a.text, confidence: a.confidence ?? null });
+    for (const a of answers) s.answers.set(a.problemId, { text: a.text, confidence: a.confidence ?? null, sketch: a.sketch ?? null });
     const mine = s;
     act('practice_submit_set', { answers }, 'Couldn’t hand in the set').then(() => {
       // Handed in: the local copies are no longer needed.
@@ -1258,6 +1276,33 @@ export function createPractice(deps) {
   dom.secondary.addEventListener('click', () => onDesk(dom.secondary.dataset.act));
   $('#practice-back').addEventListener('click', () => deps.onBack());
 
+  // ----- the scratch pad (ui/scratchpad.js) -----
+
+  /** Where a drawing can go right now: the open answer, or one problem of a set or paper. */
+  function padTargets() {
+    const v = view();
+    if (!v || v.legacy) return [];
+    if (v.format === 'exam') return examPaper.padTargets();
+    if (v.status === 'set-open') {
+      return v.problems
+        .filter((p) => p.statement)
+        .map((p) => ({ id: `problem:${p.problemId}`, label: `With my answer to problem ${p.index + 1}` }));
+    }
+    const spec = answerSpec(v);
+    return spec ? [{ id: 'message', label: spec.kind === 'open' ? 'With my answer' : 'With my message' }] : [];
+  }
+
+  /** Puts a drawing with one problem's answer (a set or paper); returns the drawing it replaced and a status line. */
+  function padAttach(target, attachment, url) {
+    const id = target.replace(/^problem:/, '');
+    if (view()?.format === 'exam') return examPaper.padAttach(id, attachment, url);
+    const slot = s?.slots.get(id);
+    if (!slot) throw new Error('That problem is no longer open for answers.');
+    const replaced = slot.set(attachment, url);
+    persistDraft(id, { sketch: attachment });
+    return { replaced, note: 'Added to your answer. It goes in when you hand in the set.' };
+  }
+
   return {
     open,
     close,
@@ -1271,6 +1316,8 @@ export function createPractice(deps) {
       dom.status.textContent = text ?? '';
     },
     isOpen: (id) => Boolean(s && (id == null || s.id === id)),
+    padTargets,
+    padAttach,
     id: () => s?.id ?? null,
     isRunning: running,
     /** Send is the quiet button while Next is the one primary. */

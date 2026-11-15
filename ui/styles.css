@@ -129,7 +129,9 @@
 
 /* ---------- base ---------- */
 *, *::before, *::after { box-sizing: border-box; }
-html, body { height: 100%; margin: 0; }
+/* Pan and scroll by touch, never pinch or double-tap zoom the page: the Map
+   and the plan diagram zoom themselves, and ui/zoomguard.js covers the rest. */
+html, body { height: 100%; margin: 0; touch-action: pan-x pan-y; }
 body {
   background: var(--paper);
   color: var(--ink);
@@ -414,11 +416,14 @@ fieldset { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .head-inner > #plan-toggle { flex: none; }
 .head-inner > .head-status { flex: 1 0 100%; font-size: var(--fs-small); color: var(--ink-2); }
 .head-inner > .head-status:not(:empty) { padding-block-end: var(--s2); }
+/* The head shows only where the session is now ("Teach 3/7"); the other
+   phases stay in the list for screen readers (the nav is "Session progress"). */
 .phase ol { display: flex; list-style: none; margin: 0; padding: 0; white-space: nowrap; }
-.phase li + li::before { content: "·" / ""; margin-inline: 0.45em; color: var(--ink-3); font-weight: 400; }
-.phase li.past { color: var(--ink-2); }
+.phase li:not(.current) {
+  position: absolute; inline-size: 1px; block-size: 1px; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
 .phase li.current { color: var(--ink); font-weight: 600; }
-.phase li.future { color: var(--ink-3); }
 
 /* the page */
 .messages {
@@ -1195,11 +1200,6 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
   .head-inner { column-gap: var(--s2); }
   .head-inner > .back { min-inline-size: 44px; min-block-size: 44px; }
   .back-label { display: none; }
-  .phase li:not(.current) {
-    position: absolute; inline-size: 1px; block-size: 1px; margin: -1px;
-    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
-  }
-  .phase li + li::before { content: none; }
   .desk-note { flex-direction: column; align-items: stretch; }
 }
 
@@ -1421,12 +1421,6 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
 .resume > .small-caps { grid-column: 1 / -1; color: var(--ink-3); }
 .resume-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .resume-place { font-size: var(--fs-small); color: var(--ink-2); white-space: nowrap; }
-/* Running head: title first. fitHead() sets .compact when the full phase list would truncate the title or wrap the head. */
-.phase.compact li:not(.current) {
-  position: absolute; inline-size: 1px; block-size: 1px; margin: -1px;
-  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
-}
-.phase.compact li + li::before { content: none; }
 
 /* ── Focus mode (§7.8) ── */
 .focus-choice { display: flex; flex-direction: column; gap: var(--s2); }
@@ -1681,3 +1675,116 @@ dialog.proposals h2 { font: 600 var(--fs-h2)/1.3 var(--font-read); }
   .exam-bar .btn { flex: 1 1 100%; }
   .exam-actions .btn:not(.text) { flex: 1 1 auto; }
 }
+
+/* ---------- Settings tabs (ui/tabs.js; ui-design §7.5) ---------- */
+/* Head and tab row stay put while a panel scrolls under them. On a narrow
+   screen the tab row scrolls sideways; the selected tab is scrolled into view. */
+.settings-top { position: sticky; inset-block-start: 0; z-index: 1; background: var(--paper); }
+.settings-top .settings-head { border-block-end: 0; }
+.settings-tabs {
+  display: flex; gap: var(--s1); overflow-x: auto; scrollbar-width: none;
+  border-block-end: var(--hair);
+}
+.settings-tabs::-webkit-scrollbar { display: none; }
+.settings-tab {
+  flex: none; padding: var(--s2) var(--s3); margin-block-end: -1px;
+  border: 0; border-block-end: 2px solid transparent; border-radius: 0;
+  background: none; color: var(--ink-3);
+  font: 400 var(--fs-ui)/1.45 var(--font-ui); white-space: nowrap;
+}
+.settings-tab:hover { color: var(--ink); }
+.settings-tab[aria-selected="true"] { color: var(--ink); font-weight: 600; border-block-end-color: var(--accent); }
+.settings-tab:focus-visible { outline-offset: -2px; }
+@media (forced-colors: active) { .settings-tab[aria-selected="true"] { border-block-end-color: Highlight; } }
+.pen-test {
+  position: relative; block-size: 140px; margin-block-start: var(--s3);
+  border: var(--line); border-radius: var(--r); background: var(--raised);
+  color: var(--ink); touch-action: none; overflow: hidden;
+}
+.pen-test-canvas { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; }
+
+/* ---------- scratch pad (ui/scratchpad.js; ui-design §7.2.19) ---------- */
+:root {
+  --pad-red: #B3261E;
+  --pad-blue: #1F5FBF;
+  --pad-w: clamp(360px, 42vw, 680px);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --pad-red: #F2837A; --pad-blue: #7DB0F5; }
+}
+:root[data-theme="dark"] { --pad-red: #F2837A; --pad-blue: #7DB0F5; }
+
+.pad-toggle { flex: none; }
+.pad-toggle svg { display: block; }
+.pad-toggle.active { color: var(--ink); background: var(--raised); }
+/* Docked: the lesson keeps the room to its left; overlay: the pad is the screen. */
+.conversation.pad-docked { padding-inline-end: var(--pad-w); }
+.pad {
+  position: fixed; z-index: 20;
+  inset-block: var(--safe-top) 0; inset-inline-end: 0;
+  inline-size: var(--pad-w);
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s3) var(--s3) calc(var(--s3) + var(--safe-bottom));
+  background: var(--paper); border-inline-start: var(--line);
+  color: var(--ink); font: 400 var(--fs-ui)/1.45 var(--font-ui);
+}
+.pad[data-mode="overlay"] {
+  inset: 0; inline-size: auto; border: 0;
+  padding: calc(var(--safe-top) + var(--s3)) calc(var(--safe-right) + var(--s3)) calc(var(--safe-bottom) + var(--s3)) calc(var(--safe-left) + var(--s3));
+}
+.pad-head { display: flex; align-items: center; gap: var(--s3); min-block-size: 32px; }
+.pad-title { flex: 1; font: 600 var(--fs-ui)/1.45 var(--font-ui); color: var(--ink-2); }
+.pad-icon svg { display: block; }
+.pad-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); }
+.pad-group { display: inline-flex; align-items: center; gap: var(--s1); }
+.pad-tool {
+  min-block-size: 36px; padding: 0 var(--s3);
+  border: var(--hair); border-radius: var(--r); background: none;
+  color: var(--ink); font-size: var(--fs-small);
+}
+.pad-tool:hover:not(:disabled) { background: var(--raised); }
+.pad-tool[aria-pressed="true"], .pad.erasing #pad-eraser { background: var(--select); border-color: var(--accent); }
+.pad-tool:disabled { color: var(--ink-3); cursor: default; }
+.pad-swatch {
+  inline-size: 28px; block-size: 28px; min-block-size: 0; padding: 0;
+  border: 2px solid var(--rule-strong); border-radius: 50%;
+}
+.pad-swatch[data-color="ink"] { background: var(--ink); }
+.pad-swatch[data-color="red"] { background: var(--pad-red); }
+.pad-swatch[data-color="blue"] { background: var(--pad-blue); }
+.pad-swatch[aria-pressed="true"] { outline: var(--focus); outline-offset: 2px; }
+.pad-width, .pad-bg-pick { display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--fs-small); color: var(--ink-2); }
+.pad-width input { inline-size: 110px; accent-color: var(--accent); }
+.pad-bg-pick .input { inline-size: auto; max-inline-size: 16rem; padding: 4px 8px; font-size: var(--fs-small); }
+@media (pointer: coarse) {
+  .pad-tool { min-block-size: 44px; }
+  .pad-swatch { inline-size: 36px; block-size: 36px; min-block-size: 36px; }
+}
+/* The stage letterboxes one fixed-ratio board; scrim colour tells paper from stage. */
+.pad-stage {
+  flex: 1 1 0; min-block-size: 0; padding: var(--s2);
+  display: grid; place-items: center; overflow: hidden;
+  background: var(--raised); border-radius: var(--r);
+}
+.pad-board { position: relative; background: var(--paper); outline: 1px solid var(--rule-strong); }
+.pad-bg { position: absolute; inset: 0; color: var(--ink); pointer-events: none; }
+.pad-bg svg { display: block; inline-size: 100%; block-size: 100%; }
+.pad-canvas {
+  position: absolute; inset: 0; inline-size: 100%; block-size: 100%;
+  touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none;
+}
+.pad.erasing .pad-canvas { cursor: cell; }
+.pad-send { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); }
+.pad-send-wrap { flex: none; }
+.pad-send-menu { inset-inline: 0 auto; inset-block: auto calc(100% + 4px); min-inline-size: 220px; }
+.pad-status { flex: 1 1 12rem; margin: 0; }
+.pad-status:empty { display: none; }
+/* A drawing waiting on an answer form, and one already sent. */
+.ex-sketch { margin: var(--s2) 0 0; display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); }
+.ex-sketch img, .you-sketch img {
+  display: block; max-inline-size: min(100%, 320px); block-size: auto;
+  border: var(--hair); border-radius: var(--r); background: #fff;
+}
+.ex-sketch figcaption { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); font: 400 var(--fs-small)/1.45 var(--font-ui); color: var(--ink-3); }
+.you-sketch { margin: var(--s2) 0 0; }
+.you-sketch figcaption { margin-block-start: var(--s1); font: 400 var(--fs-meta)/1.4 var(--font-ui); color: var(--ink-3); }

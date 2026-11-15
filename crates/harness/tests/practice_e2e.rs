@@ -985,6 +985,7 @@ async fn a_set_gives_no_feedback_until_it_is_handed_in_and_is_then_reviewed_prob
                 problem_id: ids[0].clone(),
                 text: "x".into(),
                 confidence: Some(55),
+                sketch: None,
             }],
         )
         .await
@@ -993,16 +994,28 @@ async fn a_set_gives_no_feedback_until_it_is_handed_in_and_is_then_reviewed_prob
     assert!(bad.contains("10, 30, 50, 70 or 90"), "{bad}");
 
     // Hand it in: the first answered, the second left blank.
+    // A drawing goes with the first answer: committed on hand-in, named in
+    // the coach's listing and sent to it as an image.
+    let sketch = r
+        .h
+        .stage_image(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+            Some("Scratch pad.png"),
+        )
+        .unwrap();
+    assert!(!r.repo.join(&sketch.path).exists());
     r.h.practice_submit_set(
         &id,
         vec![SetAnswer {
             problem_id: ids[0].clone(),
             text: "6 V".into(),
             confidence: Some(90),
+            sketch: Some(sketch.clone()),
         }],
     )
     .await
     .unwrap();
+    assert!(r.repo.join(&sketch.path).is_file());
     let log: Vec<Value> = outcomes(&r.repo);
     assert_eq!(log.len(), 2, "{log:?}");
     assert!(log
@@ -1040,6 +1053,8 @@ async fn a_set_gives_no_feedback_until_it_is_handed_in_and_is_then_reviewed_prob
     // The review turn listed the answers, with the blank one.
     let coach = r.script.requests_of("coach");
     assert!(texts(coach.last().unwrap()).contains("(no answer)"));
+    assert!(texts(coach.last().unwrap()).contains("[sketch: image 1 of this message]"));
+    assert!(coach.last().unwrap().to_string().contains("image_url"));
     assert!(r.script.unexpected.lock().unwrap().is_empty());
 }
 

@@ -100,6 +100,9 @@
           </span>
           <button class="btn text" id="plan-toggle" type="button" aria-haspopup="dialog" hidden>Plan</button>
           <button class="btn text" id="exam-toggle" type="button" aria-haspopup="dialog" hidden>Exam</button>
+          <button class="btn text pad-toggle" id="pad-toggle" type="button" aria-controls="pad" aria-expanded="false" aria-label="Scratch pad" title="Scratch pad" hidden>
+            <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+          </button>
           <div class="head-menu-wrap" id="session-menu-wrap" hidden>
             <button class="btn text head-menu-button" id="session-menu" type="button"
                     aria-haspopup="menu" aria-expanded="false" aria-controls="session-menu-list"
@@ -148,6 +151,7 @@
           </div>
         </div>
       </footer>
+
     </section>
 
     <section class="conversation practice" id="practice" aria-labelledby="practice-title" hidden>
@@ -158,6 +162,9 @@
           </button>
           <h1 class="head-title" id="practice-title" tabindex="-1"></h1>
           <span class="head-word" id="practice-word">Practice</span>
+          <button class="btn text pad-toggle" id="practice-pad-toggle" type="button" aria-controls="pad" aria-expanded="false" aria-label="Scratch pad" title="Scratch pad" hidden>
+            <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+          </button>
           <button class="btn text" id="practice-fullscreen" type="button">Full screen</button>
           <p class="head-status" id="practice-status" role="status"></p>
         </div>
@@ -211,6 +218,52 @@
         </div>
       </footer>
     </section>
+      <aside class="pad" id="pad" aria-labelledby="pad-title" data-mode="dock" hidden>
+        <div class="pad-head">
+          <h2 class="pad-title" id="pad-title" tabindex="-1">Scratch pad</h2>
+          <button class="btn text pad-icon" id="pad-mode" type="button" aria-label="Show over the lesson" title="Show over the lesson" hidden>
+            <svg class="pad-mode-expand" aria-hidden="true" focusable="false" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" /></svg>
+            <svg class="pad-mode-dock" aria-hidden="true" focusable="false" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v18" /></svg>
+          </button>
+          <button class="btn text" id="pad-close" type="button">Close</button>
+        </div>
+        <div class="pad-tools" role="toolbar" aria-label="Drawing tools">
+          <div class="pad-group" role="group" aria-label="Tool">
+            <button class="btn pad-tool" id="pad-pen" type="button" aria-pressed="true">Pen</button>
+            <button class="btn pad-tool" id="pad-eraser" type="button" aria-pressed="false">Eraser</button>
+          </div>
+          <div class="pad-group" role="group" aria-label="Colour">
+            <button class="pad-swatch" type="button" data-color="ink" aria-label="Ink" aria-pressed="true"></button>
+            <button class="pad-swatch" type="button" data-color="red" aria-label="Red" aria-pressed="false"></button>
+            <button class="pad-swatch" type="button" data-color="blue" aria-label="Blue" aria-pressed="false"></button>
+          </div>
+          <label class="pad-width">
+            <span>Line</span>
+            <input id="pad-width" type="range" min="2" max="24" step="1" value="6" />
+          </label>
+          <div class="pad-group">
+            <button class="btn pad-tool" id="pad-undo" type="button">Undo</button>
+            <button class="btn pad-tool" id="pad-clear" type="button">Clear</button>
+          </div>
+          <label class="pad-bg-pick" id="pad-bg-pick" hidden>
+            <span>Draw on</span>
+            <select class="input" id="pad-bg"></select>
+          </label>
+        </div>
+        <div class="pad-stage" id="pad-stage">
+          <div class="pad-board" id="pad-board">
+            <div class="pad-bg" id="pad-bg-layer" aria-hidden="true"></div>
+            <canvas class="pad-canvas" id="pad-canvas" role="img" aria-label="Drawing area. Draw with a pen."></canvas>
+          </div>
+        </div>
+        <div class="pad-send">
+          <div class="head-menu-wrap pad-send-wrap">
+            <button class="btn primary" id="pad-send" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="pad-send-menu">Send to tutor</button>
+            <div class="menu pad-send-menu" id="pad-send-menu" role="menu" aria-labelledby="pad-send" hidden></div>
+          </div>
+          <p class="status pad-status" id="pad-status" role="status"></p>
+        </div>
+      </aside>
   </div>
 
   <form class="composer" id="composer">
@@ -238,42 +291,25 @@
 
   <dialog class="settings" id="settings" aria-labelledby="settings-heading">
     <div class="settings-col">
-      <div class="settings-head">
-        <h2 id="settings-heading">Settings</h2>
-        <form method="dialog"><button class="btn text" value="close">Close</button></form>
+      <div class="settings-top">
+        <div class="settings-head">
+          <h2 id="settings-heading">Settings</h2>
+          <form method="dialog"><button class="btn text" value="close">Close</button></form>
+        </div>
+        <div class="settings-tabs" id="settings-tabs" role="tablist" aria-label="Settings">
+          <button class="settings-tab" id="tab-btn-models" type="button" role="tab" data-tab="models" aria-selected="true" aria-controls="tab-models">Models</button>
+          <button class="settings-tab" id="tab-btn-learning" type="button" role="tab" data-tab="learning" aria-selected="false" aria-controls="tab-learning" tabindex="-1">Learning</button>
+          <button class="settings-tab" id="tab-btn-plugins" type="button" role="tab" data-tab="plugins" aria-selected="false" aria-controls="tab-plugins" tabindex="-1">Plugins</button>
+          <button class="settings-tab" id="tab-btn-sync" type="button" role="tab" data-tab="sync" aria-selected="false" aria-controls="tab-sync" tabindex="-1">Sync</button>
+          <button class="settings-tab" id="tab-btn-pen" type="button" role="tab" data-tab="pen" aria-selected="false" aria-controls="tab-pen" tabindex="-1">Pen</button>
+          <button class="settings-tab" id="tab-btn-appearance" type="button" role="tab" data-tab="appearance" aria-selected="false" aria-controls="tab-appearance" tabindex="-1">Appearance</button>
+        </div>
       </div>
+      <div class="settings-panel" role="tabpanel" id="tab-models" aria-labelledby="tab-btn-models">
       <section class="settings-section" aria-labelledby="roles-heading">
         <h2 id="roles-heading">Model roles</h2>
         <p class="help">Only Tutor is required.</p>
         <div class="model-form" id="model-form"></div>
-      </section>
-      <section class="settings-section" aria-labelledby="learning-heading">
-        <h2 id="learning-heading">Learning</h2>
-        <fieldset class="starting-point" id="starting-point">
-          <legend>Starting point for new sessions</legend>
-          <label>
-            <span class="starting-point-row"><input type="radio" name="starting-point" value="measure" /> Measure me</span>
-            <span class="help">A few questions in each area, so the plan starts where you do.</span>
-          </label>
-          <label>
-            <span class="starting-point-row"><input type="radio" name="starting-point" value="quick" /> Quick check</span>
-            <span class="help">At most five questions, on what would change the plan most.</span>
-          </label>
-          <label>
-            <span class="starting-point-row"><input type="radio" name="starting-point" value="new" /> I'm new to this</span>
-            <span class="help">No questions. The first check in each section does the measuring.</span>
-          </label>
-        </fieldset>
-        <p class="help">How much I check what you already know before planning. You can change it per session.</p>
-        <p class="status" id="starting-point-status" role="status"></p>
-      </section>
-      <section class="settings-section" aria-labelledby="focus-heading">
-        <h2 id="focus-heading">Focus</h2>
-        <div class="focus-choice" id="focus-choice">
-          <label><input type="checkbox" data-focus="fullscreen" /> Full screen in sessions</label>
-          <label id="focus-dnd-row" hidden><input type="checkbox" data-focus="dnd" /> <span id="focus-dnd-label">Silence notifications in sessions</span></label>
-          <label><input type="checkbox" data-focus="breaks" /> Break nudge every 50 min</label>
-        </div>
       </section>
       <section class="settings-section" id="providers-section" aria-labelledby="providers-name">
         <h2 class="section-head" id="providers-heading">
@@ -288,6 +324,8 @@
           <div class="provider-list" id="provider-list"></div>
         </div>
       </section>
+    </div>
+    <div class="settings-panel" role="tabpanel" id="tab-sync" aria-labelledby="tab-btn-sync" hidden>
       <section class="settings-section" id="sync-section" aria-labelledby="sync-name">
         <h2 class="section-head" id="sync-heading">
           <button class="section-toggle" id="sync-toggle" type="button" aria-expanded="false" aria-controls="sync-body">
@@ -360,6 +398,36 @@
           <p class="status" id="sync-status" role="status"></p>
         </div>
       </section>
+    </div>
+    <div class="settings-panel" role="tabpanel" id="tab-learning" aria-labelledby="tab-btn-learning" hidden>
+      <section class="settings-section" aria-labelledby="learning-heading">
+        <h2 id="learning-heading">Learning</h2>
+        <fieldset class="starting-point" id="starting-point">
+          <legend>Starting point for new sessions</legend>
+          <label>
+            <span class="starting-point-row"><input type="radio" name="starting-point" value="measure" /> Measure me</span>
+            <span class="help">A few questions in each area, so the plan starts where you do.</span>
+          </label>
+          <label>
+            <span class="starting-point-row"><input type="radio" name="starting-point" value="quick" /> Quick check</span>
+            <span class="help">At most five questions, on what would change the plan most.</span>
+          </label>
+          <label>
+            <span class="starting-point-row"><input type="radio" name="starting-point" value="new" /> I'm new to this</span>
+            <span class="help">No questions. The first check in each section does the measuring.</span>
+          </label>
+        </fieldset>
+        <p class="help">How much I check what you already know before planning. You can change it per session.</p>
+        <p class="status" id="starting-point-status" role="status"></p>
+      </section>
+      <section class="settings-section" aria-labelledby="focus-heading">
+        <h2 id="focus-heading">Focus</h2>
+        <div class="focus-choice" id="focus-choice">
+          <label><input type="checkbox" data-focus="fullscreen" /> Full screen in sessions</label>
+          <label id="focus-dnd-row" hidden><input type="checkbox" data-focus="dnd" /> <span id="focus-dnd-label">Silence notifications in sessions</span></label>
+          <label><input type="checkbox" data-focus="breaks" /> Break nudge every 50 min</label>
+        </div>
+      </section>
       <section class="settings-section" aria-labelledby="libraries-heading">
         <h2 id="libraries-heading">Libraries</h2>
         <p class="help">Folders of references every agent can search: exam guides, question banks, notes. Only their text syncs; the copied originals stay on the device that imported them.</p>
@@ -380,6 +448,8 @@
         </div>
         <p class="status" id="image-set-status" role="status"></p>
       </section>
+    </div>
+    <div class="settings-panel" role="tabpanel" id="tab-plugins" aria-labelledby="tab-btn-plugins" hidden>
       <section class="settings-section" aria-labelledby="plugins-heading">
         <h2 id="plugins-heading">Plugins</h2>
         <div class="lock-list" id="plugin-lock" hidden></div>
@@ -409,6 +479,46 @@
         </form>
         <p class="status" id="registry-status" role="status"></p>
       </section>
+    </div>
+    <div class="settings-panel" role="tabpanel" id="tab-pen" aria-labelledby="tab-btn-pen" hidden>
+      <section class="settings-section" aria-labelledby="pen-heading">
+        <h2 id="pen-heading">Pen</h2>
+        <p class="help" id="pen-detected">For 2-in-1 laptops, drawing tablets and tablets. These settings apply to the scratch pad in a session.</p>
+        <fieldset class="theme-choice pen-inputs" id="pen-inputs">
+          <legend>Draw on the scratch pad with</legend>
+          <label><input type="radio" name="pen-inputs" value="pen" /> Pen only</label>
+          <label><input type="radio" name="pen-inputs" value="mouse" /> Pen and mouse</label>
+          <label><input type="radio" name="pen-inputs" value="all" /> Pen, mouse and finger</label>
+        </fieldset>
+        <div class="focus-choice" id="pen-toggles">
+          <label><input type="checkbox" data-pen="pressure" /> Line width follows pen pressure</label>
+          <label><input type="checkbox" data-pen="palm" /> Ignore touch while the pen is near the screen</label>
+        </div>
+      </section>
+      <section class="settings-section" aria-labelledby="pen-buttons-heading">
+        <h2 id="pen-buttons-heading">Pen buttons</h2>
+        <p class="help">What each button does on the scratch pad. A button your pen does not have is never pressed, so its setting does nothing.</p>
+        <div class="field">
+          <label for="pen-barrel">Barrel button</label>
+          <select class="input" id="pen-barrel" data-pen-button="barrel"></select>
+        </div>
+        <div class="field">
+          <label for="pen-barrel2">Second barrel button</label>
+          <select class="input" id="pen-barrel2" data-pen-button="barrel2"></select>
+        </div>
+        <div class="field">
+          <label for="pen-eraser">Eraser end</label>
+          <select class="input" id="pen-eraser" data-pen-button="eraser"></select>
+        </div>
+      </section>
+      <section class="settings-section" aria-labelledby="pen-test-heading">
+        <h2 id="pen-test-heading">Try your pen</h2>
+        <p class="help">Hover, draw and press the buttons over the box to see what this device reports.</p>
+        <div class="pen-test" id="pen-test" tabindex="0" role="group" aria-label="Pen test area"></div>
+        <p class="status" id="pen-test-readout">Nothing yet.</p>
+      </section>
+    </div>
+    <div class="settings-panel" role="tabpanel" id="tab-appearance" aria-labelledby="tab-btn-appearance" hidden>
       <section class="settings-section" aria-labelledby="appearance-heading">
         <h2 id="appearance-heading">Appearance</h2>
         <fieldset class="theme-choice" id="theme-choice">
@@ -418,6 +528,7 @@
           <label><input type="radio" name="theme" value="dark" /> Dark</label>
         </fieldset>
       </section>
+    </div>
     </div>
   </dialog>
 

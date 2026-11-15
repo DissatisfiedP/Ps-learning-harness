@@ -357,7 +357,10 @@ async function openApp(scenario, { width = 1440, height = 900, mobile = false, d
   /** A real pointer (CDP mouse events, which Chromium turns into pointer events). */
   const mouse = (type, x, y, buttons = 0) =>
     send('Input.dispatchMouseEvent', { type, x, y, button: type === 'mouseMoved' && !buttons ? 'none' : 'left', buttons, clickCount: type === 'mouseMoved' ? 0 : 1 }, sessionId);
-  return { evaluate, shot, close, mouse };
+  /** Real fingers (CDP touch events): `type` is touchStart, touchMove or touchEnd; `points` are [x, y] pairs. */
+  const touch = (type, points = []) =>
+    send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id })) }, sessionId);
+  return { evaluate, shot, close, mouse, touch };
 }
 
 const HOME = `(() => {
@@ -450,8 +453,19 @@ async function sync() {
   expect(!home.icon && !home.banner, `unconfigured Home shows sync parts: ${JSON.stringify(home)}`);
   await page.evaluate(click('open-settings'));
   await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
-  const order = await page.evaluate(`[...document.querySelectorAll('#settings .settings-section > h2')].map((h) => (h.querySelector('.section-name') ?? h).textContent)`);
-  expect(JSON.stringify(order) === JSON.stringify(['Model roles', 'Learning', 'Focus', 'Providers', 'Sync', 'Libraries', 'Plugins', 'Registries', 'Appearance']), `Settings sections: ${order}`);
+  // Settings is tabs: one panel at a time, each holding its own sections.
+  const tabs = await page.evaluate(`({
+    names: [...document.querySelectorAll('#settings-tabs [role=tab]')].map((t) => t.textContent),
+    selected: [...document.querySelectorAll('#settings-tabs [role=tab][aria-selected=true]')].map((t) => t.dataset.tab),
+    shown: [...document.querySelectorAll('#settings .settings-panel')].filter((p) => !p.hidden).map((p) => p.id),
+    panels: [...document.querySelectorAll('#settings .settings-panel')].map((p) => [p.id, ...[...p.querySelectorAll('.settings-section > h2')].map((h) => (h.querySelector('.section-name') ?? h).textContent)]),
+  })`);
+  expect(JSON.stringify(tabs.names) === JSON.stringify(['Models', 'Learning', 'Plugins', 'Sync', 'Pen', 'Appearance'])
+    && JSON.stringify(tabs.selected) === '["models"]' && JSON.stringify(tabs.shown) === '["tab-models"]'
+    && JSON.stringify(tabs.panels) === JSON.stringify([
+      ['tab-models', 'Model roles', 'Providers'], ['tab-sync', 'Sync'], ['tab-learning', 'Learning', 'Focus', 'Libraries'],
+      ['tab-plugins', 'Plugins', 'Registries'], ['tab-pen', 'Pen', 'Pen buttons', 'Try your pen'], ['tab-appearance', 'Appearance']]),
+    `Settings tabs: ${JSON.stringify(tabs)}`);
   const others = await page.evaluate(`({ providers: document.querySelectorAll('#provider-list .provider').length, plugins: document.querySelectorAll('#plugin-list .plugin').length, roles: document.getElementById('model-form').textContent.trim() })`);
   expect(others.providers === 3 && others.plugins === 2 && others.roles.length > 0, `other Settings sections did not render: ${JSON.stringify(others)}`);
 
@@ -461,6 +475,8 @@ async function sync() {
     && !sections.sync.open && !sections.sync.shown && sections.sync.summary === 'Off', `default sections: ${JSON.stringify(sections)}`);
   await page.evaluate(`document.getElementById('providers-toggle').scrollIntoView({ block: 'center' })`);
   await page.shot('settings-collapsed-desktop');
+  await page.evaluate(click('tab-btn-sync'));
+  expect(await page.evaluate(`!document.getElementById('sync-section').closest('.settings-panel').hidden && document.getElementById('tab-btn-sync').getAttribute('aria-selected') === 'true' && localStorage.getItem('lh.settings.tab') === 'sync'`), 'the Sync tab did not show its panel');
   await page.evaluate(click('sync-toggle'));
   sections = await page.evaluate(SECTIONS);
   expect(sections.sync.open && sections.sync.shown && sections.sync.stored === 'open' && !sections.providers.open, `Sync heading did not expand it: ${JSON.stringify(sections)}`);
@@ -762,15 +778,18 @@ async function sync() {
     const settings = document.getElementById('settings');
     const box = settings.getBoundingClientRect();
     const head = document.querySelector('.settings-head').getBoundingClientRect().top;
+    settings.querySelector('.settings-col').style.minHeight = '3000px'; // a tab can be shorter than the screen
     settings.scrollTop = settings.scrollHeight / 2;
+    const top = document.querySelector('.settings-top').getBoundingClientRect().top;
     return {
       head,
       scrolled: settings.scrollTop > 0,
+      stuck: Math.abs(top - (box.top + settings.clientTop)) < 1,
       viewportTop: box.top + settings.clientTop,
       viewportBottom: box.top + settings.clientTop + settings.clientHeight,
     };
   })()`);
-  expect(sheet.head >= insets.top && sheet.scrolled && sheet.viewportTop >= insets.top && sheet.viewportBottom <= 844 - insets.bottom,
+  expect(sheet.head >= insets.top && sheet.scrolled && sheet.stuck && sheet.viewportTop >= insets.top && sheet.viewportBottom <= 844 - insets.bottom,
     `notched phone Settings: ${JSON.stringify(sheet)}`);
   await page.shot('settings-notch-phone');
   await page.close();
@@ -1666,7 +1685,373 @@ async function exam() {
 }
 const fill2 = (sel, value) => `(() => { const el = ${q(sel)}; el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input')); return true; })()`;
 
-const cases = { ipc, placement, sync, library, map, session, reading, turn, plugins: pluginsCase, practice, 'practice-set': practiceSet, 'practice-resume': practiceResume, exam };
+
+// The scratch pad and the Pen settings tab (ui/scratchpad.js, ui/pen.js):
+// a session's pad docks beside the lesson on a wide screen and is a full
+// overlay on a narrow one, a phone has no pad, strokes / eraser / undo /
+// clear, the pen's buttons, a figure as the background, a drawing sent with
+// the reasoning and the answer (and with a message), kept per session.
+async function pad() {
+  const openSession = async (opts = {}) => {
+    const page = await openApp('none', { query: '&fixture=learn&reading=predict&padFigure=1', ...opts });
+    await until('the session list', () => page.evaluate(`Boolean(document.querySelector('#session-list .session-open'))`));
+    await page.evaluate(`document.querySelector('#session-list .session-open').click()`);
+    await until('the session', () => page.evaluate(`Boolean(document.querySelector('#timeline .debrief'))`));
+    await page.evaluate(`window.__bridge.deliverReading()`);
+    await until('the question card', () => page.evaluate(`Boolean(document.querySelector('#timeline .exercise.pending .ex-form'))`));
+    return page;
+  };
+  const PIXELS = `(() => { const c = document.getElementById('pad-canvas'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n; })()`;
+  const geometry = `(() => { const r = (id) => { const b = document.getElementById(id).getBoundingClientRect(); return [b.left, b.top, b.width, b.height].map(Math.round); };
+    return { mode: document.getElementById('pad').dataset.mode, docked: document.getElementById('conversation').classList.contains('pad-docked'),
+      pad: r('pad'), messages: r('messages'), stage: r('pad-stage'), board: r('pad-board'), modeShown: !document.getElementById('pad-mode').hidden, vw: innerWidth, vh: innerHeight }; })()`;
+  const draw = async (page, points) => {
+    const [x, y, w, h] = await page.evaluate(`(() => { const b = document.getElementById('pad-canvas').getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; })()`);
+    const at = ([fx, fy]) => [x + fx * w, y + fy * h];
+    const [x0, y0] = at(points[0]);
+    await page.mouse('mouseMoved', x0, y0);
+    await page.mouse('mousePressed', x0, y0, 1);
+    for (const p of points.slice(1)) await page.mouse('mouseMoved', ...at(p), 1);
+    await page.mouse('mouseReleased', ...at(points.at(-1)), 0);
+  };
+  /** A synthetic pen event (the headless browser has no pen); `at` is a fraction of the canvas. */
+  const penEvent = (target, type, buttons, at = [0.5, 0.5]) => `(() => { const el = ${target}; const b = document.getElementById('pad-canvas').getBoundingClientRect();
+    el.dispatchEvent(new PointerEvent('${type}', { pointerType: 'pen', pointerId: 7, isPrimary: true, buttons: ${buttons}, pressure: ${buttons & 1 ? 0.6 : 0},
+      clientX: b.left + ${at[0]} * b.width, clientY: b.top + ${at[1]} * b.height, bubbles: true, cancelable: true })); })()`;
+  const nonWhite = (dataUrl) => `new Promise((done) => { const img = new Image(); img.onload = () => { const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const x = c.getContext('2d'); x.drawImage(img, 0, 0); const d = x.getImageData(0, 0, c.width, c.height).data; let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] < 250 || d[i + 1] < 250 || d[i + 2] < 250) n++;
+    done({ n, corner: [...x.getImageData(0, 0, 1, 1).data] }); }; img.src = ${JSON.stringify(dataUrl)}; })`;
+  const line = [[0.2, 0.5], [0.4, 0.45], [0.6, 0.55], [0.8, 0.5]];
+
+  // --- a wide screen: docked beside the lesson ---
+  let page = await openSession();
+  expect(await page.evaluate(shown('#pad-toggle')) && !(await page.evaluate(shown('#pad'))), 'the pad toggle is not offered in a learn session, or the pad starts open');
+  await page.evaluate(click('pad-toggle'));
+  await until('the pad', () => page.evaluate(shown('#pad')));
+  let g = await page.evaluate(geometry);
+  expect(g.mode === 'dock' && g.docked && g.pad[0] + g.pad[2] === g.vw && g.messages[0] + g.messages[2] <= g.pad[0] + 1 && g.modeShown
+    && g.board[2] <= g.stage[2] && g.board[3] <= g.stage[3] && g.board[2] > 300, `docked pad: ${JSON.stringify(g)}`);
+  expect(await page.evaluate(`document.getElementById('pad-toggle').getAttribute('aria-expanded') === 'true' && document.activeElement === document.getElementById('pad-title')`), 'the pad did not take focus when opened');
+  await page.shot('pad-docked');
+
+  // Strokes, undo, clear, eraser.
+  expect(await page.evaluate(PIXELS) === 0 && await page.evaluate(`document.getElementById('pad-undo').disabled && document.getElementById('pad-clear').disabled`), 'a new pad is not empty');
+  await draw(page, line);
+  const inked = await page.evaluate(PIXELS);
+  expect(inked > 300 && await page.evaluate(`!document.getElementById('pad-undo').disabled && !document.getElementById('pad-clear').disabled`), `a stroke left ${inked} pixels`);
+  await page.evaluate(click('pad-undo'));
+  expect(await page.evaluate(PIXELS) === 0, 'undo did not remove the stroke');
+  await draw(page, line);
+  await draw(page, [[0.3, 0.2], [0.3, 0.8]]);
+  const both = await page.evaluate(PIXELS);
+  await page.evaluate(click('pad-clear'));
+  expect(await page.evaluate(PIXELS) === 0 && /Cleared/.test(await page.evaluate(`document.getElementById('pad-status').textContent`)), 'clear did not empty the pad');
+  await page.evaluate(click('pad-undo'));
+  const restored = await page.evaluate(PIXELS);
+  expect(restored === both && restored > inked, `undo after clear brings both strokes back (${restored} vs ${both})`);
+  await page.evaluate(click('pad-eraser'));
+  await draw(page, [[0.1, 0.25], [0.5, 0.25]]); // across the vertical stroke only
+  const erased = await page.evaluate(PIXELS);
+  expect(erased > 0 && erased < restored, `the eraser removes a whole stroke (${erased} of ${restored})`);
+  await page.evaluate(click('pad-pen'));
+  await page.evaluate(click('pad-undo'));
+  expect(await page.evaluate(PIXELS) === restored, 'undoing an erase did not bring the stroke back');
+
+  // Pen buttons: the barrel button held erases; as an action it undoes; touch and mouse follow the setting.
+  await page.evaluate(`localStorage.setItem('lh.pen', JSON.stringify({ inputs: 'pen' }))`);
+  await draw(page, [[0.1, 0.9], [0.9, 0.9]]);
+  expect(await page.evaluate(PIXELS) === restored, 'the mouse drew while Settings says pen only');
+  await page.evaluate(`localStorage.setItem('lh.pen', JSON.stringify({ inputs: 'mouse' }))`);
+  await page.evaluate(penEvent('document.getElementById("pad-canvas")', 'pointerdown', 3, [0.3, 0.25]));
+  await page.evaluate(penEvent('document.getElementById("pad-canvas")', 'pointerup', 0, [0.3, 0.25]));
+  const penErased = await page.evaluate(PIXELS);
+  expect(penErased > 0 && penErased < restored, `the pen's barrel button held erases (${penErased} of ${restored})`);
+  await page.evaluate(`localStorage.setItem('lh.pen', JSON.stringify({ barrel: 'undo' }))`);
+  await page.evaluate(penEvent('document.body', 'pointermove', 0));
+  await page.evaluate(penEvent('document.body', 'pointerdown', 2));
+  expect(await page.evaluate(PIXELS) === restored, 'the barrel button set to Undo did not undo');
+  await page.evaluate(`localStorage.removeItem('lh.pen')`);
+
+  // The figure the tutor made is a background; the picture sent has it under the strokes.
+  expect(await page.evaluate(shown('#pad-bg-pick')) && await page.evaluate(`[...document.getElementById('pad-bg').options].map((o) => o.textContent).join('|')`) === 'Plain paper|Figure 1: Voltage divider', 'the figure is not offered as a background');
+  expect(await page.evaluate(`document.querySelector('#pad-bg-layer svg') === null`), 'a background is showing before it was picked');
+
+  // Sending with the open question: reasoning or answer.
+  await page.evaluate(click('pad-send'));
+  const items = await page.evaluate(`[...document.querySelectorAll('#pad-send-menu .menu-item')].map((b) => b.textContent)`);
+  expect(JSON.stringify(items) === JSON.stringify(['With my reasoning', 'With my answer']), `send targets for a free question: ${JSON.stringify(items)}`);
+  await page.evaluate(`document.querySelector('#pad-send-menu .menu-item').click()`);
+  await until('the sketch on the reasoning', () => page.evaluate(`document.querySelectorAll('#timeline .ex-sketch:not([hidden])').length === 1`));
+  let staged = await page.evaluate(argsOf('stage_image'));
+  expect(staged.length === 1 && staged[0].data.startsWith('data:image/png;base64,') && staged[0].name === 'Scratch pad.png', `staged: ${JSON.stringify(staged.map((s) => s.name))}`);
+  const plain = await page.evaluate(nonWhite(staged[0].data));
+  expect(plain.corner.join() === '255,255,255,255' && plain.n > 300, `the picture is ink on white paper: ${JSON.stringify(plain)}`);
+
+  await page.evaluate(`(() => { const s = document.getElementById('pad-bg'); s.value = 'A1'; s.dispatchEvent(new Event('change')); })()`);
+  expect(await page.evaluate(`Boolean(document.querySelector('#pad-bg-layer svg')) && document.getElementById('pad-bg-layer').getClientRects().length > 0`), 'the figure did not become the background');
+  await page.shot('pad-figure');
+  await page.evaluate(click('pad-send'));
+  await page.evaluate(`document.querySelectorAll('#pad-send-menu .menu-item')[1].click()`);
+  await until('the sketch on the answer', () => page.evaluate(`document.querySelectorAll('#timeline .ex-sketch:not([hidden])').length === 2`));
+  staged = await page.evaluate(argsOf('stage_image'));
+  const withFigure = await page.evaluate(nonWhite(staged[1].data));
+  expect(staged[1].name === 'Scratch pad on Figure 1: Voltage divider.png' && withFigure.n > plain.n && withFigure.corner.join() === '255,255,255,255',
+    `the figure is in the picture: ${JSON.stringify({ name: staged[1].name, plain: plain.n, withFigure: withFigure.n })}`);
+  await page.shot('pad-sketches-attached');
+
+  // Replacing a sketch drops the staged one.
+  await page.evaluate(click('pad-send'));
+  await page.evaluate(`document.querySelector('#pad-send-menu .menu-item').click()`);
+  await until('the replacement', () => page.evaluate(`${argsOf('stage_image')}.length === 3`));
+  await until('the replaced sketch dropped', () => page.evaluate(`${argsOf('unstage_image')}.length === 1`));
+
+  // The answer goes with both drawings and no typed answer.
+  await page.evaluate(`(() => { const card = document.querySelector('#timeline .exercise.pending');
+    card.querySelector('.ex-form .confidence input[value="70"]').click();
+    card.querySelector('.ex-form button[type="submit"]').click(); })()`);
+  await until('the answer sent', () => page.evaluate(`${argsOf('answer')}.length === 1`));
+  const sent = (await page.evaluate(argsOf('answer')))[0].payload;
+  expect(sent.answer === '' && sent.sketches.length === 2 && sent.sketches[0].in === 'reasoning' && sent.sketches[1].in === 'answer'
+    && sent.sketches.every((s) => s.attachment.kind === 'image' && /^attachments\/2026\/STAGED\d+\.png$/.test(s.attachment.path)), `answer payload: ${JSON.stringify(sent)}`);
+  await until('the answered card shows both sketches', () => page.evaluate(`document.querySelectorAll('#timeline .you-sketch img[src^="data:image/png"]').length === 2`));
+  expect(await page.evaluate(`[...document.querySelectorAll('#timeline .you-sketch figcaption')].map((f) => f.textContent).join('|')`) === 'Sketch · with your reasoning|Sketch · with your answer', 'the sent sketches are not captioned');
+
+  // With no question open, a drawing goes to the next message as a chip.
+  await page.evaluate(click('pad-send'));
+  await until('the chip', () => page.evaluate(`document.querySelectorAll('#attach-chips li').length === 1 && !document.getElementById('composer-attach').hidden`));
+  expect(await page.evaluate(`document.querySelector('#attach-chips .chip-name').textContent`) === 'Scratch pad on Figure 1: Voltage divider.png', 'the message chip is not the drawing');
+
+  // Dock / overlay switch, Escape only closes the overlay, the drawing outlives closing.
+  await page.evaluate(click('pad-mode'));
+  g = await page.evaluate(geometry);
+  expect(g.mode === 'overlay' && !g.docked && g.pad[2] === g.vw && g.pad[3] === g.vh, `overlay: ${JSON.stringify(g)}`);
+  expect(await page.evaluate(`document.querySelector('.pad-mode-dock').getClientRects().length > 0 && document.querySelector('.pad-mode-expand').getClientRects().length === 0
+    && document.getElementById('pad-mode').getAttribute('aria-label') === 'Dock beside the lesson'`), 'the mode switch shows the wrong icon or name in the overlay');
+  await page.shot('pad-overlay');
+  await page.evaluate(click('pad-mode'));
+  expect((await page.evaluate(geometry)).mode === 'dock', 'the switch did not dock the pad again');
+  expect(await page.evaluate(`document.querySelector('.pad-mode-expand').getClientRects().length > 0 && document.querySelector('.pad-mode-dock').getClientRects().length === 0
+    && document.getElementById('pad-mode').getAttribute('aria-label') === 'Show over the lesson'`), 'the mode switch shows the wrong icon or name when docked');
+  await page.evaluate(`document.getElementById('pad-pen').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  expect(await page.evaluate(shown('#pad')), 'Escape closed a docked pad');
+  await page.evaluate(click('pad-close'));
+  g = await page.evaluate(geometry);
+  expect(!(await page.evaluate(shown('#pad'))) && !g.docked && g.messages[2] >= g.vw - 20, `after closing: ${JSON.stringify(g)}`);
+  expect(await page.evaluate(`document.activeElement === document.getElementById('pad-toggle') && document.getElementById('pad-toggle').getAttribute('aria-expanded') === 'false'`), 'focus did not return to the toggle');
+  await page.evaluate(click('pad-toggle'));
+  await until('the pad again', () => page.evaluate(shown('#pad')));
+  expect(await page.evaluate(PIXELS) > 0 && await page.evaluate(`localStorage.getItem('lh.pad.L1') !== null`), 'the drawing was lost on closing');
+  expect(await page.evaluate(`document.getElementById('pad-bg').value`) === 'A1' && await page.evaluate(shown('#pad-bg-layer svg')), 'the background was lost on closing');
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+
+  // --- a narrow tablet: always the full overlay, Escape closes it ---
+  page = await openSession({ width: 800, height: 1000, dark: true });
+  await page.evaluate(click('pad-toggle'));
+  await until('the pad', () => page.evaluate(shown('#pad')));
+  g = await page.evaluate(geometry);
+  expect(g.mode === 'overlay' && !g.modeShown && !g.docked && g.pad[2] === 800 && g.pad[3] === 1000, `narrow pad: ${JSON.stringify(g)}`);
+  await draw(page, line);
+  expect(await page.evaluate(PIXELS) > 300, 'nothing drew on the narrow pad');
+  // Dark theme: the ink is light on the dark paper (the picture sent is still dark on white).
+  const lum = await page.evaluate(`(() => { const c = document.getElementById('pad-canvas'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 250) return (d[i] + d[i + 1] + d[i + 2]) / 3; return -1; })()`);
+  expect(lum > 150, `the ink is not light in the dark theme: ${lum}`);
+  await page.shot('pad-overlay-dark');
+  await page.evaluate(`document.getElementById('pad-pen').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  expect(!(await page.evaluate(shown('#pad'))), 'Escape did not close the overlay');
+  await page.close();
+
+  // --- a phone: no pad ---
+  page = await openSession({ width: 390, height: 844, mobile: true });
+  expect(!(await page.evaluate(shown('#pad-toggle'))) && !(await page.evaluate(shown('#pad'))), 'a phone offers the scratch pad');
+  await page.close();
+
+  // --- Settings → Pen ---
+  page = await openApp('none');
+  await page.evaluate(click('open-settings'));
+  await until('Settings', () => page.evaluate(`document.getElementById('settings').open`));
+  await page.evaluate(`document.getElementById('tab-btn-models').focus()`);
+  const key = (name) => page.evaluate(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: '${name}', bubbles: true }))`);
+  const selected = () => page.evaluate(`document.querySelector('#settings-tabs [aria-selected=true]').dataset.tab + ':' + [...document.querySelectorAll('#settings .settings-panel')].filter((p) => !p.hidden).length + ':' + document.activeElement.dataset.tab`);
+  await key('ArrowRight');
+  expect(await selected() === 'learning:1:learning', 'ArrowRight did not move to the next tab');
+  await key('End');
+  expect(await selected() === 'appearance:1:appearance', 'End did not go to the last tab');
+  await key('ArrowRight');
+  expect(await selected() === 'models:1:models', 'ArrowRight did not wrap to the first tab');
+  await page.evaluate(click('tab-btn-pen'));
+  await page.shot('settings-pen');
+  await page.evaluate(`(() => { const s = document.getElementById('pen-barrel'); s.value = 'color'; s.dispatchEvent(new Event('change'));
+    document.querySelector('#pen-inputs input[value="all"]').click(); document.querySelector('#pen-toggles input[data-pen="palm"]').click(); })()`);
+  const saved = await page.evaluate(`JSON.parse(localStorage.getItem('lh.pen'))`);
+  expect(saved.barrel === 'color' && saved.inputs === 'all' && saved.palm === false, `saved pen settings: ${JSON.stringify(saved)}`);
+  expect(await page.evaluate(`[...document.getElementById('pen-eraser').options].map((o) => o.value).join()`) === 'none,erase,undo,color,width,pad'
+    && await page.evaluate(`document.getElementById('pen-eraser').value`) === 'erase', 'the eraser end does not default to erasing');
+  await page.evaluate(`document.getElementById('pen-test').dispatchEvent(new PointerEvent('pointermove', { pointerType: 'pen', pointerId: 3, buttons: 34, pressure: 0.4, bubbles: true }))`);
+  const readout = await page.evaluate(`document.getElementById('pen-test-readout').textContent`);
+  expect(/pen · pressure 0\.40/.test(readout) && /barrel button \+ eraser end down/.test(readout), `the pen test readout: ${readout}`);
+  await page.evaluate(`document.getElementById('settings').close()`);
+  await page.evaluate(click('open-settings'));
+  await until('Settings again', () => page.evaluate(`document.getElementById('settings').open`));
+  expect(await page.evaluate(`document.querySelector('#settings-tabs [aria-selected=true]').dataset.tab`) === 'pen', 'Settings did not reopen on the last tab');
+  await page.evaluate(`localStorage.removeItem('lh.settings.tab')`); // the next case starts on the first tab
+  const penErrors = await page.evaluate('window.__errors');
+  expect(penErrors.length === 0, `page errors: ${penErrors.join(' | ')}`);
+  await page.close();
+  console.log('pad: toggle in a learn session (not on a phone); docked beside the lesson on a wide screen with a dock/overlay switch, always an overlay on a narrow one; strokes, undo, clear, eraser; pen-only setting and the pen buttons (hold to erase, undo); the tutor’s figure as the background and in the picture; a drawing goes with the reasoning, the answer or the next message and shows on the answered card; kept per session; Settings tabs with arrow keys and Settings → Pen');
+}
+
+// Touch and the graphs: the head names only the current phase, a title's
+// formula is drawn as Unicode on the Map and the plan diagram, and two
+// fingers zoom the plan diagram (a pinch never zooms the page).
+async function touchCase() {
+  const page = await openApp('none', { query: '&fixture=learn&mathTitle=1', reducedMotion: true });
+  await until('the session list', () => page.evaluate(`Boolean(document.querySelector('#session-list .session-open'))`));
+  await page.evaluate(`document.querySelector('#session-list .session-open').click()`);
+  await until('the Plan button', () => page.evaluate(`!document.getElementById('plan-toggle').hidden`));
+
+  // The head: one phase on screen, all four for a screen reader.
+  const phase = await page.evaluate(`({ shown: [...document.querySelectorAll('#phase li')].filter((li) => li.getBoundingClientRect().width > 4).map((li) => li.textContent),
+    all: document.querySelectorAll('#phase li').length, current: document.querySelector('#phase li[aria-current="step"]')?.textContent })`);
+  expect(phase.shown.join('|') === 'Teach 1/2' && phase.all === 4 && phase.current === 'Teach 1/2', `phase nav: ${JSON.stringify(phase)}`);
+  await page.shot('head-phase');
+
+  // The plan diagram at idea level: the formula is Unicode.
+  await page.evaluate(click('plan-toggle'));
+  await until('the plan sheet', () => page.evaluate(`document.getElementById('plan-panel').open`));
+  await page.evaluate(`[...document.querySelectorAll('#plan-panel .plan-level')].find((b) => /idea/i.test(b.textContent)).click()`);
+  await until('the idea boxes', () => page.evaluate(`[...document.querySelectorAll('#plan-panel .plan-node')].some((g) => /Limit/.test(g.textContent))`));
+  const label = await page.evaluate(`[...document.querySelectorAll('#plan-panel .plan-node text')].map((t) => t.textContent).join(' ')`);
+  expect(/αₙ/.test(label) && !/\\$/.test(label) && !/\\\\alpha/.test(label), `plan label: ${label}`);
+
+  // Two fingers zoom the diagram about their midpoint.
+  const scaleOf = `parseFloat(/scale\\(([\\d.]+)\\)/.exec(document.querySelector('#plan-panel .plan-view').style.transform)?.[1])`;
+  const [sx, sy, sw, sh] = await page.evaluate(`(() => { const b = document.querySelector('#plan-panel .plan-stage').getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; })()`);
+  const [cx, cy] = [sx + sw / 2, sy + sh / 2];
+  const before = await page.evaluate(scaleOf);
+  await page.touch('touchStart', [[cx - 40, cy], [cx + 40, cy]]);
+  await page.touch('touchMove', [[cx - 90, cy], [cx + 90, cy]]);
+  await page.touch('touchMove', [[cx - 140, cy], [cx + 140, cy]]);
+  const during = await page.evaluate(scaleOf);
+  await page.touch('touchEnd', []);
+  expect(during > before * 1.5 && (await page.evaluate(`document.querySelector('#plan-panel .plan-stage').dataset.dragging`)) === undefined, `a pinch zooms the diagram (${before} → ${during})`);
+  // Ctrl+wheel (a touchpad pinch) is the diagram's over it, and nobody's elsewhere.
+  const wheel = (target) => `(() => { const e = new WheelEvent('wheel', { ctrlKey: true, deltaY: -10, cancelable: true, bubbles: true }); ${target}.dispatchEvent(e); return e.defaultPrevented; })()`;
+  expect(await page.evaluate(wheel(`document.querySelector('#plan-panel .plan-stage')`)) && await page.evaluate(wheel('document.body')), 'ctrl+wheel was left to the page');
+  const pinchEvent = (type) => `(() => { const e = new Event('${type}', { cancelable: true, bubbles: true }); document.body.dispatchEvent(e); return e.defaultPrevented; })()`;
+  expect(await page.evaluate(pinchEvent('gesturestart')), 'a gesture over the page was left to the engine');
+  await page.evaluate(`document.getElementById('plan-panel').close()`);
+
+  // The Map: the formula in an idea's title.
+  await page.evaluate(click('back'));
+  await until('Home', () => page.evaluate(shown('#start')));
+  await page.evaluate(click('open-map'));
+  await until('the map', () => page.evaluate(`Boolean(${q('#map-page .map-a11y input[data-key="limit"]')})`));
+  const entry = await page.evaluate(`${q('#map-page .map-a11y input[data-key="limit"]')}.closest('label').textContent`);
+  expect(/Limit αₙ → 0/.test(entry), `map title: ${entry}`);
+  const errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+  console.log('touch: the head shows only the current phase (all four for screen readers), a formula in a title is Unicode on the plan diagram and the Map, two fingers zoom the plan diagram, pinch gestures and ctrl+wheel are cancelled for the page');
+}
+// The scratch pad on the Practice screen: beside a set's problems (a drawing
+// goes with one problem's answer, kept with the draft, handed in with the
+// set and shown on the review), with a one-at-a-time answer (a chip in the
+// composer), and on a timed exam paper (saved with the draft).
+async function padPractice() {
+  const PIXELS = `(() => { const c = document.getElementById('pad-canvas'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n; })()`;
+  const draw = async (page) => {
+    const [x, y, w, h] = await page.evaluate(`(() => { const b = document.getElementById('pad-canvas').getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; })()`);
+    await page.mouse('mouseMoved', x + 0.2 * w, y + 0.5 * h);
+    await page.mouse('mousePressed', x + 0.2 * w, y + 0.5 * h, 1);
+    for (const f of [0.4, 0.6, 0.8]) await page.mouse('mouseMoved', x + f * w, y + (0.4 + f / 5) * h, 1);
+    await page.mouse('mouseReleased', x + 0.8 * w, y + 0.56 * h, 0);
+  };
+  const openPad = async (page, id) => {
+    await until('the pad toggle', () => page.evaluate(shown(`#${id}`)));
+    await page.evaluate(click(id));
+    await until('the pad', () => page.evaluate(shown('#pad')));
+    await draw(page);
+    expect(await page.evaluate(PIXELS) > 300, 'nothing drew on the pad');
+  };
+  const menu = async (page) => {
+    await page.evaluate(click('pad-send'));
+    return page.evaluate(`[...document.querySelectorAll('#pad-send-menu .menu-item')].map((b) => b.textContent)`);
+  };
+
+  // --- a set: a drawing with problem 2's answer ---
+  let page = await openApp('none', PRACTICE);
+  await until('the review cue', () => page.evaluate(shown('#review-cue')));
+  await page.evaluate(choose('review-cue-format', 'A set of problems'));
+  await page.evaluate(click('practise-due'));
+  await until('every problem', () => page.evaluate(`${qa('#practice-flow .problem')}.length === 3`));
+  await openPad(page, 'practice-pad-toggle');
+  const docked = await page.evaluate(`({ docked: document.getElementById('practice').classList.contains('pad-docked'), toggle: document.getElementById('practice-pad-toggle').getAttribute('aria-expanded'),
+    learnToggle: ${shown('#pad-toggle')}, pad: document.getElementById('pad').getBoundingClientRect().right === innerWidth })`);
+  expect(docked.docked && docked.toggle === 'true' && !docked.learnToggle && docked.pad, `docked beside the set: ${JSON.stringify(docked)}`);
+  await page.shot('pad-practice-set');
+  const items = await menu(page);
+  expect(items.join('|') === 'With my answer to problem 1|With my answer to problem 2|With my answer to problem 3', `set targets: ${JSON.stringify(items)}`);
+  await page.evaluate(`document.querySelectorAll('#pad-send-menu .menu-item')[1].click()`);
+  await until('the sketch on problem 2', () => page.evaluate(`${qa('#practice-flow .problem')}[1].querySelectorAll('.ex-sketch:not([hidden])').length === 1`));
+  const kept = await page.evaluate(`Object.values(JSON.parse(localStorage.getItem(Object.keys(localStorage).find((k) => k.startsWith('lh.practice.draft.'))))).map((d) => d.sketch?.kind)`);
+  expect(kept.join() === 'image' && /^1 of 3 answered/.test(await page.evaluate(`${textOf('#practice-note')}`)), `the draft keeps the drawing: ${JSON.stringify(kept)}`);
+  // Reopening the set restores the drawing from the draft.
+  await page.evaluate(click('pad-close'));
+  await page.evaluate(click('practice-back'));
+  await until('Home', () => page.evaluate(shown('#start')));
+  await page.evaluate(`${qa('#session-list .session-open')}.find((b) => /Practice/.test(b.textContent)).click()`);
+  await until('the drawing restored', () => page.evaluate(`${qa('#practice-flow .problem')}[1]?.querySelectorAll('.ex-sketch:not([hidden]) img[src^="data:image/png"]').length === 1`));
+  // Hand in: problem 2 goes with a drawing and no text.
+  await page.evaluate(click('practice-primary'));
+  await until('the review', () => page.evaluate(`${qa('#practice-flow .result')}.length === 3`));
+  const handed = (await page.evaluate(argsOf('practice_submit_set')))[0].answers;
+  expect(handed.length === 1 && handed[0].problemId === 'p2' && handed[0].text === '' && handed[0].sketch.kind === 'image', `hand-in: ${JSON.stringify(handed)}`);
+  await until('the drawing on the review', () => page.evaluate(`document.querySelectorAll('#practice-flow .you-sketch img[src^="data:image/png"]').length === 1`));
+  await until('the draft cleared', () => page.evaluate(`localStorage.getItem(Object.keys(localStorage).find((k) => k.startsWith('lh.practice.draft.')) ?? 'x') === null`));
+  let errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+
+  // --- one at a time: the drawing becomes a chip on the answer ---
+  page = await openApp('none', PRACTICE);
+  await until('the review cue', () => page.evaluate(shown('#review-cue')));
+  await page.evaluate(choose('review-cue-format', 'One at a time'));
+  await page.evaluate(click('practise-due'));
+  await until('the answer box', () => page.evaluate(shown('#composer')));
+  await openPad(page, 'practice-pad-toggle');
+  // One target: the first click sends at once and there is no menu.
+  const one = await menu(page);
+  expect(one.length === 0, `stream targets: ${JSON.stringify(one)}`);
+  await until('the chip', () => page.evaluate(`document.querySelectorAll('#attach-chips li').length === 1 && !document.getElementById('composer-attach').hidden`));
+  errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+
+  // --- an exam paper: saved with the draft ---
+  page = await openApp('none', EXAM);
+  await openDashboard(page);
+  await page.evaluate(`${q('.exam-start button[type=submit]')}.click()`);
+  await until('the clock', () => page.evaluate(shown('.exam-clock')));
+  await openPad(page, 'practice-pad-toggle');
+  const paper = await menu(page);
+  expect(paper.length === 3 && /^With my answer to problem 1$/.test(paper[0]), `paper targets: ${JSON.stringify(paper)}`);
+  await page.evaluate(`document.querySelectorAll('#pad-send-menu .menu-item')[0].click()`);
+  await until('the sketch on problem 1', () => page.evaluate(`document.querySelectorAll('.exam-paper .ex-sketch:not([hidden])').length === 1`));
+  await until('the draft saved with the drawing', () => page.evaluate(`${argsOf('practice_exam_save')}.some((a) => a.answers.some((x) => x.sketch?.kind === 'image'))`));
+  expect(/1 of 3 answered/.test(await page.evaluate(textOf('.exam-count'))), 'a drawn answer does not count as answered');
+  await page.shot('pad-practice-exam');
+  errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+  console.log('pad-practice: the pad beside a set (a drawing goes with one problem, kept with the draft, restored on reopening, handed in without text and shown on the review), a one-at-a-time answer (a composer chip) and an exam paper (saved with the draft)');
+}
+const cases = { ipc, placement, sync, library, map, session, reading, turn, plugins: pluginsCase, practice, 'practice-set': practiceSet, 'practice-resume': practiceResume, exam, pad, 'pad-practice': padPractice, touch: touchCase };
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases);
 try {
   for (const name of wanted) {

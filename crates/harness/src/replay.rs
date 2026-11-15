@@ -615,6 +615,8 @@ struct Builder {
     /// Calls emitted whose result hasn't been emitted yet, in order.
     open: Vec<String>,
     pending: Option<String>,
+    /// Blocks queued by [`Builder::defer`], flushed after the results.
+    deferred: Vec<ContentBlock>,
 }
 
 impl Builder {
@@ -623,6 +625,7 @@ impl Builder {
             // New text after calls means those calls never got results.
             self.close_open();
         }
+        self.flush_deferred();
         match self.out.last_mut() {
             Some(m) if m.role == Role::Assistant && self.open.is_empty() => m.content.push(block),
             Some(m)
@@ -670,11 +673,13 @@ impl Builder {
 
     fn user_text(&mut self, text: String) {
         self.close_open();
+        self.flush_deferred();
         self.out.push(Message::text(Role::User, text));
     }
 
     fn user_content(&mut self, content: Vec<ContentBlock>) {
         self.close_open();
+        self.flush_deferred();
         self.out.push(Message {
             role: Role::User,
             content,
@@ -696,7 +701,24 @@ impl Builder {
 
     fn finish(mut self) -> Vec<Message> {
         self.close_open();
+        self.flush_deferred();
         self.out
+    }
+
+    /// Content that goes with a tool result but can't ride inside it (a
+    /// learner's drawing): it follows the results as its own user message,
+    /// once every open call has its result.
+    fn defer(&mut self, blocks: Vec<ContentBlock>) {
+        self.deferred.extend(blocks);
+    }
+
+    fn flush_deferred(&mut self) {
+        if self.open.is_empty() && !self.deferred.is_empty() {
+            self.out.push(Message {
+                role: Role::User,
+                content: std::mem::take(&mut self.deferred),
+            });
+        }
     }
 }
 
@@ -812,7 +834,12 @@ pub(crate) fn conversation_with(
                     name: t.name.clone(),
                     arguments: t.args.clone(),
                 }),
-                Some(r) => b.result(&t.call_id, r.content.clone(), r.is_error),
+                Some(r) => {
+                    b.result(&t.call_id, r.content.clone(), r.is_error);
+                    if t.name == "question_ask" {
+                        b.defer(crate::attachments::sketch_blocks(repo, vision, &r.content));
+                    }
+                }
             },
             _ => {}
         }
@@ -1115,6 +1142,52 @@ mod tests {
             blind.contains("[image attached] dot.png (not sent to this model)"),
             "{blind}"
         );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn a_sketch_with_an_answer_follows_the_tool_result_as_an_image() {
+        let repo = std::env::temp_dir().join(format!("lh-replay-sketch-{}", ulid::Ulid::new()));
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let staging = repo.join("staging");
+        let image = crate::attachments::store_image(&staging, png, None).unwrap();
+        crate::attachments::commit(&repo, &staging, std::slice::from_ref(&image)).unwrap();
+        let answer = serde_json::json!({
+            "questionId": "q1", "answer": "", "thinking": "", "dontKnow": false,
+            "sketches": [{ "in": "answer", "path": image.path }],
+        });
+        let ops = vec![
+            text(Role::User, "start"),
+            text(Role::Assistant, "draw it"),
+            call("q1", "question_ask", serde_json::json!({})),
+            result("q1", "question_ask", &answer.to_string(), false),
+            text(Role::Assistant, "good"),
+        ];
+        let with = conversation_with(&ops, Some(&repo), true, true);
+        assert_eq!(with.len(), 5, "{with:?}");
+        assert!(matches!(
+            with[2].content[..],
+            [ContentBlock::ToolResult { .. }]
+        ));
+        assert_eq!(with[3].role, Role::User);
+        assert!(matches!(
+            &with[3].content[..],
+            [ContentBlock::Text { text }, ContentBlock::Image { .. }] if text.contains("with their answer")
+        ));
+        assert_eq!(with[4].role, Role::Assistant);
+        // A model that can't see images is told a drawing exists.
+        let blind = conversation_with(&ops, Some(&repo), false, true);
+        assert!(matches!(
+            &blind[3].content[..],
+            [ContentBlock::Text { text }] if text.contains("not sent to this model")
+        ));
+        // A result with no drawing adds no message.
+        let plain = vec![
+            text(Role::Assistant, "ask"),
+            call("q2", "question_ask", serde_json::json!({})),
+            result("q2", "question_ask", "{\"answer\":\"x\"}", false),
+        ];
+        assert_eq!(conversation_with(&plain, Some(&repo), true, true).len(), 2);
         let _ = std::fs::remove_dir_all(repo);
     }
 

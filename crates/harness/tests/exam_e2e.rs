@@ -412,11 +412,13 @@ fn answers(view: &Value) -> Vec<SetAnswer> {
             problem_id: ids[0].into(),
             text: "6 V".into(),
             confidence: Some(90),
+            sketch: None,
         },
         SetAnswer {
             problem_id: ids[1].into(),
             text: "about 4 V".into(),
             confidence: Some(50),
+            sketch: None,
         },
     ]
 }
@@ -607,6 +609,7 @@ async fn a_paper_runs_from_coverage_targets_to_the_deadline_hand_in_to_marked_ou
         problem_id: "nope".into(),
         text: "x".into(),
         confidence: None,
+        sketch: None,
     }];
     assert!(r.h.practice_exam_save(&id, unknown).is_err());
     r.h.practice_exam_save(&id, ans.clone()).unwrap();
@@ -614,6 +617,21 @@ async fn a_paper_runs_from_coverage_targets_to_the_deadline_hand_in_to_marked_ou
     assert_eq!(practice_events(&r.repo, &id, "examDraft").len(), 1);
     let v = view(&r.h, &id);
     assert_eq!(v["exam"]["draft"][0]["text"], "6 V");
+    // A drawing in the draft leaves staging at once, so the draft and the
+    // hand-in at the deadline survive a restart.
+    let sketch = r
+        .h
+        .stage_image(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+            None,
+        )
+        .unwrap();
+    let mut drawn = ans.clone();
+    drawn[0].sketch = Some(sketch.clone());
+    r.h.practice_exam_save(&id, drawn).unwrap();
+    assert!(r.repo.join(&sketch.path).is_file());
+    let v = view(&r.h, &id);
+    assert_eq!(v["exam"]["draft"][0]["sketch"]["path"], json!(sketch.path));
 
     // The deadline passes with nothing handed in. The app's timer hands in
     // the saved draft by itself, and answers sent now are refused.

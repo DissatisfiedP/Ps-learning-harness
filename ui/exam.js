@@ -13,6 +13,7 @@
 //   the paper is handed in; at the deadline the backend hands in what was
 //   saved (`practice_exam_save`), and the review shows marks per problem.
 
+import { sketchFigure, sketchSlot } from './attachment.js';
 import { confidenceField, confidenceLabel } from './cards.js';
 import { confirmDialog } from './dialog.js';
 import { assistantEl } from './reply.js';
@@ -422,6 +423,7 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
     st = {
       id,
       drafts: new Map(),
+      slots: new Map(),
       seeded: false,
       view: null,
       key: '',
@@ -453,7 +455,9 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
     st.offset = Date.parse(view.exam.now) - Date.now();
     if (!st.seeded) {
       st.seeded = true;
-      for (const a of view.exam.draft ?? []) st.drafts.set(a.problemId, { text: a.text ?? '', confidence: a.confidence ?? null });
+      for (const a of view.exam.draft ?? []) {
+        st.drafts.set(a.problemId, { text: a.text ?? '', confidence: a.confidence ?? null, sketch: a.sketch ?? null });
+      }
     }
     const key = JSON.stringify([
       view.status,
@@ -524,7 +528,7 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
   }
 
   function lock() {
-    for (const el of slot.querySelectorAll('textarea, input[type="radio"]')) el.disabled = true;
+    for (const el of slot.querySelectorAll('textarea, input[type="radio"], .ex-sketch button')) el.disabled = true;
     if (st.handBtn) st.handBtn.disabled = true;
   }
 
@@ -534,14 +538,19 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
     const out = [];
     for (const p of st.view.problems) {
       const d = st.drafts.get(p.problemId);
-      if (!d || (!d.text?.trim() && d.confidence == null)) continue;
-      out.push({ problemId: p.problemId, text: d.text ?? '', ...(d.confidence != null ? { confidence: d.confidence } : {}) });
+      if (!d || (!d.text?.trim() && d.confidence == null && !d.sketch)) continue;
+      out.push({
+        problemId: p.problemId,
+        text: d.text ?? '',
+        ...(d.confidence != null ? { confidence: d.confidence } : {}),
+        ...(d.sketch ? { sketch: d.sketch } : {}),
+      });
     }
     return out;
   };
 
   function changed(problemId, patch) {
-    st.drafts.set(problemId, { text: '', confidence: null, ...st.drafts.get(problemId), ...patch });
+    st.drafts.set(problemId, { text: '', confidence: null, sketch: null, ...st.drafts.get(problemId), ...patch });
     updateCount();
     clearTimeout(st.saveTimer);
     const mine = st;
@@ -565,7 +574,7 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
   function updateCount() {
     const el = slot.querySelector('.exam-count');
     if (!el) return;
-    const n = draftAnswers().filter((a) => a.text.trim()).length;
+    const n = draftAnswers().filter((a) => a.text.trim() || a.sketch).length;
     el.textContent = `${n} of ${st.view.problems.length} answered.`;
   }
 
@@ -657,6 +666,7 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
     hand.disabled = !v.can.submitSet || st.acting;
 
     paper.append(bar);
+    st.slots = new Map();
     v.problems.forEach((p, i) => {
       if (!p.statement) return;
       const block = problemBlock(p, v, true);
@@ -674,10 +684,19 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
       ta.addEventListener('input', () => changed(p.problemId, { text: ta.value }));
       if (i === 0) ta.dataset.first = '';
       field.append(lab, ta);
+      // A drawing kept with the draft (saved with the paper, so it survives a restart).
+      const sketch = sketchSlot(`your answer to problem ${p.index + 1}`);
+      st.slots.set(p.problemId, sketch);
+      sketch.el.addEventListener('sketch-discard', () => changed(p.problemId, { sketch: null }));
+      if (draft?.sketch) {
+        sketch.restore(draft.sketch).then((ok) => {
+          if (!ok) changed(p.problemId, { sketch: null });
+        });
+      }
       const conf = confidenceField({ legend: 'How sure are you? (optional)' });
       conf.set(draft?.confidence ?? null);
       for (const r of conf.radios) r.addEventListener('change', () => changed(p.problemId, { confidence: conf.value() }));
-      form.append(field, conf.el);
+      form.append(field, sketch.el, conf.el);
       block.append(form);
       paper.append(block);
     });
@@ -725,8 +744,9 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
       const block = problemBlock(p, v, false);
       const a = answers.get(p.problemId);
       const you = h('div', 'you');
-      you.append(h('p', 'you-label', 'You'), h('p', 'you-text', a?.text?.trim() ? a.text : 'No answer.'));
+      you.append(h('p', 'you-label', 'You'), h('p', 'you-text', a?.text?.trim() ? a.text : a?.sketch ? '' : 'No answer.'));
       if (typeof a?.confidence === 'number') you.append(h('p', 'you-meta', confidenceLabel(a.confidence)));
+      if (a?.sketch) you.append(sketchFigure({ in: 'answer', path: a.sketch.path }));
       block.append(you);
       block.append(p.result ? resultBlock(p) : h('p', 'writing', 'Marking…'));
       out.push(block);
@@ -812,7 +832,7 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
     if (!st || st.acting || st.view.status !== 'set-open') return;
     const mine = st;
     const answers = draftAnswers();
-    const empty = st.view.problems.length - answers.filter((a) => a.text.trim()).length;
+    const empty = st.view.problems.length - answers.filter((a) => a.text.trim() || a.sketch).length;
     if (empty > 0 && remaining() > 0) {
       const ok = await confirmDialog({
         title: 'Hand in the paper?',
@@ -823,7 +843,7 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
       if (!ok || st !== mine) return;
     }
     clearTimeout(mine.saveTimer);
-    for (const a of answers) handedIn().set(a.problemId, { text: a.text, confidence: a.confidence ?? null });
+    for (const a of answers) handedIn().set(a.problemId, { text: a.text, confidence: a.confidence ?? null, sketch: a.sketch ?? null });
     await act('practice_submit_set', { answers }, 'Couldn’t hand in the paper');
   }
 
@@ -847,5 +867,22 @@ export function createExamPaper({ slot, cmd, announce, prose, handedIn, ctx, ref
     if (mine.handBtn) mine.handBtn.disabled = !mine.view.can.submitSet || mine.expired;
   }
 
-  return { update, destroy };
+  /** Where the scratch pad can put a drawing: any problem of an open paper. */
+  function padTargets() {
+    if (!st || st.view?.status !== 'set-open' || st.expired) return [];
+    return st.view.problems
+      .filter((p) => p.statement)
+      .map((p) => ({ id: `problem:${p.problemId}`, label: `With my answer to problem ${p.index + 1}` }));
+  }
+
+  /** Puts a drawing with a problem's answer; the draft saves with it. Returns what it replaced and a status line. */
+  function padAttach(problemId, attachment, url) {
+    const slotFor = st?.slots.get(problemId);
+    if (!slotFor || st.expired) throw new Error('The paper is no longer taking answers.');
+    const replaced = slotFor.set(attachment, url);
+    changed(problemId, { sketch: attachment });
+    return { replaced, note: 'Added to your answer. It is saved with the paper.' };
+  }
+
+  return { update, destroy, padTargets, padAttach };
 }

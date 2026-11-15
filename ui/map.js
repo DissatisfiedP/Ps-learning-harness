@@ -23,6 +23,7 @@
 import { call, message } from './api.js';
 import { calibrationSummary, venueGroups } from './fieldguide.js';
 import { active, createWorld, hit, reheat, settle, tick } from './map-physics.js';
+import { mathText } from './mathtext.js';
 
 const EMPTY = 'Nothing in the knowledge map yet.';
 
@@ -2227,8 +2228,9 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     flyoutFor = null;
     card.hidden = true;
     flyout.hidden = true;
-    const topics = graph?.topics ?? [];
-    const nodes = graph?.nodes ?? [];
+    // Titles are drawn as plain text on the canvas: formulas become Unicode.
+    const topics = (graph?.topics ?? []).map((t) => ({ ...t, title: mathText(t.title) }));
+    const nodes = (graph?.nodes ?? []).map((n) => ({ ...n, title: mathText(n.title) }));
     const edges = graph?.edges ?? [];
     venuesByTopic = new Map(Object.entries(graph?.topicVenues ?? {}));
     // Only a prerequisite orders the two ideas: it is the arrow, the flyout and

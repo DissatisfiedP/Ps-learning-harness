@@ -11,6 +11,8 @@ import { expandSection, initSections, restoreSections, setSectionSummary } from 
 import { syncSettingsOpened } from './sync.js';
 import { initLibrarySettings, renderLibrarySettings } from './library.js';
 import { initImageSetSettings, renderImageSetSettings } from './imagesets.js';
+import { initPenSettings } from './pen.js';
+import { initTabs, restoreTab, selectTab } from './tabs.js';
 
 const dialog = document.getElementById('settings');
 const modelForm = document.getElementById('model-form');
@@ -65,6 +67,8 @@ export function initSettings(h) {
   initSections('providers', 'sync');
   initLibrarySettings();
   initImageSetSettings();
+  initTabs();
+  initPenSettings();
 }
 
 // ---------- learning (ui-design §7.7.7) ----------
@@ -134,7 +138,11 @@ function setTheme(value) {
  * only when no provider is connected (Model roles then points down to it).
  */
 export async function openSettings({ to = null } = {}) {
-  if (!dialog.open) restoreSections();
+  if (!dialog.open) {
+    restoreSections();
+    restoreTab();
+  }
+  if (to === 'providers' || to === 'model') selectTab('models', { remember: false });
   const sync = syncSettingsOpened();
   try {
     await reload();
