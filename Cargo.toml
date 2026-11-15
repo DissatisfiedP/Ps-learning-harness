@@ -19,3 +19,20 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Debug info for the workspace's own crates only: the ~560 dependencies are
+# never stepped through, and theirs more than doubled every debug binary (a
+# harness test binary: 300 MB with it, 130 MB without).
+[profile.dev.package."*"]
+debug = false
+
+# What ships: optimised for size, without symbols. On x86_64 Linux the desktop
+# binary goes from 55.9 MiB to 24.5 MiB. LTO reaches that binary only: Cargo
+# skips it for the library target the Android and iOS builds use, because that
+# target is also an `rlib` (crates/app/Cargo.toml), so those get the other
+# three settings. Panics still unwind: pdf.rs catches the PDF extractor's.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true

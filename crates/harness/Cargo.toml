@@ -23,7 +23,9 @@ sha2 = "0.10"
 tar = "0.4"
 toml = "1"
 pdf-extract = "0.12.1"
-lopdf = "0.42.0"
+# Only the parallel object loader of lopdf's defaults is wanted: the others
+# are date conversions through chrono, jiff and time, which nothing here calls.
+lopdf = { version = "0.42.0", default-features = false, features = ["rayon"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # Reference libraries (library/office.rs): Office/OpenDocument/EPUB files are
 # zip archives of XML. Only the stored and deflate methods are read (what

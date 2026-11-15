@@ -24,8 +24,7 @@
 //!   as the learner's own user and can read and write what they can.
 //! - **Linux without user namespaces, macOS, Windows**: no network or file
 //!   system isolation; timeout, output cap, process-group kill (Unix), env
-//!   scrubbing and the temp directory still apply. [`isolation`] reports
-//!   which applies so tools can say it.
+//!   scrubbing and the temp directory still apply.
 //! - The `sandbox` plugin is different: its labs are containers (podman or
 //!   docker) with their own file system and an internal or no network.
 //!
@@ -95,17 +94,6 @@ pub enum Isolation {
     Namespaces,
     /// Timeout, output cap, process group, env scrubbing only.
     ProcessOnly,
-}
-
-impl Isolation {
-    pub fn describe(self) -> &'static str {
-        match self {
-            Isolation::Namespaces => "no network access (Linux namespaces)",
-            Isolation::ProcessOnly => {
-                "no network isolation on this device (timeout, output cap and a scrubbed environment only)"
-            }
-        }
-    }
 }
 
 /// Probed once: do unprivileged user + network + PID namespaces work here?
