@@ -503,17 +503,17 @@ Native plugins may declare `exec`, `net`, `fs-read`, `fs-write`. The field is va
 
 ### 8.7 Install offers
 
-A session can want a plugin that this device doesn't have: the planner listed it on a section (§8.1's index made it nameable), or the tutor asked for it with `plugin_request` after a `plugin_search` (the planner and the measuring tutor both have the search). The app then asks the learner, with the consent screen of §8.4, at the moment the plugin would be used:
+A session can want a plugin that this device can't run yet: a registry plugin that isn't installed, or a built-in that waits for consent (§12). The planner listed it on a section (§8.1's index, or the built-in's manifest, made it nameable), or the tutor asked for it with `plugin_request` after a `plugin_search` (the planner and the measuring tutor both have the search, which returns both kinds). The app then asks the learner, with the consent screen of §8.4, at the moment the plugin would be used:
 
 - **When the tutor asks** (while measuring, or in a section): the call writes a `pluginOffer` op (`state: "offered"`, with the tutor's reason) and its result tells the tutor to say what the tool is for and end its turn.
 - **When a section starts** whose plan lists the plugin and the learner didn't untick it at approval. No op is needed: the plan already says it.
 
-`session_state` computes `installOffers` for the device: the plugins wanted where the session is now that are not installed here, are listed by a cached registry index for this platform, and were not declined. The UI opens the consent screen for each, and reports the decision with `resolve_install_offer { sessionId, plugin, installed }`:
+`session_state` computes `installOffers` for the device: the plugins wanted where the session is now that were not declined and that it could come to run, each with an `action`: `install` (listed by a cached registry index for this platform, no copy installed) or `enable` (a built-in with permissions that is off and was never turned off by the learner). The UI opens the consent screen for each (the install screen, or the built-in's "Enable ⟨Title⟩?" screen with its permissions), and reports the decision with `resolve_install_offer { sessionId, plugin, installed }`:
 
-- **installed**: the plugin is granted for the section (or for measuring, under the section id `(measure)`), and the tutor gets `[plan update] The learner installed …` and a turn. Its tools and prompt fragment are in that turn.
-- **declined**: a `pluginOffer` op with `state: "declined"`. The offer is not made again for that section and plugin, a repeated `plugin_request` for it is refused, and the tutor gets `[plan update] The learner chose not to install …`.
+- **installed** (or, for a built-in, allowed): the plugin is granted for the section (or for measuring, under the section id `(measure)`), and the tutor gets `[plan update] The learner installed …` (`allowed …`) and a turn. Its tools and prompt fragment are in that turn.
+- **declined**: a `pluginOffer` op with `state: "declined"`. The offer is not made again for that section and plugin, a repeated `plugin_request` for it is refused, and the tutor gets `[plan update] The learner chose not to install …` (`not to allow …`).
 
-With a question open the tutor is not interrupted: the grant or refusal is recorded and its next prompt shows it. A plugin installed some other way (Settings, another section's offer) is granted at the start of the next tutor turn in a section that wants it. Disabled plugins and built-ins that wait for consent are never offered this way: turning them on is Settings → Plugins.
+With a question open the tutor is not interrupted: the grant or refusal is recorded and its next prompt shows it. A plugin that becomes usable some other way (Settings, another section's offer) is granted at the start of the next tutor turn in a section that wants it. A plugin the learner turned off in Settings is never offered: that choice stands until they turn it back on there. On the plan card a built-in waiting for consent shows as "⟨Title⟩ — allow" where a registry plugin shows "— install".
 
 ## 9. Testing a package
 

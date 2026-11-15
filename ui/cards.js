@@ -978,6 +978,7 @@ function createPlanEditor(plan, {
   teaching = false,
   knownRefuted = [],
   installed = new Set(),
+  enableOnly = new Set(),
   labels = new Map(),
   onHuntToggle,
   onInstall = null,
@@ -1148,13 +1149,15 @@ function createPlanEditor(plan, {
         const label = labels.get(plugin) || plugin;
         if (!installed.has(plugin)) {
           const missing = h('span', 'tool missing');
+          // A built-in waiting for consent is there already: it is allowed, not installed.
+          const allow = enableOnly.has(plugin);
           if (onInstall && (proposed.has(plugin) || section.needsInstall == null)) {
             // Offer consent; never install as a side effect of approving.
-            const chip = button(`${label} — install`, 'text install-chip');
+            const chip = button(`${label} — ${allow ? 'allow' : 'install'}`, 'text install-chip');
             chip.addEventListener('click', () => onInstall(plugin, chip));
             missing.append(chip);
           } else {
-            missing.append(h('span', 'plan-line', `${label} — not installed`));
+            missing.append(h('span', 'plan-line', `${label} — ${allow ? 'not allowed yet' : 'not installed'}`));
           }
           fs.append(missing);
           continue;
@@ -1355,6 +1358,7 @@ export function planCard(plan, {
   onRequest,
   onExpand = null,
   installed = new Set(),
+  enableOnly = new Set(),
   labels = new Map(),
   busy = false,
   onInstall = null,
@@ -1386,6 +1390,7 @@ export function planCard(plan, {
     teaching,
     knownRefuted,
     installed,
+    enableOnly,
     labels,
     onHuntToggle,
     onInstall,
@@ -1725,6 +1730,7 @@ export function planOverlay(st, {
         teaching: true,
         knownRefuted: st.knownRefuted ?? [],
         installed: editing.installed ?? new Set(),
+        enableOnly: editing.enableOnly ?? new Set(),
         labels: editing.labels ?? new Map(),
         onHuntToggle: editing.onHuntToggle,
         onInstall: editing.onInstall ?? null,

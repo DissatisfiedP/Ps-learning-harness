@@ -77,7 +77,8 @@ Data lives in `~/.local/share/com.pslearningharness.app/repo` (override with
   stay in a `0600` file, and Settings says so.
 - A session that used a desktop-only plugin opens read-only on a phone until you choose
   "Continue here anyway". Sessions made by an older tutor open read-only.
-- A built-in plugin that needs a permission stays off until you enable it in Settings.
+- A built-in plugin that needs a permission stays off until you allow it: in Settings, or when
+  the tutor or the plan asks for it.
 - Course and exam goals never get hunts. Calibration appears only after 20 graded answers.
 - The `sandbox` labs need Podman or Docker; `code-runner` and `repl` need the language's
   toolchain on `PATH`.

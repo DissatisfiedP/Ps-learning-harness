@@ -947,7 +947,10 @@ impl Harness {
         let ops = self.store.ops(sid)?;
         let state = replay_state(&ops);
         let manifests = self.plugin_registry().available();
-        let installable = self.installable();
+        // A plan may name what the learner can still be asked for: a
+        // registry plugin to install, or a built-in waiting for consent.
+        let mut installable = self.installable();
+        installable.extend(self.awaiting_consent().into_iter().map(|p| p.id));
         let plan = match tools::check_plan(args, &state, &manifests, &installable) {
             Ok(p) => p,
             Err(problems) => {

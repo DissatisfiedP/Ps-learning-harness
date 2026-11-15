@@ -360,12 +360,14 @@
     activePlugins: [], lastNodeId: null, knownRefuted: [], nodeLevels: {}, hunt, hunts: [hunt], pendingPlanQuestion: null,
     openJobs: [], queuedJobs: [], grants: [], fileGrants: [], workspace: null, calibration: null, branch: null,
   };
-  // `&offer=tutor|plan` (the `offer` case): one plugin wanted where the
-  // session is that isn't installed here, until the learner decides.
+  // `&offer=tutor|plan|builtin` (the `offer` case): one plugin wanted where
+  // the session is that this device can't run yet, until the learner decides:
+  // a registry plugin to install, or (`builtin`, with `&builtins=1`) a
+  // built-in waiting for consent.
   const offerBy = new URLSearchParams(location.search).get('offer');
-  let installOffers = offerBy
-    ? [{ sectionId: 's1', plugin: 'tally', by: offerBy, ...(offerBy === 'tutor' ? { reason: 'to count along with you' } : {}) }]
-    : [];
+  let installOffers = [];
+  if (offerBy === 'builtin') installOffers = [{ sectionId: 's1', plugin: 'cas', by: 'tutor', action: 'enable', reason: 'to check the algebra' }];
+  else if (offerBy) installOffers = [{ sectionId: 's1', plugin: 'tally', by: offerBy, action: 'install', ...(offerBy === 'tutor' ? { reason: 'to count along with you' } : {}) }];
   const tally = {
     registry: 'https://registry.example/index.json',
     plugin: { id: 'tally', title: 'Tally', description: 'Counts things with you.', platforms: ['desktop', 'mobile'], permissions: [] },

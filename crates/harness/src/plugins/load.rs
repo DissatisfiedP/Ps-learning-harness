@@ -594,11 +594,42 @@ impl Harness {
             .collect()
     }
 
+    /// Built-in plugins that wait for the learner's consent on this device:
+    /// they declare permissions, are off, were never turned off by the
+    /// learner (that choice stands), and run on this platform.
+    pub(crate) fn awaiting_consent(&self) -> Vec<PluginInfo> {
+        let turned_off = lock(&self.config).settings.disabled_plugins.clone();
+        lock(&self.plugins)
+            .info()
+            .into_iter()
+            .filter(|p| {
+                p.builtin
+                    && !p.enabled
+                    && p.on_platform
+                    && !p.permissions.is_empty()
+                    && !turned_off.contains(&p.id)
+            })
+            .collect()
+    }
+
+    /// How this device could come to run `id` when it can't now: `enable`
+    /// (a built-in waiting for consent) or `install` (a cached registry
+    /// index lists it for this platform and no copy is installed). `None`
+    /// for anything else, a plugin the learner turned off included.
+    pub(crate) fn offer_action(&self, id: &str) -> Option<&'static str> {
+        if self.awaiting_consent().iter().any(|p| p.id == id) {
+            return Some("enable");
+        }
+        let installed = lock(&self.plugins).is_installed(id);
+        (!installed && self.installable().contains(id)).then_some("install")
+    }
+
     /// `plugin_search` for the planner and the measuring tutor: up to five
-    /// uninstalled matches from cached indexes, with permissions and
-    /// platforms. Every whitespace-separated term must appear somewhere in
-    /// the searchable text, and only entries that list this device's
-    /// platform are offered.
+    /// matches the device can't use yet, with permissions and platforms:
+    /// built-ins waiting for consent, then uninstalled plugins from cached
+    /// indexes. Every whitespace-separated term must appear somewhere in the
+    /// searchable text, and only entries that list this device's platform
+    /// are offered.
     pub fn plugin_search(&self, query: &str) -> String {
         let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
         if terms.is_empty() {
@@ -612,9 +643,25 @@ impl Harness {
         let platform = self.plugin_registry().platform().to_owned();
         let mut seen = HashSet::new();
         let mut hits: Vec<Value> = Vec::new();
+        for p in self.awaiting_consent() {
+            let haystack = format!("{} {} {} {}", p.id, p.title, p.description, p.use_when);
+            if hits.len() < 5 && query_matches(&terms, &haystack, &p.platforms, &platform) {
+                hits.push(serde_json::json!({
+                    "id": p.id,
+                    "title": p.title,
+                    "description": p.description,
+                    "useWhen": p.use_when,
+                    "avoidWhen": p.avoid_when,
+                    "platforms": p.platforms,
+                    "permissions": p.permissions,
+                    "version": p.version,
+                    "builtIn": true,
+                }));
+            }
+        }
         for catalog in self.registry_catalog() {
             for p in catalog.plugins {
-                if installed.contains(&p.id) || !seen.insert(p.id.clone()) {
+                if hits.len() >= 5 || installed.contains(&p.id) || !seen.insert(p.id.clone()) {
                     continue;
                 }
                 let haystack = format!("{} {} {} {}", p.id, p.title, p.description, p.use_when);
@@ -646,7 +693,9 @@ impl Harness {
             }
         }
         if hits.is_empty() {
-            return format!("no plugin matches `{query}` in the configured registries");
+            return format!(
+                "no plugin matches `{query}` among the built-in ones waiting for consent or in the configured registries"
+            );
         }
         serde_json::to_string_pretty(&Value::Array(hits)).unwrap_or_default()
     }

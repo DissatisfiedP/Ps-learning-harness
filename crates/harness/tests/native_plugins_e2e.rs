@@ -148,16 +148,15 @@ async fn a_native_is_offered_and_dispatched_once_consented_and_replays() {
     let s = &*script;
 
     // The planner's catalog lists the permission-free built-in and not the
-    // ones still waiting for consent; a plan naming one is refused, and the
-    // planner's retry with `code-parse` goes through.
+    // ones still waiting for consent.
     let id = session_awaiting_approval(
         &h,
         s,
         &release,
-        vec![
-            Reply::Calls("", vec![("w0", "plan_write", plan_args(&["cas"]))]),
-            Reply::Calls("", vec![("w1", "plan_write", plan_args(&["code-parse"]))]),
-        ],
+        vec![Reply::Calls(
+            "",
+            vec![("w1", "plan_write", plan_args(&["code-parse"]))],
+        )],
     )
     .await;
     let catalogue = catalog(s);
@@ -172,9 +171,6 @@ async fn a_native_is_offered_and_dispatched_once_consented_and_replays() {
     ] {
         assert!(!lists(&catalogue, gated), "{gated} offered before consent");
     }
-    let retry = s.requests_of("planner").into_iter().nth(1).unwrap();
-    let refusal = tool_message(&retry, "w0").expect("the planner saw its first plan refused");
-    assert!(refusal.contains("cas"), "{refusal}");
 
     // Granted by the plan: the tutor gets its tools and its prompt fragment,
     // and a call runs the real parser.
@@ -229,7 +225,8 @@ async fn a_native_is_offered_and_dispatched_once_consented_and_replays() {
     assert_eq!(call["plugin"], "code-parse");
     assert_eq!(call["platforms"], json!(["desktop", "mobile"]));
 
-    // `cas` isn't consented: the tutor can't take it mid-section either.
+    // `cas` isn't consented: the tutor's request asks the learner instead of
+    // taking it.
     s.push(
         "tutor",
         Reply::Calls(
@@ -245,36 +242,20 @@ async fn a_native_is_offered_and_dispatched_once_consented_and_replays() {
     h.send_learner_message(&id, "Can you check the algebra?")
         .await
         .unwrap();
-    let denied = results(&h, &id, "plugin_request");
+    let asked = results(&h, &id, "plugin_request");
     assert!(
-        denied[0].1 && denied[0].0.contains("`cas`") && denied[0].0.contains("not available"),
-        "{denied:?}"
+        !asked[0].1 && asked[0].0.contains("`cas`") && asked[0].0.contains("asked to allow"),
+        "{asked:?}"
     );
     assert_eq!(h.session_state(&id).unwrap().active_plugins, ["code-parse"]);
 
-    // The learner consents in Settings: now it is grantable, then offered,
-    // then a call dispatches to the real engine.
+    // The learner consents in Settings: it is active from the tutor's next
+    // turn, and a call dispatches to the real engine.
     h.set_plugin_enabled("cas", true).unwrap();
-    s.push(
-        "tutor",
-        Reply::Calls(
-            "",
-            vec![(
-                "r1",
-                "plugin_request",
-                json!({ "plugin": "cas", "reason": "check it" }),
-            )],
-        ),
-    );
     s.push("tutor", Reply::Text("I can check it now."));
     h.send_learner_message(&id, "Please check it.")
         .await
         .unwrap();
-    let granted = results(&h, &id, "plugin_request");
-    assert!(
-        !granted[1].1 && granted[1].0.starts_with("Granted"),
-        "{granted:?}"
-    );
     assert_eq!(
         h.session_state(&id).unwrap().active_plugins,
         ["code-parse", "cas"]
@@ -322,6 +303,113 @@ async fn a_native_is_offered_and_dispatched_once_consented_and_replays() {
     assert_eq!(
         h.session_state(&id).unwrap().active_plugins,
         ["code-parse", "cas"]
+    );
+}
+
+/// A built-in that waits for consent is found by `plugin_search`, may be
+/// planned, and is offered to the learner where it is wanted: allowing it
+/// makes it active there. One the learner turned off is never offered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_built_in_waiting_for_consent_is_offered_where_it_is_wanted() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("native-offer");
+    let h = harness(&repo, &config, &base).await;
+    let s = &*script;
+    let offers = |id: &str| -> Vec<(String, String, String, String)> {
+        h.session_state(id)
+            .unwrap()
+            .install_offers
+            .into_iter()
+            .map(|o| (o.section_id, o.plugin, o.by, o.action))
+            .collect()
+    };
+    let offer = |plugin: &str, by: &str| {
+        (
+            "s1".to_owned(),
+            plugin.to_owned(),
+            by.to_owned(),
+            "enable".to_owned(),
+        )
+    };
+
+    // The planner finds `cas` by searching and may plan with it.
+    let id = session_awaiting_approval(
+        &h,
+        s,
+        &release,
+        vec![
+            Reply::Calls("", vec![("ps", "plugin_search", json!({ "query": "cas" }))]),
+            Reply::Calls("", vec![("w1", "plan_write", plan_args(&["cas"]))]),
+        ],
+    )
+    .await;
+    let hits: Value = serde_json::from_str(&results(&h, &id, "plugin_search")[0].0).unwrap();
+    let hit = hits
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "cas")
+        .expect("cas is found");
+    assert_eq!(hit["builtIn"], true, "{hit}");
+    assert_eq!(hit["permissions"], json!(["exec"]), "{hit}");
+
+    // Its section starts without it, and the device asks the learner.
+    s.push("tutor", Reply::Text("By hand for now."));
+    h.approve(&id, vec![]).await.unwrap();
+    assert!(h.session_state(&id).unwrap().active_plugins.is_empty());
+    assert_eq!(offers(&id), [offer("cas", "plan")]);
+
+    // Allowing it grants it for the section and wakes the tutor with it.
+    h.set_plugin_enabled("cas", true).unwrap();
+    s.push("tutor", Reply::Text("Now with the algebra tool."));
+    h.resolve_install_offer(&id, "cas", true).await.unwrap();
+    assert_eq!(h.session_state(&id).unwrap().active_plugins, ["cas"]);
+    assert!(offers(&id).is_empty());
+    let after = s.requests_of("tutor").pop().unwrap();
+    assert!(tool_names(&after).contains(&"cas_check".to_owned()));
+    assert!(after.to_string().contains("allowed `cas`"), "{after}");
+
+    // The tutor asks for two more: one the learner turned off themselves
+    // stays off; one still waiting for consent is offered.
+    h.set_plugin_enabled("repl", false).unwrap();
+    s.push(
+        "tutor",
+        Reply::Calls(
+            "",
+            vec![
+                (
+                    "r1",
+                    "plugin_request",
+                    json!({ "plugin": "repl", "reason": "to try it" }),
+                ),
+                (
+                    "r2",
+                    "plugin_request",
+                    json!({ "plugin": "code-runner", "reason": "to run it" }),
+                ),
+            ],
+        ),
+    );
+    s.push("tutor", Reply::Text("One moment."));
+    h.send_learner_message(&id, "Can we run code?")
+        .await
+        .unwrap();
+    let asked = results(&h, &id, "plugin_request");
+    assert!(
+        asked[0].1 && asked[0].0.contains("not available"),
+        "{asked:?}"
+    );
+    assert!(
+        !asked[1].1 && asked[1].0.contains("asked to allow"),
+        "{asked:?}"
+    );
+    assert_eq!(offers(&id), [offer("code-runner", "tutor")]);
+    assert!(
+        script.unexpected.lock().unwrap().is_empty(),
+        "{:?}",
+        script.unexpected.lock().unwrap()
     );
 }
 

@@ -66,8 +66,6 @@ built, except the items below. What remains is mostly **proof**, not code.
   packages are skipped as `unsupported`; scans have no text (no OCR — `library_page_image` shows a page to a
   vision-capable researcher, and only on the device that imported the library); search is an index over text, proven
   to equal a full scan and timed at 80 MB, untested at several hundred MB.
-- **Plan-time plugin consent**: a built-in plugin that declares a permission stays off until the learner enables it
-  in Settings; the planner can only name it after that.
 - **Git sync on Android is fixed on desktop only.** The phone's OpenSSL can read no certificates (`no-stdio`), so
   git's HTTPS trust is decided by rustls in libgit2's certificate callback (`docs/sync-build.md`); proven on
   desktop with OpenSSL stripped of its roots, not yet on a phone. Certificates the learner installed on the phone are

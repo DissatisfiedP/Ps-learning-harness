@@ -223,7 +223,7 @@ fn workspace_write() -> ToolSpec {
 fn plugin_search() -> ToolSpec {
     tool(
         "plugin_search",
-        "Search the learner's configured plugin registries for an uninstalled plugin. Read-only; installs nothing. Use only when the work can't be done, or is clearly worse, without a tool.",
+        "Search for a plugin the learner can't use yet: built-in ones that wait for their permission, and uninstalled ones in their configured registries. Read-only; installs nothing. Use only when the work can't be done, or is clearly worse, without a tool.",
         json!({ "query": { "type": "string", "description": "What is needed, e.g. `circuit` or `draw circuits`." } }),
         &["query"],
     )
@@ -232,7 +232,7 @@ fn plugin_search() -> ToolSpec {
 fn plugin_request() -> ToolSpec {
     tool(
         "plugin_request",
-        "Ask for a plugin, for this section or while measuring. An installed one is granted or refused by the app (unknown id, platform, limit of three). One from `plugin_search` that isn't installed is offered to the learner to install; their decision arrives as a message.",
+        "Ask for a plugin, for this section or while measuring. An installed one is granted or refused by the app (unknown id, platform, limit of three). One from `plugin_search` is offered to the learner, to install or to allow; their decision arrives as a message.",
         json!({ "plugin": { "type": "string" }, "reason": { "type": "string", "description": "What it is for, in words the learner can read." } }),
         &["plugin", "reason"],
     )

@@ -412,19 +412,26 @@ impl Harness {
         // another device. Their lines go under the pinned state.
         let (notes, unavailable) = self.device_notes(ops, state, workspace);
         let mut notes = notes;
-        // Plugins wanted here that this device lacks: the learner is asked
-        // to install them (`install_offers`), or already said no.
+        // Plugins wanted here that this device can't run yet: the learner is
+        // asked to install or allow them (`install_offers`), or already said no.
         for offer in self.install_offers(state) {
-            notes.push(format!(
-                "`{}` isn't installed on this device; the learner has been asked to install it. Work without it until you are told it is active.",
-                offer.plugin
-            ));
+            notes.push(if offer.action == "enable" {
+                format!(
+                    "`{}` is built in but off on this device until the learner allows it; they have been asked. Work without it until you are told it is active.",
+                    offer.plugin
+                )
+            } else {
+                format!(
+                    "`{}` isn't installed on this device; the learner has been asked to install it. Work without it until you are told it is active.",
+                    offer.plugin
+                )
+            });
         }
         if let Some(scope) = state.plugin_scope() {
             for offer in &state.offers {
                 if offer.declined && offer.section_id == scope {
                     notes.push(format!(
-                        "The learner chose not to install `{}`. Don't ask for it again here.",
+                        "The learner turned `{}` down. Don't ask for it again here.",
                         offer.plugin
                     ));
                 }
@@ -1537,9 +1544,9 @@ impl Harness {
             )
         };
         if !self.plugin_registry().grantable(plugin) {
-            // In a registry and not installed here: the learner decides.
-            let installed = lock(&self.plugins).is_installed(plugin);
-            if installed || !self.installable().contains(plugin) {
+            // In a registry and not installed here, or built in and waiting
+            // for consent: the learner decides.
+            let Some(action) = self.offer_action(plugin) else {
                 return Ok(refuse(
                     name,
                     format!(
@@ -1547,16 +1554,21 @@ impl Harness {
                         state.platform
                     ),
                 ));
-            }
+            };
+            let (lacks, verb) = if action == "enable" {
+                ("needs the learner's permission on this device", "allow")
+            } else {
+                ("isn't installed here", "install")
+            };
             if state.declined(&scope, plugin) {
                 return Ok(refuse(
                     name,
-                    format!("the learner chose not to install `{plugin}`; go on without it"),
+                    format!("the learner chose not to {verb} `{plugin}`; go on without it"),
                 ));
             }
             if wanted.iter().any(|w| w.plugin == plugin) {
                 return Ok(done(format!(
-                    "`{plugin}` isn't installed here and the learner has already been asked to install it. Go on without it until you are told it is active."
+                    "`{plugin}` {lacks} and the learner has already been asked to {verb} it. Go on without it until you are told it is active."
                 )));
             }
             if taken >= MAX_PLUGINS_PER_SECTION {
@@ -1577,7 +1589,7 @@ impl Harness {
                 }),
             )?;
             return Ok(done(format!(
-                "`{plugin}` isn't installed here. The learner is being asked to install it now. Tell them in one line what it is for, then end your turn: their decision arrives as a message."
+                "`{plugin}` {lacks}. The learner is being asked to {verb} it now. Tell them in one line what it is for, then end your turn: their decision arrives as a message."
             )));
         }
         if state.active_plugins.iter().any(|p| p == plugin) {
@@ -1601,10 +1613,10 @@ impl Harness {
         )))
     }
 
-    /// What this device should ask the learner to install where the session
-    /// is now (`SessionState::install_offers`): wanted there, not declined,
-    /// not installed here in any state, and listed by a cached registry
-    /// index for this platform.
+    /// What this device should ask the learner for where the session is now
+    /// (`SessionState::install_offers`): plugins wanted there and not
+    /// declined that it can't run yet but could (`Harness::offer_action`): a
+    /// registry plugin to install, or a built-in to allow.
     pub(crate) fn install_offers(&self, state: &SessionState) -> Vec<InstallOffer> {
         let Some(scope) = state.plugin_scope().filter(|_| !state.ended) else {
             return Vec::new();
@@ -1613,21 +1625,19 @@ impl Harness {
             let registry = lock(&self.plugins);
             wanted_plugins(state, scope)
                 .into_iter()
-                .filter(|w| !state.declined(scope, w.plugin) && !registry.is_installed(w.plugin))
+                .filter(|w| !state.declined(scope, w.plugin) && !registry.grantable(w.plugin))
                 .collect()
         };
-        if missing.is_empty() {
-            return Vec::new();
-        }
-        let listed = self.installable();
         missing
             .into_iter()
-            .filter(|w| listed.contains(w.plugin))
-            .map(|w| InstallOffer {
-                section_id: scope.to_owned(),
-                plugin: w.plugin.to_owned(),
-                by: w.by.to_owned(),
-                reason: w.reason.map(str::to_owned),
+            .filter_map(|w| {
+                Some(InstallOffer {
+                    action: self.offer_action(w.plugin)?.to_owned(),
+                    section_id: scope.to_owned(),
+                    plugin: w.plugin.to_owned(),
+                    by: w.by.to_owned(),
+                    reason: w.reason.map(str::to_owned),
+                })
             })
             .collect()
     }
@@ -1693,10 +1703,12 @@ impl Harness {
                 "`{plugin}` isn't being offered here"
             )));
         }
+        let builtin = lock(&self.plugins).is_builtin(plugin);
         let notice = if installed {
             if !self.plugin_registry().grantable(plugin) {
                 return Err(Error::Invalid(format!(
-                    "`{plugin}` isn't installed on this device"
+                    "`{plugin}` isn't {} on this device",
+                    if builtin { "turned on" } else { "installed" }
                 )));
             }
             if state.active_plugins.iter().any(|p| p == plugin) {
@@ -1708,11 +1720,12 @@ impl Harness {
                 .any(|p| p == plugin)
             {
                 return Err(Error::Invalid(format!(
-                    "`{plugin}` is installed, but {MAX_PLUGINS_PER_SECTION} plugins are already in use here"
+                    "`{plugin}` is ready, but {MAX_PLUGINS_PER_SECTION} plugins are already in use here"
                 )));
             }
             format!(
-                "[plan update] The learner installed `{plugin}`. It is active from your next step."
+                "[plan update] The learner {} `{plugin}`. It is active from your next step.",
+                if builtin { "allowed" } else { "installed" }
             )
         } else {
             if state.declined(scope, plugin) {
@@ -1729,7 +1742,10 @@ impl Harness {
                     reason: None,
                 }),
             )?;
-            format!("[plan update] The learner chose not to install `{plugin}`. Go on without it.")
+            format!(
+                "[plan update] The learner chose not to {} `{plugin}`. Go on without it.",
+                if builtin { "allow" } else { "install" }
+            )
         };
         if state.pending_call.is_some() {
             return Ok(());
@@ -2760,7 +2776,7 @@ impl Harness {
             let mut m = sessions::new_message(
                 Role::User,
                 format!(
-                    "[plan update] Left out until installed: {}. The section starts without it; the learner is asked to install it when the section starts.",
+                    "[plan update] Left out until installed: {}. The section starts without it; the learner is asked for it when the section starts.",
                     dropped.join(", ")
                 ),
             );

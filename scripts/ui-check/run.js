@@ -36,11 +36,12 @@
 //              scrolled into view (reasoning first and large, answer small),
 //              and the desk text rides the answer as `thinkingWhileReading`;
 //              a prediction is open at once and has no reading box.
-//   offer      an install offer in the session state opens the consent
-//              screen by itself with the reason (the tutor asked, or the
-//              plan lists the tool for the section reached); Cancel and
-//              Install both report the decision with `resolve_install_offer`,
-//              and the screen doesn't come back.
+//   offer      an offer in the session state opens the consent screen by
+//              itself with the reason (the tutor asked, or the plan lists
+//              the tool for the section reached): a registry plugin to
+//              install, or a built-in to allow. Cancel, Install and Enable
+//              report the decision with `resolve_install_offer`, and the
+//              screen doesn't come back.
 //
 // Exit code 0 when every check passes. Usage: run.js [ipc|placement|sync|library]...
 
@@ -1208,7 +1209,26 @@ async function offer() {
   errors = await page.evaluate('window.__errors');
   expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
   await page.close();
-  console.log('offer: an install offer opens the consent screen with its reason (tutor, plan); Cancel and Install report the decision once and the screen stays closed');
+
+  // A built-in waiting for consent: the same screen, with its permissions; Enable turns it on.
+  page = await openSession('builtin&builtins=1');
+  const builtin = await page.evaluate(`({ title: document.getElementById('consent-title').textContent, why: document.getElementById('consent-why').textContent,
+    perms: document.getElementById('consent-perms').textContent, button: document.getElementById('consent-install').textContent })`);
+  expect(builtin.title === 'Enable Computer algebra?' && builtin.why === 'The tutor would like to use this tool: to check the algebra'
+    && builtin.button === 'Enable' && builtin.perms !== 'No files, network or programs.', `built-in offer: ${JSON.stringify(builtin)}`);
+  await page.shot('offer-builtin');
+  await page.evaluate(click('consent-install'));
+  await until('the decision', () => page.evaluate(`${decisions}.length === 1`));
+  await sleep(400);
+  after = await page.evaluate(`({ open: document.getElementById('consent').open, decisions: ${decisions},
+    enabled: window.__bridge.log.filter((c) => c.cmd === 'set_plugin_enabled').map((c) => c.args),
+    installs: window.__bridge.log.filter((c) => c.cmd === 'install_plugin').length })`);
+  expect(!after.open && after.installs === 0 && JSON.stringify(after.enabled) === JSON.stringify([{ id: 'cas', enabled: true }])
+    && JSON.stringify(after.decisions) === JSON.stringify([{ sessionId: 'L1', plugin: 'cas', installed: true }]), `after Enable: ${JSON.stringify(after)}`);
+  errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+  console.log('offer: an offer opens the consent screen with its reason (tutor, plan), for a registry plugin and for a built-in waiting for consent; Cancel, Install and Enable report the decision once and the screen stays closed');
 }
 
 // Built-in plugins in Settings → Plugins: never removable, labelled "built

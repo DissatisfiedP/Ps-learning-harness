@@ -25,7 +25,7 @@ import { createSessionList } from './sessions.js';
 import { createPractice, formatChooser, practiceFormat, practicePlace } from './practice.js';
 import { createExamPanel } from './exam.js';
 import { createMap } from './map.js';
-import { installCandidate, loadCatalog, pluginLabel } from './pluginui.js';
+import { awaitsConsent, enableBuiltin, installCandidate, loadCatalog, pluginLabel } from './pluginui.js';
 import { getPlugin, loadPlugins, pluginIds } from './pluginstore.js';
 import {
   choiceCard,
@@ -1172,11 +1172,12 @@ async function offerInstalls(s) {
     const why = offer.by === 'plan'
       ? 'The plan uses this tool in the section you have reached.'
       : `The tutor would like to use this tool${offer.reason ? `: ${offer.reason}` : '.'}`;
-    const info = await installCandidate(offer.plugin, null, why);
+    const enable = offer.action === 'enable';
+    const info = enable ? await enableBuiltin(offer.plugin, why) : await installCandidate(offer.plugin, null, why);
     if (info) {
       await loadPlugins(true);
       await loadCatalog(true);
-      announce(`${info.title || offer.plugin} installed.`);
+      announce(`${info.title || offer.plugin} ${enable ? 'turned on' : 'installed'}.`);
     }
     await call('resolve_install_offer', { sessionId: s.id, plugin: offer.plugin, installed: Boolean(info) });
   } catch (e) {
@@ -1187,17 +1188,29 @@ async function offerInstalls(s) {
   if (state.current === s) refreshState(s);
 }
 
+/**
+ * The plugins a plan can use on this device, and the built-ins still waiting
+ * for consent, which the plan card offers like an install.
+ */
+function usablePlugins() {
+  const installed = new Set();
+  const enableOnly = new Set();
+  for (const id of pluginIds()) (awaitsConsent(getPlugin(id)) ? enableOnly : installed).add(id);
+  return { installed, enableOnly };
+}
+
 async function installPlanPlugin(s, plugin, chip) {
   if (chip) chip.disabled = true;
   try {
-    const info = await installCandidate(plugin);
+    const enable = awaitsConsent(getPlugin(plugin));
+    const info = enable ? await enableBuiltin(plugin) : await installCandidate(plugin);
     if (!info) {
       if (chip) chip.disabled = false;
       return;
     }
     await loadPlugins(true);
     await loadCatalog(true);
-    announce(`${info.title || plugin} installed.`);
+    announce(`${info.title || plugin} ${enable ? 'turned on' : 'installed'}.`);
     renderPlanCard({ free: false });
   } catch (e) {
     const status = els.planSlot.querySelector('.form-status');
@@ -1381,7 +1394,7 @@ function renderPlanCard({ free = false, initial = false } = {}) {
   const st = s.st;
   const show = st?.phase === 'awaitApproval' && st.plan;
   const busy = Boolean(show && (s.planEditing || running(s.id, 'planner')));
-  const installed = pluginIds();
+  const { installed, enableOnly } = usablePlugins();
   const question = st?.pendingPlanQuestion ?? null;
   // Installing a plugin from the card re-renders it without re-announcing;
   // so does discarding pending plan edits.
@@ -1445,6 +1458,7 @@ function renderPlanCard({ free = false, initial = false } = {}) {
       renderPlanCard({ free: false });
     },
     installed,
+    enableOnly,
     labels,
     busy,
     onInstall: (plugin, chip) => installPlanPlugin(s, plugin, chip),
@@ -1505,7 +1519,7 @@ function renderPanel() {
     s.planEdits = newPlanEdits();
   }
   const busy = editable && running(s.id, 'planner');
-  const installed = pluginIds();
+  const { installed, enableOnly } = usablePlugins();
   const question = editable ? st.pendingPlanQuestion ?? null : null;
   const key = [
     st.planVersion, st.currentSection, st.completedSections.length, st.lastNodeId, checks, st.activePlugins.join(','), st.ended,
@@ -1534,6 +1548,7 @@ function renderPanel() {
             busy,
             question,
             installed,
+            enableOnly,
             labels: new Map(planPlugins.map((id) => [id, getPlugin(id)?.title || pluginLabel(id)])),
             onSendEdits: (edits, comment) => cmd('edit_plan', { sessionId: s.id, edits, comment }),
             onDiscard: () => {

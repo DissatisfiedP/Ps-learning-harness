@@ -441,9 +441,10 @@ pub struct Offer {
     pub declined: bool,
 }
 
-/// A plugin this device should ask the learner to install now: wanted where
-/// the session is (while measuring, or in the current section), in a
-/// registry, not installed here and not declined.
+/// A plugin this device should ask the learner for now: wanted where the
+/// session is (while measuring, or in the current section), not declined,
+/// and either in a registry and not installed here, or built in and waiting
+/// for consent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallOffer {
@@ -451,6 +452,8 @@ pub struct InstallOffer {
     pub plugin: String,
     /// tutor (it asked with `plugin_request`) | plan (the section lists it)
     pub by: String,
+    /// install (from a registry) | enable (a built-in, with its permissions)
+    pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

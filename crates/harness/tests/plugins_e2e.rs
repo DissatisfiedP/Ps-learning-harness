@@ -770,10 +770,12 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
     .await;
     let found = results(&h, &id, "plugin_search");
     let hits: Value = serde_json::from_str(&found[0].0).unwrap();
-    assert_eq!(hits[0]["id"], "circuit", "{hits}");
-    assert_eq!(hits[0]["version"], "0.2.0", "the highest listed version");
-    assert_eq!(hits[0]["registry"], registry);
-    assert_eq!(hits[0]["permissions"], json!([]));
+    let hit = (hits.as_array().unwrap().iter())
+        .find(|p| p["id"] == "circuit")
+        .unwrap_or_else(|| panic!("circuit is found: {hits}"));
+    assert_eq!(hit["version"], "0.2.0", "the highest listed version");
+    assert_eq!(hit["registry"], registry);
+    assert_eq!(hit["permissions"], json!([]));
     let plan = ops(&h, &id)
         .into_iter()
         .find_map(|o| match o {
@@ -1018,7 +1020,10 @@ async fn the_measuring_tutor_asks_for_an_uninstalled_plugin_and_the_learner_deci
     s.push("tutor", Reply::Text("A circuit tool would help here."));
     let id = h.start_teaching("Circuits").await.unwrap().id;
     let hits: Value = serde_json::from_str(&results(&h, &id, "plugin_search")[0].0).unwrap();
-    assert_eq!(hits[0]["id"], "circuit", "{hits}");
+    assert!(
+        (hits.as_array().unwrap().iter()).any(|p| p["id"] == "circuit"),
+        "{hits}"
+    );
     let asked = results(&h, &id, "plugin_request");
     assert!(
         !asked[0].1 && asked[0].0.contains("asked to install"),

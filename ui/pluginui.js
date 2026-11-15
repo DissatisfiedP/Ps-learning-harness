@@ -192,6 +192,47 @@ function candidateDetails(candidate, version) {
   };
 }
 
+/** A built-in that stays off until the learner allows its permissions. */
+export function awaitsConsent(info) {
+  return Boolean(info?.builtin && !info.enabled && (info.permissions?.length ?? 0) > 0);
+}
+
+/** The consent screen for turning on a built-in that declares permissions. */
+function enableConsent(info, action, why = '') {
+  return askConsent(
+    {
+      title: `Enable ${info.title || info.id}?`,
+      description: info.description,
+      version: info.version,
+      source: 'Built in to this app',
+      permissions: info.permissions,
+      why,
+    },
+    action,
+    { label: 'Enable', busy: 'Enabling…', done: 'Enabled.' },
+  );
+}
+
+/**
+ * Consent + turning on of a built-in that waits for it. Resolves the plugin's
+ * info, or null on cancel. `why` as in `installCandidate`.
+ */
+export async function enableBuiltin(id, why = '') {
+  let info = plugins().find((p) => p.id === id);
+  if (!info) {
+    await loadPlugins(true);
+    info = plugins().find((p) => p.id === id);
+  }
+  if (!info) throw new Error('That tool is not part of this app.');
+  const done = await enableConsent(info, async () => {
+    await call('set_plugin_enabled', { id, enabled: true });
+    await loadPlugins(true);
+    onChanged();
+    return info;
+  }, why);
+  return done ?? null;
+}
+
 /**
  * Consent + install of a registry plugin. `version` defaults to latest;
  * `why` is shown on the screen when the app, not the learner, opened it.
@@ -409,17 +450,7 @@ function pluginRow(info, catalog) {
     toggle.disabled = true;
     try {
       if (needsConsent) {
-        const done = await askConsent(
-          {
-            title: `Enable ${name}?`,
-            description: info.description,
-            version: info.version,
-            source: 'Built in to this app',
-            permissions: info.permissions,
-          },
-          setEnabled,
-          { label: 'Enable', busy: 'Enabling…', done: 'Enabled.' },
-        );
+        const done = await enableConsent(info, setEnabled);
         if (done === null) {
           toggle.disabled = false;
           return;
