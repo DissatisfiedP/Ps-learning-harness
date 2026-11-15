@@ -479,7 +479,7 @@ stateDiagram-v2
 - `probe_done` is refused while a question is open or before the scope brief has arrived.
 - `section_done` is refused while any node in the section lacks a passing check.
 - A plan revision that changes the goal or removes sections returns to AwaitApproval. Additions and detours apply with a visible notice.
-- `plugin_request` is granted or refused by code (unknown id, wrong platform, the three-plugin limit).
+- `plugin_request` is granted or refused by code (unknown id, wrong platform, the three-plugin limit). For a plugin that is in a registry but not installed, code records an offer and the device asks the learner to install it; the learner's decision grants it or closes the offer.
 
 **Prompt composition.**
 
@@ -796,8 +796,9 @@ Rules:
 2. **At most three per section,** plus the core tools.
 3. **Platform-aware.** A desktop-only plugin is never activated on mobile; the section is marked `desktopOnly` and the approach says so.
 4. **Visible and removable.** Plugins appear as checkboxes on each section of the plan card, all checked; the learner's unchecked ones become `removedPlugins` on approval.
-5. **Escape hatch.** Mid-section, the tutor can call `plugin_request`. Code grants it if the rules allow (installed, enabled, on this platform, under the limit), and the plugin is active from the next step.
-6. **Measure and practice** (not built yet). During probing, the tutor gets the read-only plugins the scope brief suggests for measuring. A practice session gets the plugins that were active when the target node was taught (recorded in the session log). Today Measure composes no plugins, and Practice mode is a single prompt with no tool loop; a `practice`-scoped tool is validated but never sent to a model until the coach lands.
+5. **Escape hatch.** Mid-section, and while measuring, the tutor can call `plugin_request`. Code grants it if the rules allow (installed, enabled, on this platform, under the limit), and the plugin is active from the next step. While measuring it can also call `plugin_search`, as the planner can.
+6. **Install offers.** A plugin wanted where the session is (asked for by the tutor, or listed by the plan for the section just reached) that is in a registry but not installed on this device makes the app open the consent screen by itself. Installing grants it there; declining is recorded, so the offer is made once per section and plugin. Code never installs anything without that screen (`docs/plugins.md` §8.7).
+7. **Measure and practice.** While measuring, the tutor gets the plugins it asked for there with `plugin_request` (the scope brief suggests which). A practice session gets the plugins that were active when the target node was taught (recorded in the session log).
 
 **Runtime: Luau.** Plugin scripts run in `mlua` with the `luau` feature:
 - `StdLib::ALL_SAFE`, then `io`, `os`, `debug`, `package`, `dofile`, `loadfile`, `loadstring`, `load` and `collectgarbage` removed, plus `sandbox(true)`;

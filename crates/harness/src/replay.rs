@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use crate::sessions::{HuntSendOp, Op, ToolOp};
 use crate::state::{
-    BranchState, Calibration, CalibrationBucket, CheckVerdict, Grant, HuntState, Level, OpenJob,
-    PendingCall, Plan, PlanQuestion, QueuedResult, SessionState,
+    BranchState, Calibration, CalibrationBucket, CheckVerdict, Grant, HuntState, Level, Offer,
+    OpenJob, PendingCall, Phase, Plan, PlanQuestion, QueuedResult, SessionState, MEASURE_SCOPE,
 };
 
 /// Text shown to a model for a call whose result is missing: the learner
@@ -78,7 +78,10 @@ pub fn replay_state(ops: &[Op]) -> SessionState {
                     s.plan = Some(plan);
                 }
             }
-            Op::Approve(_) => s.approved_version = Some(s.plan_version),
+            Op::Approve(a) => {
+                s.approved_version = Some(s.plan_version);
+                s.removed_plugins.clone_from(&a.removed_plugins);
+            }
             Op::PluginGrant(g) => {
                 let grant = Grant {
                     section_id: g.section_id.clone(),
@@ -87,6 +90,22 @@ pub fn replay_state(ops: &[Op]) -> SessionState {
                 };
                 if !s.grants.contains(&grant) {
                     s.grants.push(grant);
+                }
+            }
+            Op::PluginOffer(o) => {
+                let declined = o.state == "declined";
+                match s
+                    .offers
+                    .iter_mut()
+                    .find(|x| x.section_id == o.section_id && x.plugin == o.plugin)
+                {
+                    Some(known) => known.declined |= declined,
+                    None => s.offers.push(Offer {
+                        section_id: o.section_id.clone(),
+                        plugin: o.plugin.clone(),
+                        reason: o.reason.clone(),
+                        declined,
+                    }),
                 }
             }
             Op::Tool(t) if !is_conversation_tool(t) => {}
@@ -584,17 +603,20 @@ pub(crate) fn calibration(
 }
 
 /// Plugins active in the current section: plan grants still listed by the
-/// current plan, plus mid-section `plugin_request` grants.
+/// current plan, plus mid-section `plugin_request` grants. While measuring,
+/// the plugins the tutor asked for there.
 fn active_plugins(s: &SessionState) -> Vec<String> {
-    let Some(section) = s.current_section() else {
-        return Vec::new();
+    let (scope, planned): (&str, &[String]) = match s.current_section() {
+        Some(section) => (&section.id, &section.plugins),
+        None if s.phase == Phase::Measure => (MEASURE_SCOPE, &[]),
+        None => return Vec::new(),
     };
     let mut out: Vec<String> = Vec::new();
     for g in &s.grants {
-        if g.section_id != section.id || out.contains(&g.plugin) {
+        if g.section_id != scope || out.contains(&g.plugin) {
             continue;
         }
-        if g.by != "plan" || section.plugins.contains(&g.plugin) {
+        if g.by != "plan" || planned.contains(&g.plugin) {
             out.push(g.plugin.clone());
         }
     }

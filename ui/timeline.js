@@ -260,6 +260,7 @@ export function affectsState(op) {
     op.op === 'plan' ||
     op.op === 'approve' ||
     op.op === 'pluginGrant' ||
+    op.op === 'pluginOffer' ||
     op.op === 'tool' ||
     // Learning-system ops (docs/learning-system.md): each changes what
     // the plan card, the desk or the close shows.

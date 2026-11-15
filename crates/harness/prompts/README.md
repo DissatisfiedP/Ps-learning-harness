@@ -93,7 +93,7 @@ The learner picks a model per role in Settings. The harness maps agents to roles
    - `{{phase}}`;
    - `{{phase_instructions}}`, filled from the phase file.
 3. Inside the phase file:
-   - **measure:** `{{active_plugins}}` is empty today. Measure-phase plugins from the scope brief are a target, not built.
+   - **measure:** `{{active_plugins}}` from the plugins the tutor asked for while measuring (`plugin_request`), each package's `prompts/tutor.md`. Empty until it asks.
    - **teach:** the section header fields (including `section.notes`, written by the planner), `{{mode}}` from `tutor/modes/<section.mode>.md`, and `{{active_plugins}}` from the section's active **plugin packages** (each package's `prompts/tutor.md`) plus any granted mid-section. Learning-system flags add more (see below): `section.targetLevel`, `section.learnerNote`, `section.knownNote` (with `known_section`), and `{{hunt}}` = the body of `tutor/hunt.md` with `{{hunt.state}}` filled (with `hunt_active`).
 
 **Planner system prompt:**
@@ -157,8 +157,8 @@ Tools are scoped by agent and phase. A tool that is absent is never described to
 | `plan_keep` | planner | `{ reason }`; answers a change request without changing the plan |
 | `plan_ask` | planner (with `plan_controls`) | `{ question, options[] }`; one question on the plan card, with the learner free to write their own answer. Calling it **ends the planner run** without a delivered notice; `answer_plan_question` starts a fresh run with the answer |
 | `plan_change_request` | tutor: teach | `{ reason: learner \| missing-foundation \| ahead \| detour \| probe-wrong, evidence, learnerWords? }` → ack; the planner's answer arrives as a message |
-| `plugin_request` | tutor: teach | `{ plugin, reason }` → granted, "already active", or refused (unknown, not installed/enabled, not on this platform, section limit of three) |
-| `plugin_search` | planner | `{ query }` → JSON array of up to five uninstalled matches (every whitespace-separated term must appear in id, title, description or use_when; only entries listing this device's platform) from the configured registries' cached indexes: `id`, `title`, `description`, `useWhen`, `avoidWhen`, `platforms`, `permissions`, `version`, `registry`; or a one-line "no plugin matches" message. Read-only; never fetches; installing is the learner's action |
+| `plugin_request` | tutor: measure, teach | `{ plugin, reason }` → granted, "already active", or refused (unknown, installed but disabled, not on this platform, limit of three). For a plugin that isn't installed but is listed by a cached registry index for this platform: a `pluginOffer` op, and the result tells the tutor the learner is being asked; refused if the learner already declined it there. The device shows the consent screen from `sessionState.installOffers`; the decision (`resolve_install_offer`) grants the plugin or records the refusal, and reaches the tutor as a `[plan update]` message when no question is open |
+| `plugin_search` | planner; tutor: measure | `{ query }` → JSON array of up to five uninstalled matches (every whitespace-separated term must appear in id, title, description or use_when; only entries listing this device's platform) from the configured registries' cached indexes: `id`, `title`, `description`, `useWhen`, `avoidWhen`, `platforms`, `permissions`, `version`, `registry`; or a one-line "no plugin matches" message. Read-only; never fetches; installing is the learner's action |
 | `section_done` | tutor: teach | `{ sectionId, evidence, carryOver }`; refused while a section node lacks a passing check. With `levels`: also needs one passing check at `level ≥ targetLevel`. A known section closes on one passing check at its target level. In a branched session the next section is the next one of its own track; after its last, a track that feeds a merge gets a hand-off instruction instead of the plain close |
 | `session_end` | tutor: teach, close | `{}`. After the last `section_done` the phase is Close and the tutor writes the close, then calls it. In a branched session the result adds what happens next: the merge session was created (this was the last input) or which branches it still waits for |
 | `hunt_send` | tutor: teach | `{ sectionId, question, lookAt: [{ kind: forum \| datasheet \| lecture \| video \| paper \| docs \| person, venue?, why }], bringBack: [string] }`; `huntId` is the call id. Refused unless the current section's hunt is available, enabled, not skipped, and has had no `huntSend` yet. Listed in every Teach turn; what the model is *told* about hunts arrives only with `hunt_active` |
@@ -180,8 +180,9 @@ A plugin is a **package**, not a prompt file: `plugin.toml` (manifest), `src/*.l
 What the prompts depend on:
 
 - **Catalog lines.** The planner sees one line per installed, enabled, platform-available plugin: title, id, tool names, platforms, `use_when`, `avoid_when`, `cost`.
-- **Fragments.** While a plugin is active in the current section, the tutor gets its `prompts/tutor.md` in `{{active_plugins}}` in Teach and Close. The coach gets the `prompts/practice.md` of the plugins that were active when the problem's target was taught (the scheduler records them in the problem's plan). Nothing from an inactive, disabled or missing plugin reaches a prompt.
-- **Tools.** In Teach, the active plugins' tools scoped to `tutor` are added to the tool list with the manifest's names and JSON Schemas. A tool name starts with `<id>_` (dashes → underscores), e.g. `circuit_draw`. A plugin error comes back as a tool error starting `plugin error:`; result text is capped at 16 KiB. The call op records the plugin's id and `platforms`. On mobile, a call to a plugin known not to run there is refused with "`<id>` only runs on desktop; teach without it", and the session locks on that device after the turn unless the learner already chose "Continue here anyway" (`docs/sync-build.md`, "Sessions on mobile").
+- **Fragments.** While a plugin is active in the current section (or while measuring, once the tutor asked for it there), the tutor gets its `prompts/tutor.md` in `{{active_plugins}}` in Measure, Teach and Close. The coach gets the `prompts/practice.md` of the plugins that were active when the problem's target was taught (the scheduler records them in the problem's plan). Nothing from an inactive, disabled or missing plugin reaches a prompt.
+- **Tools.** In Measure and Teach, the active plugins' tools scoped to `tutor` are added to the tool list with the manifest's names and JSON Schemas. A tool name starts with `<id>_` (dashes → underscores), e.g. `circuit_draw`. A plugin error comes back as a tool error starting `plugin error:`; result text is capped at 16 KiB. The call op records the plugin's id and `platforms`. On mobile, a call to a plugin known not to run there is refused with "`<id>` only runs on desktop; teach without it", and the session locks on that device after the turn unless the learner already chose "Continue here anyway" (`docs/sync-build.md`, "Sessions on mobile").
+- **Install offers.** A plugin wanted where the session is (the current section's plan plugins, or one the tutor asked for) that this device lacks adds a line to `## This device`: "`<id>` isn't installed on this device; the learner has been asked to install it. Work without it until you are told it is active." A declined one adds "The learner chose not to install `<id>`. Don't ask for it again here." Once installed it is granted at the start of the next tutor turn.
 - **Artifact handles.** A tool declared `artifact = true` stores its figure as an `artifact` op (with the plugin's `platforms`) and its result ends with one line: `artifact: <id> — place it once with ![a short description](artifact:<id>) next to the sentence that refers to it`. The model places it with that Markdown image syntax; `shared/formatting.md` carries the placement rule. An unplaced artifact is appended after the turn's message. A `question_ask` view is refused for an artifact whose plugin doesn't list this device's platform.
 
 Agent scoping today: `tutor` and `practice` are accepted in a manifest; `practice`-scoped tools go to the coach. `coach`, `figure-maker`, `demo-builder` and `problem-checker` are reserved names: the loader rejects them (practice is the manifest's name for the coach). The planner never receives plugin tools except its own `plugin_search`.
@@ -236,14 +237,14 @@ The learner's attachments are readable through `file_find` / `file_read`: home, 
 | File | Ceiling | File | Ceiling |
 |---|---|---|---|
 | `shared/voice.md` | 150 | `tutor/base.md` | 1365 |
-| `shared/accuracy.md` | 174 | `tutor/phases/measure.md` | 1655 |
-| `shared/learner-signals.md` | 406 | `tutor/phases/teach.md` | 1969 |
+| `shared/accuracy.md` | 174 | `tutor/phases/measure.md` | 1830 |
+| `shared/learner-signals.md` | 406 | `tutor/phases/teach.md` | 2020 |
 | `shared/questions.md` | 810 | `tutor/hunt.md` | 690 |
 | `shared/formatting.md` | 216 | `tutor/modes/argument.md` | 463 |
 | `shared/learner-files.md` | 228 | `tutor/modes/fact.md` | 378 |
 | `shared/workspace.md` | 122 | `tutor/modes/mechanism.md` | 460 |
 | `shared/library.md` | 250 | | |
-| `planner/base.md` | 2403 | `tutor/modes/perceptual.md` | 370 |
+| `planner/base.md` | 2480 | `tutor/modes/perceptual.md` | 370 |
 | `planner/exam.md` | 510 | `tutor/modes/procedure.md` | 483 |
 | `coach/base.md` | 2050 | | |
 | `compaction.md` | 288 | `jobs/researcher.md` | 1021 |
@@ -270,3 +271,5 @@ Raised on 2026-11-14 for Practice attachments: `coach/base.md` 1940 → 2050 (th
 Raised on 2026-11-14 for the question gates: `shared/questions.md` 733 → 810 (grade before asking again, never the same question twice, a prediction carries no level).
 
 Raised on 2026-11-15 for the delivery channel: `tutor/base.md` 1277 → 1365 (the `message_send` block: when reply text may not be shown, and what to do).
+
+Raised on 2026-11-15 for install offers: `tutor/phases/measure.md` 1655 → 1830 (when a probe needs a tool: `plugin_request`, `plugin_search`, the learner decides), `tutor/phases/teach.md` 1969 → 2020 (an uninstalled plugin is offered to the learner), `planner/base.md` 2403 → 2480 (the learner is asked again when the section starts).

@@ -501,6 +501,20 @@ Native plugins may declare `exec`, `net`, `fs-read`, `fs-write`. The field is va
 
 `Add folder plugin…` (`add_folder_plugin { path }`) points at a package directory. The path is canonicalised; the package is validated and loaded immediately, recorded in `settings.json` → `pluginFolders: [{ id, path }]` and in `plugins.lock` with `source: { folder: <id> }`. A folder plugin wins over an installed copy with the same id. There is no background file watcher: instead the registry fingerprints the package's files (modification time and size, excluding `tests/`) and reloads manifest, schemas, fragments and the Luau VM when that fingerprint changes, at the point the plugin is next handed out. A failed reload keeps the last good package and reports its error as `loadError` in `plugins()`; editing a `require`d module therefore also takes effect without a host restart.
 
+### 8.7 Install offers
+
+A session can want a plugin that this device doesn't have: the planner listed it on a section (§8.1's index made it nameable), or the tutor asked for it with `plugin_request` after a `plugin_search` (the planner and the measuring tutor both have the search). The app then asks the learner, with the consent screen of §8.4, at the moment the plugin would be used:
+
+- **When the tutor asks** (while measuring, or in a section): the call writes a `pluginOffer` op (`state: "offered"`, with the tutor's reason) and its result tells the tutor to say what the tool is for and end its turn.
+- **When a section starts** whose plan lists the plugin and the learner didn't untick it at approval. No op is needed: the plan already says it.
+
+`session_state` computes `installOffers` for the device: the plugins wanted where the session is now that are not installed here, are listed by a cached registry index for this platform, and were not declined. The UI opens the consent screen for each, and reports the decision with `resolve_install_offer { sessionId, plugin, installed }`:
+
+- **installed**: the plugin is granted for the section (or for measuring, under the section id `(measure)`), and the tutor gets `[plan update] The learner installed …` and a turn. Its tools and prompt fragment are in that turn.
+- **declined**: a `pluginOffer` op with `state: "declined"`. The offer is not made again for that section and plugin, a repeated `plugin_request` for it is refused, and the tutor gets `[plan update] The learner chose not to install …`.
+
+With a question open the tutor is not interrupted: the grant or refusal is recorded and its next prompt shows it. A plugin installed some other way (Settings, another section's offer) is granted at the start of the next tutor turn in a section that wants it. Disabled plugins and built-ins that wait for consent are never offered this way: turning them on is Settings → Plugins.
+
 ## 9. Testing a package
 
 ```

@@ -111,12 +111,18 @@ export function pluginLabel(id) {
 
 /**
  * Shows the consent screen and runs `action` only if the learner agrees.
- * Resolves the action's value, or null on cancel.
+ * Resolves the action's value, or null on cancel. `details.why` says why the
+ * screen opened when the learner didn't open it themselves.
  */
 export function askConsent(details, action, { label = 'Install', busy = 'Installing…', done = 'Installed.' } = {}) {
   const dialog = element('consent');
   if (!dialog) return Promise.resolve(null);
   element('consent-title').textContent = details.title || 'Install this plugin?';
+  const why = element('consent-why');
+  if (why) {
+    why.textContent = details.why || '';
+    why.hidden = !details.why;
+  }
   element('consent-desc').textContent = details.description || 'No description.';
   element('consent-version').textContent = details.version || 'unknown';
   element('consent-source').textContent = details.source || 'unknown';
@@ -186,8 +192,11 @@ function candidateDetails(candidate, version) {
   };
 }
 
-/** Consent + install of a registry plugin. `version` defaults to latest. */
-export async function installCandidate(id, version = null) {
+/**
+ * Consent + install of a registry plugin. `version` defaults to latest;
+ * `why` is shown on the screen when the app, not the learner, opened it.
+ */
+export async function installCandidate(id, version = null, why = '') {
   let candidate = null;
   try {
     candidate = await call('install_candidate', { id });
@@ -199,7 +208,7 @@ export async function installCandidate(id, version = null) {
   }
   const chosen = version || latestVersion(candidate.versions)?.version || latestVersion(candidate.plugin?.versions)?.version;
   if (!chosen) throw new Error('No versions listed for this plugin.');
-  const info = await askConsent(candidateDetails(candidate, chosen), async () => {
+  const info = await askConsent({ ...candidateDetails(candidate, chosen), why }, async () => {
     const installed = await call('install_plugin', {
       registry: candidate.registry,
       id,

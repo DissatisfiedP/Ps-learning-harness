@@ -1039,6 +1039,7 @@ function applyState(s, { initial = false } = {}) {
     s.checkedUnanswered = true;
     offerReplyIfUnanswered(s);
   }
+  offerInstalls(s);
 }
 
 /**
@@ -1150,6 +1151,41 @@ function renderPhase() {
 }
 
 // ---------- plugins (plan chip, Settings changes) ----------
+
+/**
+ * Install offers (`sessionState.installOffers`): a plugin the tutor asked for,
+ * or one the plan lists for the section just reached, that isn't installed
+ * here. The consent screen opens by itself, one plugin at a time, and the
+ * learner's decision goes back so the same offer isn't made twice.
+ */
+async function offerInstalls(s) {
+  if (s.offering || s.readOnly || !s.id) return;
+  const key = (o) => `${o.sectionId}\u0000${o.plugin}`;
+  const offer = (s.st?.installOffers ?? []).find((o) => !s.offersTried?.has(key(o)));
+  // A consent screen the learner opened themselves comes first.
+  if (!offer || $('#consent')?.open) return;
+  s.offering = true;
+  // Whatever happens, this window asks once: a failed lookup or install the
+  // learner gave up on must not reopen the screen on every state refresh.
+  (s.offersTried ??= new Set()).add(key(offer));
+  try {
+    const why = offer.by === 'plan'
+      ? 'The plan uses this tool in the section you have reached.'
+      : `The tutor would like to use this tool${offer.reason ? `: ${offer.reason}` : '.'}`;
+    const info = await installCandidate(offer.plugin, null, why);
+    if (info) {
+      await loadPlugins(true);
+      await loadCatalog(true);
+      announce(`${info.title || offer.plugin} installed.`);
+    }
+    await call('resolve_install_offer', { sessionId: s.id, plugin: offer.plugin, installed: Boolean(info) });
+  } catch (e) {
+    if (state.current === s) announce(message(e));
+  } finally {
+    s.offering = false;
+  }
+  if (state.current === s) refreshState(s);
+}
 
 async function installPlanPlugin(s, plugin, chip) {
   if (chip) chip.disabled = true;
@@ -1508,8 +1544,8 @@ function renderPanel() {
             },
             onHuntToggle: (sectionId, enabled) => cmd('set_hunt', { sessionId: s.id, sectionId, enabled }).then(() => scheduleState()),
             onAnswerQuestion: (answer) => cmd('answer_plan_question', { sessionId: s.id, answer }),
-            // No install chips while teaching: a plugin installed now is not
-            // granted until the tutor asks for it (`plugin_request`).
+            // No install chips while teaching: a section's missing plugin is
+            // offered when the section starts (`offerInstalls`).
           }
         : null,
     }),

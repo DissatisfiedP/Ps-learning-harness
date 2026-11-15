@@ -413,7 +413,12 @@ pub struct OpenJob {
     pub args: Option<serde_json::Value>,
 }
 
-/// A plugin granted for one section (by the plan or by `plugin_request`).
+/// The `sectionId` of grants and offers made while measuring, before any
+/// section exists. Not a slug, so no section can have it.
+pub const MEASURE_SCOPE: &str = "(measure)";
+
+/// A plugin granted for one section or for measuring (by the plan or by
+/// `plugin_request`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Grant {
@@ -421,6 +426,33 @@ pub struct Grant {
     pub plugin: String,
     /// plan | request | learner
     pub by: String,
+}
+
+/// A plugin the tutor asked for (`plugin_request`) that wasn't installed on
+/// the device that ran the turn, and whether the learner turned it down. A
+/// plan section's plugin has an entry only once it is declined.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Offer {
+    pub section_id: String,
+    pub plugin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub declined: bool,
+}
+
+/// A plugin this device should ask the learner to install now: wanted where
+/// the session is (while measuring, or in the current section), in a
+/// registry, not installed here and not declined.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallOffer {
+    pub section_id: String,
+    pub plugin: String,
+    /// tutor (it asked with `plugin_request`) | plan (the section lists it)
+    pub by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Derived session state, rebuilt by replaying ops. Never stored.
@@ -458,10 +490,21 @@ pub struct SessionState {
     /// Jobs still queued or running according to the log.
     pub open_jobs: Vec<OpenJob>,
     /// Plugins granted per section (plan sections after learner removals,
-    /// plus mid-section `plugin_request` grants).
+    /// plus `plugin_request` grants) and for measuring.
     pub grants: Vec<Grant>,
-    /// Plugins active in the current section.
+    /// Plugins active in the current section, or while measuring.
     pub active_plugins: Vec<String>,
+    /// Install offers the tutor made, and every declined one.
+    #[serde(default)]
+    pub offers: Vec<Offer>,
+    /// Plan plugins the learner unticked at the last approval.
+    #[serde(default)]
+    pub removed_plugins: Vec<crate::sessions::RemovedPlugin>,
+    /// What this device should offer to install now. Not derived from the
+    /// ops alone: `Harness::session_state` fills it from what is installed
+    /// here and what the cached registry indexes list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub install_offers: Vec<InstallOffer>,
     /// `nodeId` of the latest teach-phase `question_ask` (map highlight).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_node_id: Option<String>,
@@ -532,6 +575,23 @@ impl SessionState {
     pub fn current_section(&self) -> Option<&Section> {
         let id = self.current_section.as_ref()?;
         self.plan.as_ref()?.sections.iter().find(|s| &s.id == id)
+    }
+
+    /// Where a plugin grant or offer belongs right now: the current section
+    /// while teaching, [`MEASURE_SCOPE`] while measuring, nowhere otherwise.
+    pub fn plugin_scope(&self) -> Option<&str> {
+        match self.phase {
+            Phase::Measure => Some(MEASURE_SCOPE),
+            Phase::Teach => self.current_section.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Whether the learner turned down installing `plugin` in `scope`.
+    pub fn declined(&self, scope: &str, plugin: &str) -> bool {
+        self.offers
+            .iter()
+            .any(|o| o.declined && o.section_id == scope && o.plugin == plugin)
     }
 
     /// The track this session teaches, when the plan branched (§4.26).

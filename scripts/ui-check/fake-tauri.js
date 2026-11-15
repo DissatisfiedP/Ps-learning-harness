@@ -360,6 +360,17 @@
     activePlugins: [], lastNodeId: null, knownRefuted: [], nodeLevels: {}, hunt, hunts: [hunt], pendingPlanQuestion: null,
     openJobs: [], queuedJobs: [], grants: [], fileGrants: [], workspace: null, calibration: null, branch: null,
   };
+  // `&offer=tutor|plan` (the `offer` case): one plugin wanted where the
+  // session is that isn't installed here, until the learner decides.
+  const offerBy = new URLSearchParams(location.search).get('offer');
+  let installOffers = offerBy
+    ? [{ sectionId: 's1', plugin: 'tally', by: offerBy, ...(offerBy === 'tutor' ? { reason: 'to count along with you' } : {}) }]
+    : [];
+  const tally = {
+    registry: 'https://registry.example/index.json',
+    plugin: { id: 'tally', title: 'Tally', description: 'Counts things with you.', platforms: ['desktop', 'mobile'], permissions: [] },
+    versions: [{ version: '0.3.0' }, { version: '0.2.0' }],
+  };
   const learnHandlers = {
     list_sessions: () => [structuredClone(session)],
     // An answer that carries drawings comes back as its stored result, the
@@ -386,7 +397,18 @@
       ...(new URLSearchParams(location.search).get('turnError')
         ? { lastTurnError: new URLSearchParams(location.search).get('turnError') }
         : {}),
+      ...(installOffers.length ? { installOffers: structuredClone(installOffers) } : {}),
     }),
+    install_candidate: ({ id }) => (id === 'tally' ? structuredClone(tally) : null),
+    install_plugin: ({ id, version }) => {
+      const info = { ...tally.plugin, version, api: 1, enabled: true, source: tally.registry, packageHash: 'check', hasView: false, tools: ['tally_count'] };
+      plugins.push(info);
+      return structuredClone(info);
+    },
+    resolve_install_offer: ({ plugin }) => {
+      installOffers = installOffers.filter((o) => o.plugin !== plugin);
+      return null;
+    },
     vision_capabilities: () => ({}),
     edit_plan: () => null,
     set_hunt: () => null,

@@ -947,14 +947,7 @@ impl Harness {
         let ops = self.store.ops(sid)?;
         let state = replay_state(&ops);
         let manifests = self.plugin_registry().available();
-        let platform = self.plugin_registry().platform().to_owned();
-        let installable: std::collections::HashSet<String> = self
-            .registry_catalog()
-            .into_iter()
-            .flat_map(|c| c.plugins)
-            .filter(|p| p.platforms.iter().any(|x| x == &platform))
-            .map(|p| p.id)
-            .collect();
+        let installable = self.installable();
         let plan = match tools::check_plan(args, &state, &manifests, &installable) {
             Ok(p) => p,
             Err(problems) => {

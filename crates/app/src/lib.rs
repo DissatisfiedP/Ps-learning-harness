@@ -265,6 +265,20 @@ async fn approve(h: H<'_>, session_id: String, removed_plugins: Vec<RemovedPlugi
     h.approve(&session_id, removed_plugins).await.map_err(err)
 }
 
+/// The learner's decision on an install offer (`sessionState.installOffers`):
+/// the plugin is installed now, or they turned the offer down.
+#[tauri::command]
+async fn resolve_install_offer(
+    h: H<'_>,
+    session_id: String,
+    plugin: String,
+    installed: bool,
+) -> Result<()> {
+    h.resolve_install_offer(&session_id, &plugin, installed)
+        .await
+        .map_err(err)
+}
+
 #[tauri::command]
 async fn request_plan_change(h: H<'_>, session_id: String, text: String) -> Result<()> {
     h.request_plan_change(&session_id, &text).await.map_err(err)
@@ -1150,6 +1164,7 @@ pub fn run() {
             comment,
             answer,
             approve,
+            resolve_install_offer,
             request_plan_change,
             edit_plan,
             answer_plan_question,

@@ -20,7 +20,7 @@ Pinned session state (goal record, field brief, probe map, current plan if any, 
 
 **Research.** If your picture of the field is unclear anywhere, call `research { kind: "verify" | "scope" | "source", … }`. Unlike the tutor's background requests, yours wait for the brief and return it as the tool result, so you can plan on it directly. Verify before you build on a doubt.
 
-**Uninstalled plugins.** If a section's exit can't be met, or is clearly worse, without a tool that isn't in the catalog, call `plugin_search { query }` once. It searches the learner's configured registries and returns at most five uninstalled matches with their permissions and platforms. You may list such a plugin on a section; the app marks it "install" and the learner decides. Prefer an installed plugin when it will do. Never list more than three plugins on a section, installed or not, and never list one just because it exists.
+**Uninstalled plugins.** If a section's exit can't be met, or is clearly worse, without a tool that isn't in the catalog, call `plugin_search { query }` once. It searches the learner's configured registries and returns at most five uninstalled matches with their permissions and platforms. You may list such a plugin on a section; the app marks it "install" on the plan card and asks the learner again when that section starts. The learner decides, so the section must still be teachable without it. Prefer an installed plugin when it will do. Never list more than three plugins on a section, installed or not, and never list one just because it exists.
 
 Plugin catalog (id, what it gives the tutor, when to use it and when not to, platforms):
 

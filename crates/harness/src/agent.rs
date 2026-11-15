@@ -35,9 +35,11 @@ use crate::replay::{self, replay_state};
 use crate::sessions::{
     self, op_id, ApproveOp, DebriefOp, HuntReturnOp, HuntSendOp, HuntSkipOp, HuntToggleOp,
     KnownRefutedOp, Op, PhaseOp, PlanAnswerOp, PlanEditOp, PlanRequestOp, PluginGrantOp,
-    RemovedPlugin, ToolOp, ToolResultValue,
+    PluginOfferOp, RemovedPlugin, ToolOp, ToolResultValue,
 };
-use crate::state::{Level, Phase, PlanQuestion, Section, SessionState};
+use crate::state::{
+    InstallOffer, Level, Phase, PlanQuestion, Section, SessionState, MEASURE_SCOPE,
+};
 use crate::tools::{self, opt_str, req_str, MAX_PLUGINS_PER_SECTION};
 use crate::workspace;
 use crate::{lock, now_iso, Ending, Error, Harness, Mode, ModelRole, SessionSummary};
@@ -187,6 +189,7 @@ impl Harness {
             state.turn_running = turn.running;
             state.last_turn_error.clone_from(&turn.error);
         }
+        state.install_offers = self.install_offers(&state);
         Ok(state)
     }
 
@@ -408,6 +411,25 @@ impl Harness {
         // desktop-only plugins the session used, and a folder attached on
         // another device. Their lines go under the pinned state.
         let (notes, unavailable) = self.device_notes(ops, state, workspace);
+        let mut notes = notes;
+        // Plugins wanted here that this device lacks: the learner is asked
+        // to install them (`install_offers`), or already said no.
+        for offer in self.install_offers(state) {
+            notes.push(format!(
+                "`{}` isn't installed on this device; the learner has been asked to install it. Work without it until you are told it is active.",
+                offer.plugin
+            ));
+        }
+        if let Some(scope) = state.plugin_scope() {
+            for offer in &state.offers {
+                if offer.declined && offer.section_id == scope {
+                    notes.push(format!(
+                        "The learner chose not to install `{}`. Don't ask for it again here.",
+                        offer.plugin
+                    ));
+                }
+            }
+        }
         let mut session_state =
             Composer::session_state_with(state, Some(&self.saved_starting_point()));
         if !notes.is_empty() {
@@ -462,7 +484,10 @@ impl Harness {
         );
         set_section_level_values(&mut values, None);
         let (file, label) = match phase {
-            Phase::Measure => ("tutor/phases/measure.md", "measure"),
+            Phase::Measure => {
+                values.set("active_plugins", fragments);
+                ("tutor/phases/measure.md", "measure")
+            }
             Phase::Teach | Phase::Close => {
                 let section = state.current_section().or_else(|| {
                     // In Close, the last section frames the prompt.
@@ -522,7 +547,7 @@ impl Harness {
         if message_send {
             tools.push(tools::message_send());
         }
-        if phase == Phase::Teach {
+        if matches!(phase, Phase::Measure | Phase::Teach) {
             tools.extend(plugin_tools);
         }
         Ok((system, tools))
@@ -680,6 +705,7 @@ impl Harness {
 
     async fn tutor_loop(self: &Arc<Self>, session_id: &str) -> Result<(), Error> {
         self.deliver_queued(session_id)?;
+        self.grant_ready_plugins(session_id)?;
         let start_phase = replay_state(&self.store.ops(session_id)?).phase;
         if !is_tutor_phase(start_phase) {
             return Ok(());
@@ -962,6 +988,10 @@ impl Harness {
             "research_request" => self.research_request(session_id, args),
             "plan_change_request" => self.plan_change_request(session_id, args),
             "plugin_request" => self.plugin_request(session_id, &state, args),
+            "plugin_search" => Ok(match req_str(args, "query") {
+                Ok(query) => done(self.plugin_search(query)),
+                Err(e) => refuse(name, e),
+            }),
             "section_done" => self.section_done(session_id, &state, args),
             "hunt_send" => self.hunt_send(session_id, &state, call, args),
             "debrief_record" => self.debrief_record(session_id, &ops, args),
@@ -1482,35 +1512,86 @@ impl Harness {
             Ok(p) => p,
             Err(e) => return Ok(refuse(name, e)),
         };
-        let Some(section) = state.current_section.clone() else {
+        let Some(scope) = state.plugin_scope().map(str::to_owned) else {
             return Ok(refuse(name, "no section is being taught"));
         };
-        if !self.plugin_registry().grantable(plugin) {
-            return Ok(refuse(
+        let here = if scope == MEASURE_SCOPE {
+            "while measuring"
+        } else {
+            "in this section"
+        };
+        let wanted = wanted_plugins(state, &scope);
+        // Active ones, and the ones the learner is still deciding about.
+        let taken = state.active_plugins.len()
+            + wanted
+                .iter()
+                .filter(|w| {
+                    !state.active_plugins.iter().any(|p| p == w.plugin)
+                        && !state.declined(&scope, w.plugin)
+                })
+                .count();
+        let limit = || {
+            refuse(
                 name,
-                format!(
-                    "`{plugin}` is unknown or not available on {}",
-                    state.platform
-                ),
-            ));
-        }
-        if state.active_plugins.iter().any(|p| p == plugin) {
+                format!("there are already {MAX_PLUGINS_PER_SECTION} plugins {here} (the limit)"),
+            )
+        };
+        if !self.plugin_registry().grantable(plugin) {
+            // In a registry and not installed here: the learner decides.
+            let installed = lock(&self.plugins).is_installed(plugin);
+            if installed || !self.installable().contains(plugin) {
+                return Ok(refuse(
+                    name,
+                    format!(
+                        "`{plugin}` is unknown or not available on {}",
+                        state.platform
+                    ),
+                ));
+            }
+            if state.declined(&scope, plugin) {
+                return Ok(refuse(
+                    name,
+                    format!("the learner chose not to install `{plugin}`; go on without it"),
+                ));
+            }
+            if wanted.iter().any(|w| w.plugin == plugin) {
+                return Ok(done(format!(
+                    "`{plugin}` isn't installed here and the learner has already been asked to install it. Go on without it until you are told it is active."
+                )));
+            }
+            if taken >= MAX_PLUGINS_PER_SECTION {
+                return Ok(limit());
+            }
+            self.append(
+                session_id,
+                Op::PluginOffer(PluginOfferOp {
+                    op_id: op_id(),
+                    at: now_iso(),
+                    section_id: scope,
+                    plugin: plugin.to_owned(),
+                    state: "offered".into(),
+                    reason: opt_str(args, "reason")
+                        .map(str::trim)
+                        .filter(|r| !r.is_empty())
+                        .map(str::to_owned),
+                }),
+            )?;
             return Ok(done(format!(
-                "`{plugin}` is already active in this section."
+                "`{plugin}` isn't installed here. The learner is being asked to install it now. Tell them in one line what it is for, then end your turn: their decision arrives as a message."
             )));
         }
-        if state.active_plugins.len() >= MAX_PLUGINS_PER_SECTION {
-            return Ok(refuse(
-                name,
-                format!("this section already has {MAX_PLUGINS_PER_SECTION} plugins (the limit)"),
-            ));
+        if state.active_plugins.iter().any(|p| p == plugin) {
+            return Ok(done(format!("`{plugin}` is already active {here}.")));
+        }
+        if taken >= MAX_PLUGINS_PER_SECTION {
+            return Ok(limit());
         }
         self.append(
             session_id,
             Op::PluginGrant(PluginGrantOp {
                 op_id: op_id(),
                 at: now_iso(),
-                section_id: section,
+                section_id: scope,
                 plugin: plugin.to_owned(),
                 by: "request".into(),
             }),
@@ -1518,6 +1599,145 @@ impl Harness {
         Ok(done(format!(
             "Granted: `{plugin}` is active from your next step."
         )))
+    }
+
+    /// What this device should ask the learner to install where the session
+    /// is now (`SessionState::install_offers`): wanted there, not declined,
+    /// not installed here in any state, and listed by a cached registry
+    /// index for this platform.
+    pub(crate) fn install_offers(&self, state: &SessionState) -> Vec<InstallOffer> {
+        let Some(scope) = state.plugin_scope().filter(|_| !state.ended) else {
+            return Vec::new();
+        };
+        let missing: Vec<Wanted> = {
+            let registry = lock(&self.plugins);
+            wanted_plugins(state, scope)
+                .into_iter()
+                .filter(|w| !state.declined(scope, w.plugin) && !registry.is_installed(w.plugin))
+                .collect()
+        };
+        if missing.is_empty() {
+            return Vec::new();
+        }
+        let listed = self.installable();
+        missing
+            .into_iter()
+            .filter(|w| listed.contains(w.plugin))
+            .map(|w| InstallOffer {
+                section_id: scope.to_owned(),
+                plugin: w.plugin.to_owned(),
+                by: w.by.to_owned(),
+                reason: w.reason.map(str::to_owned),
+            })
+            .collect()
+    }
+
+    /// Grants the plugins wanted where the session is now that this device
+    /// can run but that aren't active yet: a plan plugin installed after the
+    /// approval (or approved on a device that lacked it), or one the learner
+    /// installed from the tutor's offer. Returns the ones granted.
+    pub(crate) fn grant_ready_plugins(&self, session_id: &str) -> Result<Vec<String>, Error> {
+        let state = replay_state(&self.store.ops(session_id)?);
+        let Some(scope) = state.plugin_scope().filter(|_| !state.ended) else {
+            return Ok(Vec::new());
+        };
+        let mut active = state.active_plugins.len();
+        let mut granted = Vec::new();
+        for w in wanted_plugins(&state, scope) {
+            if state.active_plugins.iter().any(|p| p == w.plugin)
+                || active >= MAX_PLUGINS_PER_SECTION
+                || !self.plugin_registry().grantable(w.plugin)
+            {
+                continue;
+            }
+            self.append(
+                session_id,
+                Op::PluginGrant(PluginGrantOp {
+                    op_id: op_id(),
+                    at: now_iso(),
+                    section_id: scope.to_owned(),
+                    plugin: w.plugin.to_owned(),
+                    by: if w.by == "plan" { "plan" } else { "request" }.into(),
+                }),
+            )?;
+            active += 1;
+            granted.push(w.plugin.to_owned());
+        }
+        Ok(granted)
+    }
+
+    /// The learner's decision on an install offer: they installed the
+    /// plugin, or turned the offer down. Waits for a running turn, records
+    /// the decision and, when the tutor can take a turn, tells it. With a
+    /// question open the tutor isn't interrupted: its next prompt has the
+    /// plugin's tools, or the note that the learner said no.
+    pub async fn resolve_install_offer(
+        self: &Arc<Self>,
+        session_id: &str,
+        plugin: &str,
+        installed: bool,
+    ) -> Result<(), Error> {
+        let guard = self.turn_lock(session_id);
+        let _turn = guard.lock().await;
+        let state = replay_state(&self.learn_ops(session_id)?);
+        let Some(scope) = state.plugin_scope().filter(|_| !state.ended) else {
+            return Err(Error::Invalid(
+                "no plugin is being offered in this session right now".into(),
+            ));
+        };
+        if !wanted_plugins(&state, scope)
+            .iter()
+            .any(|w| w.plugin == plugin)
+        {
+            return Err(Error::Invalid(format!(
+                "`{plugin}` isn't being offered here"
+            )));
+        }
+        let notice = if installed {
+            if !self.plugin_registry().grantable(plugin) {
+                return Err(Error::Invalid(format!(
+                    "`{plugin}` isn't installed on this device"
+                )));
+            }
+            if state.active_plugins.iter().any(|p| p == plugin) {
+                return Ok(());
+            }
+            if !self
+                .grant_ready_plugins(session_id)?
+                .iter()
+                .any(|p| p == plugin)
+            {
+                return Err(Error::Invalid(format!(
+                    "`{plugin}` is installed, but {MAX_PLUGINS_PER_SECTION} plugins are already in use here"
+                )));
+            }
+            format!(
+                "[plan update] The learner installed `{plugin}`. It is active from your next step."
+            )
+        } else {
+            if state.declined(scope, plugin) {
+                return Ok(());
+            }
+            self.append(
+                session_id,
+                Op::PluginOffer(PluginOfferOp {
+                    op_id: op_id(),
+                    at: now_iso(),
+                    section_id: scope.to_owned(),
+                    plugin: plugin.to_owned(),
+                    state: "declined".into(),
+                    reason: None,
+                }),
+            )?;
+            format!("[plan update] The learner chose not to install `{plugin}`. Go on without it.")
+        };
+        if state.pending_call.is_some() {
+            return Ok(());
+        }
+        let mut m = sessions::new_message(Role::User, notice);
+        m.tag = Some("plan-notice".into());
+        self.append(session_id, Op::Message(m))?;
+        self.tutor_turn(session_id).await
     }
 
     fn section_done(
@@ -2540,7 +2760,7 @@ impl Harness {
             let mut m = sessions::new_message(
                 Role::User,
                 format!(
-                    "[plan update] Left out until installed: {}. The section starts without it; the plan card offers Install.",
+                    "[plan update] Left out until installed: {}. The section starts without it; the learner is asked to install it when the section starts.",
                     dropped.join(", ")
                 ),
             );
@@ -3018,6 +3238,46 @@ fn comment_line(comment: Option<&str>) -> String {
 
 fn is_tutor_phase(p: Phase) -> bool {
     matches!(p, Phase::Measure | Phase::Teach | Phase::Close)
+}
+
+/// A plugin wanted where the session is now.
+struct Wanted<'a> {
+    plugin: &'a str,
+    /// plan (the current section lists it) | tutor (it asked for it)
+    by: &'static str,
+    reason: Option<&'a str>,
+}
+
+/// The plugins wanted in `scope` (`SessionState::plugin_scope`): the current
+/// section's plan plugins the learner kept, then the ones the tutor asked
+/// for there that weren't installed. Declined ones are included.
+fn wanted_plugins<'a>(state: &'a SessionState, scope: &str) -> Vec<Wanted<'a>> {
+    let mut out: Vec<Wanted<'a>> = Vec::new();
+    if let Some(section) = state.current_section().filter(|s| s.id == scope) {
+        for plugin in &section.plugins {
+            let removed = state
+                .removed_plugins
+                .iter()
+                .any(|r| r.section_id == scope && &r.plugin == plugin);
+            if !removed {
+                out.push(Wanted {
+                    plugin,
+                    by: "plan",
+                    reason: None,
+                });
+            }
+        }
+    }
+    for offer in state.offers.iter().filter(|o| o.section_id == scope) {
+        if !out.iter().any(|w| w.plugin == offer.plugin) {
+            out.push(Wanted {
+                plugin: &offer.plugin,
+                by: "tutor",
+                reason: offer.reason.as_deref(),
+            });
+        }
+    }
+    out
 }
 
 /// Some wires treat a trailing assistant message as a prefill; a turn always

@@ -171,14 +171,14 @@ impl Harness {
         Ok(plugin)
     }
 
-    /// An unfinished session whose current section has plugin `id` active
-    /// (its title, for the refusal).
+    /// An unfinished session with plugin `id` active where it is now (its
+    /// current section, or its measuring): its title, for the refusal.
     fn session_using(&self, id: &str) -> Option<String> {
         let sessions = self.store.list().ok()?;
         sessions.into_iter().filter(|s| !s.read_only).find_map(|s| {
             let state = replay_state(&self.store.ops(&s.id).ok()?);
             (!state.ended
-                && state.phase == crate::state::Phase::Teach
+                && state.plugin_scope().is_some()
                 && state.active_plugins.iter().any(|p| p == id))
             .then_some(s.title)
         })
@@ -583,10 +583,22 @@ impl Harness {
             .collect()
     }
 
-    /// `plugin_search` for the planner: up to five uninstalled matches
-    /// from cached indexes, with permissions and platforms. Every whitespace-
-    /// separated term must appear somewhere in the searchable text, and only
-    /// entries that list this device's platform are offered.
+    /// Ids the cached registry indexes offer for this device's platform.
+    pub(crate) fn installable(&self) -> HashSet<String> {
+        let platform = self.plugin_registry().platform().to_owned();
+        self.registry_catalog()
+            .into_iter()
+            .flat_map(|c| c.plugins)
+            .filter(|p| p.platforms.iter().any(|x| x == &platform))
+            .map(|p| p.id)
+            .collect()
+    }
+
+    /// `plugin_search` for the planner and the measuring tutor: up to five
+    /// uninstalled matches from cached indexes, with permissions and
+    /// platforms. Every whitespace-separated term must appear somewhere in
+    /// the searchable text, and only entries that list this device's
+    /// platform are offered.
     pub fn plugin_search(&self, query: &str) -> String {
         let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
         if terms.is_empty() {

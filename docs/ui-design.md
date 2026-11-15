@@ -884,8 +884,8 @@ Behavior:
     drawer, as on the card, and the bar stays hidden until it is answered;
   - Escape closes the side drawer first (the sheet stays open) and returns focus to the "⋯" or
     "Options" that opened it; a second Escape closes the sheet;
-  - no install chips: a plugin installed mid-lesson is not granted until the tutor asks for it, so a
-    missing plugin reads "⟨Title⟩ — not installed".
+  - no install chips: a section's missing plugin is offered by itself when the section starts
+    (§7.2.16), so here it reads "⟨Title⟩ — not installed".
   The edits live in the session's `planEdits` (cleared by a new plan version) and survive the sheet
   being rebuilt; the sheet's `panelKey` adds the planner's busy state, the question, the installed
   set and the discard count, so it re-renders when those change.
@@ -975,7 +975,8 @@ An artifact reference in tutor prose, `![alt](artifact:<id>)`, becomes one `<fig
 
 - **Installed plugins** stay checkboxes in a section's "Tools" fieldset, all checked; unchecked ones become `removedPlugins`. The label is the installed plugin's title, or the registry's title when only proposed.
 - **An uninstalled plugin** named in a section gets one text button instead of a checkbox: "⟨Title⟩ — install" (id when no title is known). It cannot be checked, because installing runs third-party code and needs consent. The chip is offered only when the id is in the section's code-computed `needsInstall` (W9) or the plan predates that field; a stale plan whose missing id isn't proposed shows plain "⟨Title⟩ — not installed" text, never a dead install button. The section also gets the line "Not installed: skipped if approved."
-- **The chip** opens the consent screen (§7.5.1). On success the row becomes a checked checkbox without re-announcing the plan; on cancel it stays an install chip; on a hash mismatch the consent dialog shows the error and the chip stays enabled. Installing does not change the plan version and does not grant the plugin: one still missing **at approval** is left out of every section, with the one-line plan notice "Left out until installed: …"; once installed, the tutor can grant it mid-section with `plugin_request`.
+- **The chip** opens the consent screen (§7.5.1). On success the row becomes a checked checkbox without re-announcing the plan; on cancel it stays an install chip; on a hash mismatch the consent dialog shows the error and the chip stays enabled. Installing does not change the plan version and does not grant the plugin: one still missing **at approval** is left out of every section, with the one-line plan notice "Left out until installed: …".
+- **The install offer.** When the session reaches a section whose plan lists a plugin that is in a registry but not installed here, or the tutor asks for such a plugin (`plugin_request`, while measuring or teaching), the same consent screen opens by itself, one plugin at a time, with one extra line under the title: "The plan uses this tool in the section you have reached." or "The tutor would like to use this tool: ⟨its reason⟩". **Install** installs it and makes it active there; **Cancel** declines, and the offer for that section and plugin is not made again (Settings → Plugins still installs it). It never opens over a consent screen the learner opened, and a failed lookup is announced once instead of reopening. Driven by `sessionState.installOffers`; the decision is `resolve_install_offer` (`ui/app.js`, `offerInstalls`).
 - **No registry** has the id: the chip still works, but instead of opening the consent screen it puts "Not in any registry here. Add one in Settings → Registries." in the plan card's status line. The learner is never left with a dead button and no explanation.
 - **Approving the plan** installs nothing. This keeps D10's consent rule: the planner proposes, the learner decides.
 

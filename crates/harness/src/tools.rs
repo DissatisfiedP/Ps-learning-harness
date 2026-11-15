@@ -223,9 +223,18 @@ fn workspace_write() -> ToolSpec {
 fn plugin_search() -> ToolSpec {
     tool(
         "plugin_search",
-        "Search the learner's configured plugin registries for an uninstalled plugin. Read-only; installs nothing. Use only when the section's exit can't be met, or is clearly worse, without a tool.",
-        json!({ "query": { "type": "string", "description": "What the section needs, e.g. `circuit` or `draw circuits`." } }),
+        "Search the learner's configured plugin registries for an uninstalled plugin. Read-only; installs nothing. Use only when the work can't be done, or is clearly worse, without a tool.",
+        json!({ "query": { "type": "string", "description": "What is needed, e.g. `circuit` or `draw circuits`." } }),
         &["query"],
+    )
+}
+
+fn plugin_request() -> ToolSpec {
+    tool(
+        "plugin_request",
+        "Ask for a plugin, for this section or while measuring. An installed one is granted or refused by the app (unknown id, platform, limit of three). One from `plugin_search` that isn't installed is offered to the learner to install; their decision arrives as a message.",
+        json!({ "plugin": { "type": "string" }, "reason": { "type": "string", "description": "What it is for, in words the learner can read." } }),
+        &["plugin", "reason"],
     )
 }
 
@@ -361,6 +370,8 @@ pub fn tutor_tools(phase: Phase, workspace: bool) -> Vec<ToolSpec> {
             ));
             t.push(question_ask(&["probe"], false));
             t.push(verdict_record());
+            t.push(plugin_search());
+            t.push(plugin_request());
             t.push(tool(
                 "probe_done",
                 "Finish measuring. Refused while a question is open or before the scope brief has arrived. On success the planner builds the plan.",
@@ -395,12 +406,7 @@ pub fn tutor_tools(phase: Phase, workspace: bool) -> Vec<ToolSpec> {
                 }),
                 &["reason", "evidence"],
             ));
-            t.push(tool(
-                "plugin_request",
-                "Ask for a plugin in this section. Granted or refused by the app (unknown id, platform, three-per-section limit).",
-                json!({ "plugin": { "type": "string" }, "reason": { "type": "string" } }),
-                &["plugin", "reason"],
-            ));
+            t.push(plugin_request());
             t.push(hunt_send());
             t.push(debrief_record());
             t.push(tool(
@@ -1980,7 +1986,7 @@ mod tests {
                 .map(|t| t.name)
                 .collect();
             assert!(!names.iter().any(|n| n == "plan_write" || n == "plan_keep"));
-            let teach_only = ["section_done", "plan_change_request", "plugin_request"];
+            let teach_only = ["section_done", "plan_change_request"];
             for t in teach_only {
                 assert_eq!(
                     names.iter().any(|n| n == t),

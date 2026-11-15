@@ -36,6 +36,11 @@
 //              scrolled into view (reasoning first and large, answer small),
 //              and the desk text rides the answer as `thinkingWhileReading`;
 //              a prediction is open at once and has no reading box.
+//   offer      an install offer in the session state opens the consent
+//              screen by itself with the reason (the tutor asked, or the
+//              plan lists the tool for the section reached); Cancel and
+//              Install both report the decision with `resolve_install_offer`,
+//              and the screen doesn't come back.
 //
 // Exit code 0 when every check passes. Usage: run.js [ipc|placement|sync|library]...
 
@@ -1158,6 +1163,54 @@ async function turn() {
   console.log('turn: a failed last turn is offered with the backend reason and retries through resume_turn');
 }
 
+// Install offers: the consent screen opens from the session state, and the
+// learner's decision goes back to the backend.
+async function offer() {
+  const consent = `(() => { const d = document.getElementById('consent'); const why = document.getElementById('consent-why');
+    return { open: d.open, title: document.getElementById('consent-title').textContent, why: why.hidden ? null : why.textContent,
+      version: document.getElementById('consent-version').textContent }; })()`;
+  const decisions = `window.__bridge.log.filter((c) => c.cmd === 'resolve_install_offer').map((c) => c.args)`;
+  const openSession = async (by) => {
+    const page = await openApp('none', { query: `&fixture=learn&offer=${by}` });
+    await until('the session list', () => page.evaluate(`Boolean(document.querySelector('#session-list .session-open'))`));
+    await page.evaluate(`document.querySelector('#session-list .session-open').click()`);
+    await until(`the consent screen (${by})`, () => page.evaluate(`document.getElementById('consent').open`));
+    return page;
+  };
+
+  // The tutor asked: the reason is on the screen; Cancel declines, once.
+  let page = await openSession('tutor');
+  let shown = await page.evaluate(consent);
+  expect(shown.title === 'Tally' && shown.version === '0.3.0' && shown.why === 'The tutor would like to use this tool: to count along with you',
+    `tutor offer: ${JSON.stringify(shown)}`);
+  await page.shot('offer-tutor');
+  await page.evaluate(click('consent-cancel'));
+  await until('the refusal', () => page.evaluate(`${decisions}.length === 1`));
+  await sleep(400);
+  let after = await page.evaluate(`({ open: document.getElementById('consent').open, decisions: ${decisions}, installs: window.__bridge.log.filter((c) => c.cmd === 'install_plugin').length })`);
+  expect(!after.open && after.installs === 0 && JSON.stringify(after.decisions) === JSON.stringify([{ sessionId: 'L1', plugin: 'tally', installed: false }]),
+    `after Cancel: ${JSON.stringify(after)}`);
+  let errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+
+  // The plan lists it for the section reached: Install installs, then reports it.
+  page = await openSession('plan');
+  shown = await page.evaluate(consent);
+  expect(shown.why === 'The plan uses this tool in the section you have reached.', `plan offer: ${JSON.stringify(shown)}`);
+  await page.evaluate(click('consent-install'));
+  await until('the decision', () => page.evaluate(`${decisions}.length === 1`));
+  await sleep(400);
+  after = await page.evaluate(`({ open: document.getElementById('consent').open, decisions: ${decisions},
+    installs: window.__bridge.log.filter((c) => c.cmd === 'install_plugin').map((c) => c.args) })`);
+  expect(!after.open && JSON.stringify(after.decisions) === JSON.stringify([{ sessionId: 'L1', plugin: 'tally', installed: true }])
+    && after.installs.length === 1 && after.installs[0].id === 'tally' && after.installs[0].version === '0.3.0', `after Install: ${JSON.stringify(after)}`);
+  errors = await page.evaluate('window.__errors');
+  expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
+  await page.close();
+  console.log('offer: an install offer opens the consent screen with its reason (tutor, plan); Cancel and Install report the decision once and the screen stays closed');
+}
+
 // Built-in plugins in Settings → Plugins: never removable, labelled "built
 // in", and one that declares permissions stays off until the consent screen
 // naming them is accepted (the core records it; plugins/load.rs).
@@ -2065,7 +2118,7 @@ async function padPractice() {
   await page.close();
   console.log('pad-practice: the pad beside a set (a drawing goes with one problem, kept with the draft, restored on reopening, handed in without text and shown on the review), a one-at-a-time answer (a composer chip) and an exam paper (saved with the draft)');
 }
-const cases = { ipc, placement, sync, library, map, session, reading, turn, plugins: pluginsCase, practice, 'practice-set': practiceSet, 'practice-resume': practiceResume, exam, pad, 'pad-practice': padPractice, touch: touchCase };
+const cases = { ipc, placement, sync, library, map, session, reading, turn, offer, plugins: pluginsCase, practice, 'practice-set': practiceSet, 'practice-resume': practiceResume, exam, pad, 'pad-practice': padPractice, touch: touchCase };
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases);
 try {
   for (const name of wanted) {

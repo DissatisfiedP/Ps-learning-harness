@@ -787,12 +787,19 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
     let st = h.session_state(&id).unwrap();
     assert_eq!(st.plan.unwrap().sections[0].needs_install, ["circuit"]);
 
-    // Approving installs nothing: the section starts without it.
+    // Approving installs nothing: the section starts without it, and this
+    // device is told to ask the learner to install it.
     s.push("tutor", Reply::Text("We'll work it out by hand."));
     h.approve(&id, vec![]).await.unwrap();
     let st = h.session_state(&id).unwrap();
     assert!(st.active_plugins.is_empty());
     assert!(installed(&h).is_empty());
+    let offers: Vec<(&str, &str, &str)> = st
+        .install_offers
+        .iter()
+        .map(|o| (o.section_id.as_str(), o.plugin.as_str(), o.by.as_str()))
+        .collect();
+    assert_eq!(offers, [("s1", "circuit", "plan")]);
     assert!(ops(&h, &id).iter().any(|o| matches!(o, Op::Message(m)
         if m.tag.as_deref() == Some("plan-notice")
             && m.content.contains("Left out until installed: Dividers (circuit)"))));
@@ -820,7 +827,8 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
     assert!(!config.join("plugins").join("circuit").exists());
     assert!(h.plugin_lock().unwrap().is_empty() && installed(&h).is_empty());
 
-    // Install writes the lock; then plugin_request grants it mid-section.
+    // Install writes the lock; the learner's decision then grants the plan's
+    // plugin for the section and wakes the tutor with it.
     let info = h
         .install_plugin(&registry, "circuit", "0.1.0")
         .await
@@ -834,29 +842,14 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
     assert_eq!(lock[0].id, "circuit");
     let locked = std::fs::read_to_string(repo.join("plugins.lock")).unwrap();
     assert!(locked.contains(&registry), "{locked}");
-    s.push(
-        "tutor",
-        Reply::Calls(
-            "",
-            vec![(
-                "r1",
-                "plugin_request",
-                json!({ "plugin": "circuit", "reason": "draw it" }),
-            )],
-        ),
-    );
     s.push("tutor", Reply::Text("Now I can draw it."));
-    h.send_learner_message(&id, "Can you draw it?")
-        .await
-        .unwrap();
-    let granted = results(&h, &id, "plugin_request");
-    assert!(
-        !granted[0].1 && granted[0].0.starts_with("Granted"),
-        "{granted:?}"
-    );
-    assert_eq!(h.session_state(&id).unwrap().active_plugins, ["circuit"]);
+    h.resolve_install_offer(&id, "circuit", true).await.unwrap();
+    let st = h.session_state(&id).unwrap();
+    assert_eq!(st.active_plugins, ["circuit"]);
+    assert!(st.install_offers.is_empty(), "{:?}", st.install_offers);
     let after = script.requests_of("tutor").pop().unwrap();
     assert!(tool_names(&after).contains(&"circuit_draw".to_owned()));
+    assert!(after.to_string().contains("installed `circuit`"), "{after}");
 
     // No update while circuit is active in a session's current section,
     // whether a turn is running or not.
@@ -973,6 +966,122 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
         ("circuit", "0.1.0")
     );
     assert!(script.unexpected.lock().unwrap().is_empty());
+}
+
+/// While measuring, the tutor searches the registries, asks for a plugin
+/// that isn't installed, and the learner decides: a refusal is final for the
+/// phase, an install makes the plugin active there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_measuring_tutor_asks_for_an_uninstalled_plugin_and_the_learner_decides() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("plugin-measure-offer");
+    let h = harness(&repo, &config, &base).await;
+    let registry = local_registry(repo.parent().unwrap());
+    h.remove_registry(harness::plugins::install::DEFAULT_REGISTRY_URL)
+        .unwrap();
+    h.add_registry("Test", &registry).unwrap();
+    h.refresh_registries().await;
+    let s = &*script;
+    let ask = || {
+        Reply::Calls(
+            "",
+            vec![
+                ("ps", "plugin_search", json!({ "query": "circuit" })),
+                (
+                    "pr",
+                    "plugin_request",
+                    json!({ "plugin": "circuit", "reason": "to read a schematic" }),
+                ),
+            ],
+        )
+    };
+    let offers = |id: &str| -> Vec<(String, String, String, Option<String>)> {
+        h.session_state(id)
+            .unwrap()
+            .install_offers
+            .into_iter()
+            .map(|o| (o.section_id, o.plugin, o.by, o.reason))
+            .collect()
+    };
+    let offered = [(
+        "(measure)".to_owned(),
+        "circuit".to_owned(),
+        "tutor".to_owned(),
+        Some("to read a schematic".to_owned()),
+    )];
+
+    // The learner turns the offer down: the tutor is told, and asking again
+    // is refused instead of prompting twice.
+    s.push("tutor", ask());
+    s.push("tutor", Reply::Text("A circuit tool would help here."));
+    let id = h.start_teaching("Circuits").await.unwrap().id;
+    let hits: Value = serde_json::from_str(&results(&h, &id, "plugin_search")[0].0).unwrap();
+    assert_eq!(hits[0]["id"], "circuit", "{hits}");
+    let asked = results(&h, &id, "plugin_request");
+    assert!(
+        !asked[0].1 && asked[0].0.contains("asked to install"),
+        "{asked:?}"
+    );
+    assert_eq!(offers(&id), offered);
+    s.push(
+        "tutor",
+        Reply::Calls(
+            "",
+            vec![(
+                "pr2",
+                "plugin_request",
+                json!({ "plugin": "circuit", "reason": "once more" }),
+            )],
+        ),
+    );
+    s.push("tutor", Reply::Text("We'll do it in words."));
+    h.resolve_install_offer(&id, "circuit", false)
+        .await
+        .unwrap();
+    assert!(offers(&id).is_empty());
+    let told = script.requests_of("tutor");
+    assert!(
+        told[told.len() - 2]
+            .to_string()
+            .contains("chose not to install `circuit`"),
+        "the tutor is told"
+    );
+    let again = results(&h, &id, "plugin_request");
+    assert!(
+        again[1].1 && again[1].0.contains("chose not to install"),
+        "{again:?}"
+    );
+    assert!(offers(&id).is_empty() && installed(&h).is_empty());
+
+    // In another session the learner installs it: active while measuring,
+    // with the plugin's tools in the tutor's next request.
+    s.push("tutor", ask());
+    s.push("tutor", Reply::Text("A circuit tool would help here."));
+    let id = h.start_teaching("Circuits again").await.unwrap().id;
+    assert_eq!(offers(&id), offered);
+    assert!(h.session_state(&id).unwrap().active_plugins.is_empty());
+    // Saying "installed" before it is there changes nothing.
+    let early = h.resolve_install_offer(&id, "circuit", true).await;
+    assert!(early.is_err());
+    h.install_plugin(&registry, "circuit", "0.1.0")
+        .await
+        .unwrap();
+    s.push("tutor", Reply::Text("Here is a divider to read."));
+    h.resolve_install_offer(&id, "circuit", true).await.unwrap();
+    let st = h.session_state(&id).unwrap();
+    assert_eq!(st.phase, harness::state::Phase::Measure);
+    assert_eq!(st.active_plugins, ["circuit"]);
+    assert!(st.install_offers.is_empty());
+    let after = script.requests_of("tutor").pop().unwrap();
+    assert!(tool_names(&after).contains(&"circuit_draw".to_owned()));
+    assert!(after.to_string().contains("installed `circuit`"), "{after}");
+    assert!(
+        script.unexpected.lock().unwrap().is_empty(),
+        "{:?}",
+        script.unexpected.lock().unwrap()
+    );
 }
 
 /// The UI command returns only bridge metadata; the inlined view document is

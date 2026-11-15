@@ -352,10 +352,29 @@ pub struct RemovedPlugin {
 pub struct PluginGrantOp {
     pub op_id: String,
     pub at: String,
+    /// The section, or [`crate::state::MEASURE_SCOPE`] while measuring.
     pub section_id: String,
     pub plugin: String,
     /// plan | request | learner
     pub by: String,
+}
+
+/// An install offer for a plugin that isn't installed on the device: the
+/// tutor's `plugin_request` made one (`offered`), or the learner turned one
+/// down (`declined`; that is also how a plan section's plugin is declined).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginOfferOp {
+    pub op_id: String,
+    pub at: String,
+    /// The section, or [`crate::state::MEASURE_SCOPE`] while measuring.
+    pub section_id: String,
+    pub plugin: String,
+    /// offered | declined
+    pub state: String,
+    /// What the tutor wants it for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -553,6 +572,7 @@ pub enum Op {
     Debrief(DebriefOp),
     Approve(ApproveOp),
     PluginGrant(PluginGrantOp),
+    PluginOffer(PluginOfferOp),
     Tool(ToolOp),
     Job(JobOp),
     Compaction(CompactionOp),
@@ -587,6 +607,7 @@ impl Op {
             Op::Debrief(o) => &o.at,
             Op::Approve(o) => &o.at,
             Op::PluginGrant(o) => &o.at,
+            Op::PluginOffer(o) => &o.at,
             Op::Tool(o) => &o.at,
             Op::Job(o) => &o.at,
             Op::Compaction(o) => &o.at,
@@ -621,6 +642,7 @@ impl Op {
             Op::Debrief(o) => &o.op_id,
             Op::Approve(o) => &o.op_id,
             Op::PluginGrant(o) => &o.op_id,
+            Op::PluginOffer(o) => &o.op_id,
             Op::Tool(o) => &o.op_id,
             Op::Job(o) => &o.op_id,
             Op::Compaction(o) => &o.op_id,
