@@ -1072,6 +1072,20 @@ return {
     }
 
     #[test]
+    fn rand_int_stays_in_range_for_any_span() {
+        let dir = package(
+            "local rand = require('@harness/rand')\nreturn {\n wide = function()\n  local rng = rand.seeded(7)\n  local lo, hi = -4611686018427387904, 4611686018427387904\n  for _ = 1, 50 do\n   local n = rng.int(lo, hi)\n   if n < lo or n > hi then return 'out of range' end\n  end\n  return 'ok'\n end,\n die = function()\n  local rng = rand.seeded(7)\n  local seen = {}\n  for _ = 1, 200 do\n   local n = rng.int(1, 6)\n   if n < 1 or n > 6 then return 'out of range' end\n   seen[n] = true\n  end\n  return tostring(#seen)\n end,\n empty = function() return tostring(rand.seeded(7).int(5, 2)) end,\n}\n",
+        );
+        let rt = LuauRuntime::new(&dir);
+        // `hi - lo + 1` is 2^63 + 1 here: it used to overflow i64.
+        let wide = rt.call_tool("wide", &Json::Null, false);
+        assert!(!wide.is_error && wide.content == "ok", "{}", wide.content);
+        assert_eq!(rt.call_tool("die", &Json::Null, false).content, "6");
+        assert_eq!(rt.call_tool("empty", &Json::Null, false).content, "5");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn main_module_state_lives_as_long_as_the_vm() {
         let dir = package("local n = 0\nreturn { bump = function() n += 1 return n end }\n");
         let rt = LuauRuntime::new(&dir);

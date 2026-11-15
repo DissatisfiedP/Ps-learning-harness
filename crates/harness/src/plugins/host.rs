@@ -738,8 +738,11 @@ fn rand_lib(lua: &Lua) -> LuaResult<Table> {
                     x ^= x >> 7;
                     x ^= x << 17;
                     int_state.store(x, Ordering::Relaxed);
-                    let span = (hi - lo + 1).max(1) as u64;
-                    Ok(lo + ((x >> 11) % span) as i64)
+                    // In i128: `hi - lo + 1` overflows i64 for a span wider
+                    // than half its range. An empty span (hi < lo) gives `lo`.
+                    let span = (i128::from(hi) - i128::from(lo) + 1).max(1);
+                    let pick = i128::from(x >> 11) % span;
+                    Ok((i128::from(lo) + pick) as i64)
                 })?,
             )?;
             Ok(table)
