@@ -1,4 +1,4 @@
-//! M8 end-to-end proof: a scripted fake provider drives one whole teaching
+//! End-to-end proof: a scripted fake provider drives one whole teaching
 //! session through the real runtime (commands, phase machine, gates, jobs,
 //! delivery, planner, plugins) and the test asserts on the op log and the
 //! derived `SessionState` at each step. The fake provider lives in

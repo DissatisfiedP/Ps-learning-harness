@@ -1,4 +1,4 @@
-// Syntax highlighting for finished code blocks (build prompt W1).
+// Syntax highlighting for finished code blocks.
 //
 // Prism core and one grammar per language are loaded on demand: startup
 // loads no grammar, and only the languages a reply actually uses are fetched.

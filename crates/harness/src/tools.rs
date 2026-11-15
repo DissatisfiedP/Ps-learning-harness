@@ -1,6 +1,6 @@
 //! Tool schemas, scoped by agent and phase (prompts/README.md "Tool
 //! contracts"; names and fields match it exactly), and the code-side plan
-//! checks (build prompt M4 `plan_write`, M5 gates).
+//! checks (`plan_write` rules, phase gates).
 //!
 //! A tool that isn't available in a phase is never described to the model;
 //! the executor re-checks every gate anyway, because model output is
@@ -52,7 +52,7 @@ fn question_ask(roles: &[&str], teach: bool) -> ToolSpec {
         "explanation": { "type": "string" },
         "level": { "type": "string", "enum": ["explain", "use", "analyze", "design"],
             "description": "How far the question demands the learner go: explain (state it and why), use (apply it to a new case), analyze (take it apart, diagnose, judge), design (build something new to constraints). Required on every probe and check: the app refuses one without it. Write the question to this level. Leave it out of a predict question, which measures nothing." },
-        "view": { "type": "object", "description": "Answer in an interactive view (W7). Only with a view whose plugin has answer = true.", "properties": {
+        "view": { "type": "object", "description": "Answer in an interactive view. Only with a view whose plugin has answer = true.", "properties": {
             "artifactId": { "type": "string" },
             "task": { "type": "string", "description": "What the learner should do in the view." },
             "target": { "type": "object", "description": "Grading target, committed here and never shown to the learner." }
@@ -1040,7 +1040,7 @@ pub fn plan_record(args: &Value, plan: &Plan) -> Value {
     record
 }
 
-/// Every rule from the build prompt: unique slugs; `requires` names existing
+/// Every rule: unique slugs; `requires` names existing
 /// nodes and is acyclic; each node in exactly one section; valid modes and
 /// styles; plugins registered and available on the platform; at most three
 /// per section; completed sections unchanged on revision.
@@ -1162,7 +1162,7 @@ pub fn validate_plan(
             match manifests.iter().find(|m| &m.id == p) {
                 // An uninstalled plugin from a configured registry is allowed;
                 // the plan card shows install, and teaching drops it until the
-                // learner installs it (W9).
+                // learner installs it.
                 None if installable.contains(p) => {}
                 None => problems.push(format!(
                     "section `{}` uses plugin `{p}`, which isn't in the catalog",

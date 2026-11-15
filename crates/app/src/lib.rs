@@ -45,7 +45,7 @@ const VIEW_CSP: &str = "sandbox allow-scripts; default-src 'none'; script-src 'u
 
 /// The view document's URL. A `srcdoc` frame would inherit the app CSP
 /// (`script-src 'self'`), which blocks the view's inline script; a custom
-/// scheme gives the document its own CSP (build prompt W7).
+/// scheme gives the document its own CSP.
 #[cfg(any(target_os = "windows", target_os = "android"))]
 fn view_url(id: &str) -> String {
     format!("http://pluginview.localhost/{id}")

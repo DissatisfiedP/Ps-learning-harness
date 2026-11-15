@@ -1,11 +1,10 @@
-# Formatting, clippy, tests and the headless UI checks — plus the bundles the owner
-# wants built (Linux AppImage, one signed release Android APK per ABI, a macOS DMG,
-# an unsigned iOS IPA), which upload artifacts only.
+# Formatting, clippy, tests and the headless UI checks, then the bundle jobs
+# (Linux AppImage, one signed release Android APK per ABI, a macOS DMG, an
+# unsigned iOS IPA), which upload artifacts only.
 #
-# No publishing. The only secrets are the Android signing key (README,
-# "Android signing key"), read by the android job alone. The check jobs are the
-# commands in README.md's "Test" section, in the order that fails fastest; the
-# bundle jobs come last and gate nothing.
+# No publishing. The only secrets are the Android signing key, read by the
+# android job alone (see its signing step). The check jobs run in the order
+# that fails fastest; the bundle jobs come last and gate nothing.
 name: CI
 
 on:
@@ -79,7 +78,7 @@ jobs:
       - name: Run the UI checks
         run: CHROMIUM=google-chrome bun scripts/ui-check/run.js ipc placement
 
-  # The bundle jobs are the owner's smoke test of the packaging path: they
+  # The bundle jobs are a smoke test of the packaging path: they
   # build and upload an artefact, they are not part of the tree's gates. Each
   # needs a green `rust` job first, and none gates the checks above or the
   # others.
@@ -257,6 +256,14 @@ jobs:
       # from the APK, not from Gradle's flavour directories); an APK with no or
       # several ABIs fails the job. zipalign -P 16 page-aligns the native
       # libraries for 16 KB-page devices before signing.
+      #
+      # The key is created once and kept in two repository secrets (the alias
+      # must be `release`); losing the .p12 or its password means no later APK
+      # can update an installed one:
+      #   keytool -genkeypair -keystore release.p12 -storetype PKCS12 -alias release \
+      #     -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=P's Learning Harness"
+      #   base64 -w0 release.p12 | gh secret set ANDROID_KEYSTORE_BASE64
+      #   gh secret set ANDROID_KEYSTORE_PASSWORD
       - name: Sign the APKs and name them by ABI
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -266,7 +273,7 @@ jobs:
           [ -n "$KEYSTORE_BASE64" ] || missing+=(ANDROID_KEYSTORE_BASE64)
           [ -n "$KEYSTORE_PASSWORD" ] || missing+=(ANDROID_KEYSTORE_PASSWORD)
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error::repository secret not set: ${missing[*]} (README, 'Android signing key')"
+            echo "::error::repository secret not set: ${missing[*]} (see the comment above this step in ci.yml)"
             exit 1
           fi
           tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
@@ -334,7 +341,7 @@ jobs:
       # No Developer ID certificate: `-` makes the bundler sign ad hoc, which
       # Apple Silicon needs before it will run the app at all. Gatekeeper still
       # refuses a downloaded ad-hoc app until its quarantine flag is cleared
-      # (README "Installing the macOS and iOS builds").
+      # (README, "Edge cases").
       - name: Build the app and DMG
         run: cargo tauri build --bundles app,dmg
         env:

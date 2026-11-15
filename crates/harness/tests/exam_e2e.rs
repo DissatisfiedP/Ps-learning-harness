@@ -459,10 +459,6 @@ async fn the_exam_plan_ranks_by_weight_forgetting_and_unshown_layers() {
     assert_eq!(plan["exam"]["name"], "EE101 finals");
     assert_eq!(plan["unmapped"][0]["planNode"], "ghost");
     assert_eq!(plan["simulation"]["label"], "estimate");
-    assert!(plan["simulation"]["note"]
-        .as_str()
-        .unwrap()
-        .contains("[inference]"));
     let raise = plan["simulation"]["raise"].as_array().unwrap();
     assert_eq!(raise[0]["id"], KVL, "the biggest unshown weight gains most");
     assert!(plan["simulation"]["expectedExam"].as_f64().unwrap() > 0.0);

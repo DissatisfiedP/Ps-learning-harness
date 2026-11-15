@@ -1,4 +1,4 @@
-// Mermaid diagrams (build prompt W1, D4).
+// Mermaid diagrams.
 //
 // The library is a 2.7 MB bundle, so it is loaded only when the first
 // fenced ```mermaid block appears. The vendored file is the IIFE build: it

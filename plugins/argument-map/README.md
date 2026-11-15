@@ -23,7 +23,7 @@ Draws an argument reconstruction as a card the learner keeps referring to (argum
 
 ## Shipping
 
-Like `circuit`, this folder is the app repo's copy; the published package lives in the owner's registry (`docs/plugins.md` §8.1) and is installed from there. Pure computation, no permissions.
+Like `circuit`, this folder is the app repo's copy; the published package lives in the default registry (`docs/plugins.md` §8.1) and is installed from there. Pure computation, no permissions.
 
 ## Tests
 

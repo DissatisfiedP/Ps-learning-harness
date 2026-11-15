@@ -1,4 +1,4 @@
-//! The api-1 host standard library for Luau plugins (build prompt W5).
+//! The api-1 host standard library for Luau plugins.
 //! Pure functions only: JSON, SVG element building, real/complex arithmetic
 //! and a dense linear solve, a seeded PRNG, and a debug log. No I/O.
 

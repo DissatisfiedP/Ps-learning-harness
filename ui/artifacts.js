@@ -1,4 +1,4 @@
-// Artifact figures (build prompt W6, D7/D8).
+// Artifact figures.
 //
 // Markdown keeps `![alt](artifact:<id>)` out of DOMPurify's URI filter: the
 // renderer turns it into a `<span data-artifact="<id>" data-alt="…">` slot.

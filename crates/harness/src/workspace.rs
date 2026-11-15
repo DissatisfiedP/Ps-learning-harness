@@ -1,4 +1,4 @@
-//! Session workspace folders (build prompt W4, D12).
+//! Session workspace folders.
 //!
 //! The mapping session → absolute folder path is device-local
 //! (`<config>/workspaces.json`); the session op log records only the folder's
@@ -206,7 +206,7 @@ pub fn write(
 }
 
 impl crate::Harness {
-    /// Attach a folder to a session (W4). Records only the folder's name in
+    /// Attach a folder to a session. Records only the folder's name in
     /// the op log; the absolute path stays in `<config>/workspaces.json`.
     pub fn attach_workspace(&self, session_id: &str, path: &str) -> Result<String, crate::Error> {
         let expanded = crate::files::expand_home(path);

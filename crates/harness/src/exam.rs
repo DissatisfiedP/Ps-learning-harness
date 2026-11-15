@@ -24,7 +24,7 @@
 //! recall, now and on the exam day (the forgetting curve carried to that
 //! day), and the nodes whose one successful review today would raise it most.
 //! It is an estimate: FSRS's parameters were fit on flashcards, and an exam
-//! answer needs more than recall **[inference]** (architecture §4.13).
+//! answer needs more than recall (architecture §4.13).
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
@@ -597,7 +597,7 @@ pub struct Simulation {
     pub raise: Vec<Raise>,
 }
 
-const SIMULATION_NOTE: &str = "An estimate, not a prediction. It reads each idea's recall probability from FSRS, whose parameters were fit on flashcards, not exam answers [inference]; it counts an idea with no answers as 0 and an exam answer needs more than recall.";
+const SIMULATION_NOTE: &str = "An estimate, not a prediction. It reads each idea's recall probability from FSRS, whose parameters were fit on flashcards, not exam answers; it counts an idea with no answers as 0 and an exam answer needs more than recall.";
 
 fn memory(n: &NodeState) -> fsrs::Memory {
     fsrs::Memory {
@@ -1346,7 +1346,6 @@ mod tests {
         );
         let sim = simulate(&ranked, &m, now(), Some(20));
         assert_eq!(sim.label, "estimate");
-        assert!(sim.note.contains("[inference]"));
         let exam = sim.expected_exam.unwrap();
         assert!(
             exam < sim.expected_now && sim.expected_now > 0.0 && exam >= 0.0,

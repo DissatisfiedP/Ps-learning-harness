@@ -3,7 +3,7 @@
 //! Turns and jobs run in the background (a job can wake the tutor long after
 //! the command that started it returned), so the runtime emits through one
 //! process-wide sink instead of a per-command callback. [`Coalescer`] batches
-//! text deltas (build prompt M7.4): it flushes every ~16 ms or 2 KB, and
+//! text deltas: it flushes every ~16 ms or 2 KB, and
 //! always before any other event so ordering is preserved.
 
 use std::sync::{Arc, Mutex};

@@ -1,4 +1,4 @@
-//! `cargo run -p harness --bin plugin -- test <dir>` (build prompt W5).
+//! `cargo run -p harness --bin plugin -- test <dir>`.
 //!
 //! Validates the manifest, its files, the schemas and fragments, runs a Luau
 //! type check when `luau-analyze` is installed, then runs every test file in

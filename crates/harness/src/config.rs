@@ -171,7 +171,7 @@ pub struct Settings {
     /// written after load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelChoice>,
-    /// Plugin registries the learner added (W8). The built-in default
+    /// Plugin registries the learner added. The built-in default
     /// (`install::DEFAULT_REGISTRY_URL`) is not stored here; see
     /// `hide_default_registry`.
     #[serde(default)]

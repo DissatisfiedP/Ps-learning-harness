@@ -17,8 +17,8 @@
 //!
 //! Topic tree and each proposition's home topic are authored here from the
 //! data (the plan's topic titles, plus keyword rules over name+statement).
-//! Both are **[inference]**: LearnHarness has no topic tree of its own, so the
-//! grouping is a judgement, not imported fact.
+//! Both are a judgement, not imported fact: LearnHarness has no topic tree of
+//! its own.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -162,7 +162,7 @@ fn plan_topics(chat: &Value) -> Vec<(String, String)> {
 }
 
 /// `Mathematics → {Algebra, Calculus, Multivariable} → the plan's topics`.
-/// The grouping is authored **[inference]** (see the module doc).
+/// The grouping is authored here (see the module doc).
 fn topic_tree(plan: &[(String, String)]) -> Vec<Value> {
     let group_of = |id: &str| -> &'static str {
         match id {
@@ -183,7 +183,7 @@ fn topic_tree(plan: &[(String, String)]) -> Vec<Value> {
     topics
 }
 
-/// Home topic from the claim's name + statement. Authored **[inference]**.
+/// Home topic from the claim's name + statement, by keyword rules.
 fn home_of(name: &str, statement: &str) -> &'static str {
     let s = format!("{name} {statement}").to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| s.contains(n));
@@ -237,7 +237,7 @@ fn home_of(name: &str, statement: &str) -> &'static str {
         return "algebra-domains";
     }
     // Claims that fell through to the group topic. Kept last so every
-    // earlier classification is unchanged; **[inference]** like the rules
+    // earlier classification is unchanged; a judgement like the rules
     // above, from the claim's own statement:
     // - the |f(x) − L| = |x − a|·|extra(x)| bound is part of an ε–δ proof;
     // - algebraic identities and member-by-member multiplication are

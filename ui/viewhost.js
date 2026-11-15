@@ -1,4 +1,4 @@
-// Host for a plugin's interactive view (build prompt W7).
+// Host for a plugin's interactive view.
 //
 // The view runs in `<iframe sandbox="allow-scripts">` (never
 // allow-same-origin), so it has an opaque origin and cannot reach this

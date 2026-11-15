@@ -1,4 +1,4 @@
-//! Sandboxed Luau plugin runtime (build prompt W5, D6).
+//! Sandboxed Luau plugin runtime.
 //!
 //! One VM per plugin, created lazily and reused. Limits: 64 MiB memory, 2 s
 //! per tool call, 200 ms per view bridge call, checked by the Luau interrupt.
@@ -23,11 +23,11 @@ pub const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 pub const TOOL_TIMEOUT_MS: u64 = 2_000;
 /// Wall-clock cap for one view bridge call (milliseconds).
 pub const VIEW_TIMEOUT_MS: u64 = 200;
-/// Tool result text cap is enforced by the caller (W5).
+/// Tool result text cap is enforced by the caller.
 pub const MAX_RESULT_BYTES: usize = 16 * 1024;
-/// Cap on an artifact's serialized `data` (same as the fallback SVG cap, W6).
+/// Cap on an artifact's serialized `data` (same as the fallback SVG cap).
 pub const MAX_ARTIFACT_DATA_BYTES: usize = 256 * 1024;
-/// The one return shape of an `artifact = true` tool (W6), quoted in errors.
+/// The one return shape of an `artifact = true` tool, quoted in errors.
 const ARTIFACT_SHAPE: &str =
     "an artifact tool must return { text = \"…\", artifact = { kind = \"svg\", svg = \"<svg…>\", data = {…} } }";
 /// Test-file cap, so a runaway test cannot hold the CLI forever.

@@ -12,7 +12,7 @@
 //! session, and a Learn session is read-only unless its second op is the
 //! initial `phase` op (`read_file`, `scan_head`).
 //!
-//! Performance (build prompt M7): `list` reads only each file's first two
+//! Performance: `list` reads only each file's first two
 //! lines plus its mtime, and titles generated later come from a device-local
 //! index; the parsed ops of recently used sessions stay in a small LRU so a
 //! turn never re-reads its session file.
@@ -366,7 +366,7 @@ pub struct TitleOp {
     pub title: String,
 }
 
-/// A read root granted by a learner attachment (W3). Device-local paths in
+/// A read root granted by a learner attachment. Device-local paths in
 /// the synced log are unavoidable here: the grant is meaningless without the
 /// path, and another device simply finds it missing and asks again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,7 +381,7 @@ pub struct FileGrantOp {
 
 /// A session attached to (or detached from) a learner folder. The absolute
 /// path is device-local; only the folder name is synced so another device can
-/// ask the learner to point at it (build prompt W4).
+/// ask the learner to point at it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceOp {
@@ -391,7 +391,7 @@ pub struct WorkspaceOp {
     pub name: String,
 }
 
-/// One `workspace_write` (build prompt W4). The content is not stored, only
+/// One `workspace_write`. The content is not stored, only
 /// the hash the agent last saw or wrote, so learner edits are never clobbered.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -403,7 +403,7 @@ pub struct WorkspaceWriteOp {
     pub size: u64,
 }
 
-/// A short state summary a view posted (W7 learning hook). The core keeps
+/// A short state summary a view posted. The core keeps
 /// only the latest per artifact and writes it just before the learner's next
 /// message; replay renders it on that message in the provider request. Other
 /// view interaction is not logged.
@@ -416,7 +416,7 @@ pub struct ViewStateOp {
     pub summary: String,
 }
 
-/// A figure produced by a plugin tool (build prompt W6). Replay never re-runs
+/// A figure produced by a plugin tool. Replay never re-runs
 /// plugins: everything needed to display the artifact is here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -946,7 +946,7 @@ impl Store {
         ))
     }
 
-    /// Newest activity first. Reads only the first two lines + mtime (M7).
+    /// Newest activity first. Reads only the first two lines + mtime.
     pub fn list(&self) -> Result<Vec<SessionSummary>, Error> {
         let mut out = Vec::new();
         for path in self.files()? {

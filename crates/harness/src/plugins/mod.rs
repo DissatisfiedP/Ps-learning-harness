@@ -1,4 +1,4 @@
-//! Plugins as packages (build prompt W5, D5/D6): tools, prompt fragments,
+//! Plugins as packages: tools, prompt fragments,
 //! renderers and interactive views, written in sandboxed Luau. Built-in
 //! native Rust plugins (`native/`) keep the same manifest shape for
 //! system-level tools (running programs, the network, files).
@@ -347,7 +347,7 @@ struct Entry {
     manifest: PluginManifest,
     package_hash: String,
     source: PluginSource,
-    /// Folder plugins: reloaded when their files change (W8).
+    /// Folder plugins: reloaded when their files change.
     watch: Option<Watch>,
 }
 

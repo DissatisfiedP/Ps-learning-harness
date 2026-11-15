@@ -838,7 +838,7 @@
         today: { kind: 'teach', nodeIds: ['derivative'], reason: 'Derivative as a limit ranks near the top and needs teaching: an open misconception: differentiates the outer function only' },
         mix: { teachShare: 0.34, teachNodes: 1, practiceNodes: 3, sittings: 10, teachSittings: 3, practiceSittings: 7, papers: 2 },
         simulation: {
-          label: 'estimate', note: 'An estimate, not a prediction. It reads each idea’s recall probability from FSRS, whose parameters were fit on flashcards, not exam answers [inference]; it counts an idea with no answers as 0 and an exam answer needs more than recall.',
+          label: 'estimate', note: 'An estimate, not a prediction. It reads each idea’s recall probability from FSRS, whose parameters were fit on flashcards, not exam answers; it counts an idea with no answers as 0 and an exam answer needs more than recall.',
           horizonDays: 10, expectedNow: 0.46, expectedExam: 0.33, unseen: 1,
           topics: [
             { home: 'calc', title: 'Calculus', nodes: 3, weight: 2.3, expectedNow: 0.6, expectedExam: 0.43 },

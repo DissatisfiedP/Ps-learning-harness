@@ -1,4 +1,4 @@
-//! Plugin runtime end to end (build prompt W5–W9) with the scripted provider
+//! Plugin runtime end to end with the scripted provider
 //! from `common/mod.rs` and the real `plugins/circuit` package: a planned
 //! section draws a divider, artifacts outlive their plugin, answer mode
 //! grades through the plugin's view, and registry installs feed the planner.
@@ -94,7 +94,7 @@ fn probe(v: &Value) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// W5 + W6: planner selects circuit, tutor draws, artifacts replay without it
+// Planner selects circuit, tutor draws, artifacts replay without it
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -196,7 +196,7 @@ async fn a_planned_circuit_draws_and_its_artifacts_replay_without_the_plugin() {
     assert_eq!(artifacts(&h, &id), made);
     assert!(script.unexpected.lock().unwrap().is_empty());
 
-    // Placement (W6 acceptance, core half; `scripts/ui-check` renders the
+    // Placement (core half; `scripts/ui-check` renders the
     // same op order): the closing reply carries the first circuit's handle
     // mid-paragraph and no other handle, and every artifact op precedes it,
     // so the UI places d1 in the sentence and appends the rest in order.
@@ -250,7 +250,7 @@ fn place_first_divider(body: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// W7: answer mode and view state
+// Answer mode and view state
 // ---------------------------------------------------------------------------
 
 fn view_question(artifact: &str, prompt: &str) -> Value {
@@ -486,7 +486,7 @@ async fn answer_mode_grades_through_the_view_and_never_records_a_verdict() {
         "{refusal}"
     );
 
-    // ... nor once its section is over (W7: an active plugin only).
+    // ... nor once its section is over (an active plugin only).
     h.set_plugin_enabled("circuit", true).unwrap();
     s.push(
         "tutor",
@@ -639,7 +639,7 @@ async fn a_folder_plugin_reloads_when_its_files_change() {
 }
 
 // ---------------------------------------------------------------------------
-// W8 + W9: local registry, lock, planner search, install-later grants
+// Local registry, lock, planner search, install-later grants
 // ---------------------------------------------------------------------------
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -852,7 +852,7 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
     let after = script.requests_of("tutor").pop().unwrap();
     assert!(tool_names(&after).contains(&"circuit_draw".to_owned()));
 
-    // No update while circuit is active in a session's current section (W8),
+    // No update while circuit is active in a session's current section,
     // whether a turn is running or not.
     let gate = Arc::new(Semaphore::new(0));
     s.push(
@@ -971,7 +971,7 @@ async fn the_planner_proposes_an_uninstalled_plugin_and_install_grants_it_later(
 
 /// The UI command returns only bridge metadata; the inlined view document is
 /// served separately by the `pluginview` scheme, never over the command
-/// channel (W7 clean cutover, 2026-11-07).
+/// channel (clean cutover, 2026-11-07).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_view_returns_metadata_and_document_is_served_separately() {
     let (repo, config) = temp_dirs("view-payload");

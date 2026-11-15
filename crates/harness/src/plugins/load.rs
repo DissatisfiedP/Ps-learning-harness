@@ -184,7 +184,7 @@ impl Harness {
         })
     }
 
-    /// Updates never apply mid-section to a running session (W8): a session
+    /// Updates never apply mid-section to a running session: a session
     /// keeps the version it was granted until its next section starts.
     fn check_not_in_use(&self, id: &str) -> Result<(), Error> {
         if !lock(&self.plugins).is_installed(id) {
@@ -507,7 +507,7 @@ impl Harness {
         Ok(index)
     }
 
-    /// Fetch every configured registry and cache its index (W8 Settings).
+    /// Fetch every configured registry and cache its index.
     pub async fn refresh_registries(&self) -> Vec<RegistryStatus> {
         let mut out = Vec::new();
         for registry in self.registries() {
@@ -583,7 +583,7 @@ impl Harness {
             .collect()
     }
 
-    /// `plugin_search` for the planner (W9): up to five uninstalled matches
+    /// `plugin_search` for the planner: up to five uninstalled matches
     /// from cached indexes, with permissions and platforms. Every whitespace-
     /// separated term must appear somewhere in the searchable text, and only
     /// entries that list this device's platform are offered.

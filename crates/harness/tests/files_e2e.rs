@@ -1,4 +1,4 @@
-//! Learner files end to end (build prompt W3, W4) with the scripted provider
+//! Learner files end to end with the scripted provider
 //! from `common/mod.rs`: attachments on the first message and the read roots
 //! they grant, and the workspace folder's write guard.
 //!
@@ -31,7 +31,7 @@ fn root() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// W3: three attachments on the first message
+// Three attachments on the first message
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -168,7 +168,7 @@ async fn practice_refuses_a_library_link_and_an_empty_submission() {
 }
 
 // ---------------------------------------------------------------------------
-// W4: workspace write guard, escapes, detach, nothing absolute in the log
+// Workspace write guard, escapes, detach, nothing absolute in the log
 // ---------------------------------------------------------------------------
 
 fn write(path: &str, content: &str) -> Value {

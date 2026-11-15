@@ -1543,7 +1543,7 @@ async function exam() {
   expect(dash.title === 'MATH101 final' && /^10 days left$/.test(dash.days) && dash.focus === 'exam-heading' && JSON.stringify(dash.calls) === JSON.stringify([{ sessionId: 'L1' }]),
     `dashboard head: ${JSON.stringify(dash)}`);
   expect(dash.sections.join('|') === 'Today|Expected score|Coverage by topic|Ideas in priority order|Teaching and practice|Past papers|Sit a timed paper', `sections: ${dash.sections}`);
-  expect(dash.today === 'Teach Derivative as a limit.' && dash.label === 'Estimate' && dash.figures.join('|') === '≈ 46%|≈ 33%' && /\[inference\]/.test(dash.note)
+  expect(dash.today === 'Teach Derivative as a limit.' && dash.label === 'Estimate' && dash.figures.join('|') === '≈ 46%|≈ 33%' && Boolean(dash.note)
     && dash.raise[0].startsWith('Derivative as a limit · Teach · about +7.1 points'), `today and estimate: ${JSON.stringify(dash)}`);
   expect(dash.bars.length === 2 && /^Calculus: expected 60% now, 43% on the exam day, 88% of the exam$/.test(dash.bars[0]) && /^Algebra: expected 0% now/.test(dash.bars[1]), `coverage bars: ${JSON.stringify(dash.bars)}`);
   expect(dash.ideas.join('|') === 'Derivative as a limit|Quadratic formula|Chain rule|Limit of a function' && dash.chips.join('|') === 'Teach|Practise|Practise|Practise'

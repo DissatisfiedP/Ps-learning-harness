@@ -1,4 +1,4 @@
-// Attachment chips and image thumbnails (build prompt W3).
+// Attachment chips and image thumbnails.
 //
 // Images live in the data repo; `attachment_data` returns a data URL for a
 // chip or a reopened learner message. Data URLs are cached for the window.

@@ -1,14 +1,14 @@
 //! Session flow data types (architecture §4.10, §5).
 //!
 //! These are the target op-log payload shapes. [`SessionState`] is *derived*:
-//! it is rebuilt by replaying ops (M4), never stored. The prompt composer (M3)
+//! it is rebuilt by replaying ops, never stored. The prompt composer
 //! renders a compact view of it as `session_state`.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Teaching phase. The phase machine (M4/M5) owns transitions; this is the
+/// Teaching phase. The phase machine owns transitions; this is the
 /// value persisted in `phase` ops and read by the composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,7 +155,7 @@ pub struct Section {
     #[serde(default)]
     pub desktop_only: bool,
     /// Plugins in `plugins` that weren't installed and enabled on this device
-    /// when the plan was written (W9). Set by code in `plan_write`, never by
+    /// when the plan was written. Set by code in `plan_write`, never by
     /// the model; the plan card shows an install chip for each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs_install: Vec<String>,
@@ -480,7 +480,7 @@ pub struct SessionState {
     /// path -> sha256 of the last agent write in the workspace.
     #[serde(default)]
     pub workspace_writes: BTreeMap<String, String>,
-    /// Absolute paths the learner granted as read roots (W3).
+    /// Absolute paths the learner granted as read roots.
     #[serde(default)]
     pub file_grants: Vec<String>,
     /// nodeId -> highest level with a passing check (derived, never stored;

@@ -1,5 +1,5 @@
-// Settings → Plugins and Registries, and the consent screen (build prompt
-// W8/W9). Every install path goes through `askConsent`; nothing installs as a
+// Settings → Plugins and Registries, and the consent screen.
+// Every install path goes through `askConsent`; nothing installs as a
 // side effect of approving a plan or opening Settings.
 
 import { call, message } from './api.js';

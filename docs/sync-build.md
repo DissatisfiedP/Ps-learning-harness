@@ -6,7 +6,7 @@ and CI build", and gaps 13 and 16) and in the [WebDAV target](#webdav-target) se
 Deviations from the git text below: `git2` 0.21 with `vendored-libgit2` and the system OpenSSL (built from source on
 Android), and a `conflicts` ledger kept in `sync.json` for the needs-attention list.
 
-UI (owner decision 2026-11-09): a **Sync** section in Settings after Providers (Git and WebDAV groups, each with its own
+UI (decided 2026-11-09): a **Sync** section in Settings after Providers (Git and WebDAV groups, each with its own
 status and Disconnect, one "Sync now", the needs-attention list with "Acknowledge"), a status button plus "Sync now" in
 the Home header, and a "not synced" / "needs a look" banner on Home only. Spec: `docs/ui-design.md` §7.1 and §7.5.2.
 
@@ -36,7 +36,7 @@ sync.
 - **Android: git's HTTPS trust is decided by rustls.** `openssl-src` builds Android's OpenSSL with `no-stdio`, which
   compiles `BIO_new_file` to `return NULL`: that OpenSSL can read no certificate file or folder, so it trusts
   nothing and every HTTPS remote failed with "the SSL certificate is invalid". Two attempts to hand it Android's
-  roots as a file (`OPENSSLDIR` via `OPENSSL_CONFIG_DIR`, then `SSL_CERT_FILE`) failed on the owner's phone for
+  roots as a file (`OPENSSLDIR` via `OPENSSL_CONFIG_DIR`, then `SSL_CERT_FILE`) failed on a real phone for
   exactly that reason, while passing every desktop test (desktop builds don't get `no-stdio`). On Android,
   `remote_callbacks` now sets libgit2's certificate callback (`git2::RemoteCallbacks::certificate_check`, safe
   code): it takes the leaf certificate libgit2 received, gets the server's intermediates from a rustls handshake

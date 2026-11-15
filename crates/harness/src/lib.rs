@@ -218,7 +218,7 @@ pub struct Harness {
     /// sync engine's change hook.
     pub(crate) sink: Arc<Mutex<Option<EventSink>>>,
     /// session → artifact → latest view-state summary since the learner's
-    /// last message; flushed as `viewState` ops when they next send (W7).
+    /// last message; flushed as `viewState` ops when they next send.
     pub(crate) view_states: Mutex<HashMap<String, BTreeMap<String, String>>>,
     /// Mobile only: each Learn session file's mobile-lock facts, keyed by its
     /// length and mtime (`<config>/session-locks.json`, loaded on first use).
@@ -395,7 +395,7 @@ impl Harness {
 
     // ---- sessions -------------------------------------------------------
 
-    /// Every session, from each file's first two lines (M7). On mobile, a
+    /// Every session, from each file's first two lines. On mobile, a
     /// Learn session that used a desktop-only plugin is listed read-only,
     /// from a device-local cache that re-reads a file only when it changed.
     /// Sessions of a branching plan carry their lineage, and a merge whose
@@ -894,7 +894,7 @@ impl Harness {
         crate::attachments::staging_dir(&self.config_dir)
     }
 
-    /// Stage a pasted image (device-local until Send) and describe it (W3).
+    /// Stage a pasted image (device-local until Send) and describe it.
     pub fn stage_image(&self, data_base64: &str, name: Option<&str>) -> Result<Attachment, Error> {
         crate::attachments::store_image(&self.staging_dir(), data_base64, name)
     }
@@ -1129,7 +1129,7 @@ impl Harness {
     }
 }
 
-/// Vision capability for the composer (W2/W3). `None` = unverified.
+/// Vision capability for the composer. `None` = unverified.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisionCapabilities {
@@ -1148,7 +1148,7 @@ pub struct PluginView {
 }
 
 /// A view-state summary as one line: control characters and line breaks
-/// become spaces, capped at 500 characters (W7).
+/// become spaces, capped at 500 characters.
 pub(crate) fn sanitize_view_state(summary: &str) -> String {
     summary
         .chars()

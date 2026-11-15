@@ -1,8 +1,8 @@
-//! Registries, install and the plugin lock (build prompt W8, D9).
+//! Registries, install and the plugin lock.
 //!
 //! An index is one `index.json` served from an HTTPS URL or a local path.
 //! Install verifies sha256, unpacks under `<config>/plugins/<id>/<sha256>/`,
-//! validates through the W5 loader, then records the plugin in the data
+//! validates through the loader, then records the plugin in the data
 //! repo's `plugins.lock`.
 
 use std::io::Read;
@@ -23,7 +23,7 @@ pub struct RegistryIndex {
 }
 
 /// One plugin in a registry index. Keys follow `plugin.toml` (`use_when`,
-/// `avoid_when`), as the W8 index format specifies.
+/// `avoid_when`), as the index format specifies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexPlugin {
     pub id: String,
@@ -70,7 +70,7 @@ pub enum LockSource {
     Folder { folder: String },
 }
 
-/// The owner's registry (the `Ps-learning-harness-plugins` repository),
+/// The project's registry (the `Ps-learning-harness-plugins` repository),
 /// listed on every device unless the learner removes it.
 pub const DEFAULT_REGISTRY_NAME: &str = "P's Learning Harness plugins";
 pub const DEFAULT_REGISTRY_URL: &str =

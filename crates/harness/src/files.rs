@@ -52,7 +52,7 @@ pub fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     resolve_roots(std::slice::from_ref(&root.to_path_buf()), path)
 }
 
-/// Resolve `path` inside any of `roots` (W3/W4 read roots). Relative paths are
+/// Resolve `path` inside any of `roots` (the read roots). Relative paths are
 /// joined to the first root (the home directory); absolute paths must lie in
 /// one of the roots after canonicalisation (symlinks included).
 pub fn resolve_roots(roots: &[PathBuf], path: &str) -> Result<PathBuf, String> {
@@ -242,7 +242,7 @@ pub fn file_read(root: &Path, path: &str, lines: Option<&str>) -> Result<String,
     file_read_roots(std::slice::from_ref(&root.to_path_buf()), path, lines)
 }
 
-/// `file_read` over the home root plus session-granted roots (W3).
+/// `file_read` over the home root plus session-granted roots.
 pub fn file_read_roots(
     roots: &[PathBuf],
     path: &str,
@@ -396,7 +396,7 @@ fn walk(
 }
 
 /// `file_find` over the home root (`roots[0]`), the session `workspace` and
-/// granted roots (W3/W4). Home hits are shown `~/`-relative, workspace hits
+/// granted roots. Home hits are shown `~/`-relative, workspace hits
 /// relative to the workspace, granted-root hits absolute.
 pub fn file_find_roots(
     roots: &[PathBuf],
@@ -449,8 +449,7 @@ pub struct Mention {
 }
 
 /// Files and folders for the composer's `@` list over the same roots and
-/// path forms as [`file_find_roots`], hidden directories skipped, capped
-/// (W3).
+/// path forms as [`file_find_roots`], hidden directories skipped, capped.
 pub fn mentions(
     roots: &[PathBuf],
     workspace: Option<&Path>,

@@ -28,23 +28,23 @@ Claims marked **[inference]** are reasoned, not verified.
 
 | # | Requirement | Source |
 |---|---|---|
-| R1 | Lightweight: small install, no bundled browser, no separate server process | owner |
-| R2 | Desktop **and phone** (iOS + Android) | owner |
-| R3 | Single user; never two devices active at once; sync through any storage host, git repo first | owner |
+| R1 | Lightweight: small install, no bundled browser, no separate server process | project requirement |
+| R2 | Desktop **and phone** (iOS + Android) | project requirement |
+| R3 | Single user; never two devices active at once; sync through any storage host, git repo first | project requirement |
 | R4 | Several learning modes; the mode follows the *kind of knowledge*, not the subject | review |
-| R5 | Graph = topic tree (where a node lives) + dependency edges that cross trees (what it needs) | owner |
-| R6 | Practice that hides the target: the topic appears as an intermediate step inside a problem that looks unrelated | owner |
+| R5 | Graph = topic tree (where a node lives) + dependency edges that cross trees (what it needs) | project requirement |
+| R6 | Practice that hides the target: the topic appears as an intermediate step inside a problem that looks unrelated | project requirement |
 | R7 | Spaced review across sessions; practice outcomes are persisted, not session-only | review; LH issues #115 #262 |
 | R8 | Exam mode: deadline, past papers, coverage over depth | review |
 | R9 | Bring-your-own-key, multiple providers, editable prompts | carried from LH |
-| R10 | Per-stretch tools: the plan decides which extra capabilities (sandbox, REPL, live search, …) each part of a lesson gets, without loading all of them into every prompt | owner |
-| R11 | Research as a resource throughout: the field is scoped from sources at the start, and the researcher can be called at any point when something comes up | owner |
-| R12 | The tutor can't drift from the approved plan; the plan changes only through a separate planner, on request | owner |
-| R13 | The learner picks models per role (heavy tutor, deep planner, light reader, …), labeled so the choice follows the job; the harness maps agents to roles | owner |
-| R14 | Target levels: the learner and planner set how far each section goes (Explain / Use / Analyze / Design); sections close only on evidence at that level | owner; `docs/learning-system.md` §2 |
-| R15 | Learner-chosen starting point: full measurement, a quick check, or none for complete beginners | owner; LearnHarness user complaint; §3 |
-| R16 | Plan-card controls (hidden behind "⋯") for what and how far, applied through the planner; self-reported known parts are verified, not trusted | owner; §4 |
-| R17 | Opt-in guided hunts with a correcting debrief, a field guide to where the field lives, a frontier list of parked topics, and calibration feedback | owner; §5–§7 |
+| R10 | Per-stretch tools: the plan decides which extra capabilities (sandbox, REPL, live search, …) each part of a lesson gets, without loading all of them into every prompt | project requirement |
+| R11 | Research as a resource throughout: the field is scoped from sources at the start, and the researcher can be called at any point when something comes up | project requirement |
+| R12 | The tutor can't drift from the approved plan; the plan changes only through a separate planner, on request | project requirement |
+| R13 | The learner picks models per role (heavy tutor, deep planner, light reader, …), labeled so the choice follows the job; the harness maps agents to roles | project requirement |
+| R14 | Target levels: the learner and planner set how far each section goes (Explain / Use / Analyze / Design); sections close only on evidence at that level | `docs/learning-system.md` §2 |
+| R15 | Learner-chosen starting point: full measurement, a quick check, or none for complete beginners | LearnHarness user complaint; §3 |
+| R16 | Plan-card controls (hidden behind "⋯") for what and how far, applied through the planner; self-reported known parts are verified, not trusted | §4 |
+| R17 | Opt-in guided hunts with a correcting debrief, a field guide to where the field lives, a frontier list of parked topics, and calibration feedback | §5–§7 |
 
 ---
 
@@ -808,7 +808,7 @@ Rules:
 
 The host library is pure modules: `@harness/json` (encode/decode), `@harness/svg` (element builder with escaping, `currentColor` strokes and a complete-document helper), `@harness/num` (real and complex arithmetic, matrix multiply, partial-pivoting LU solve), `@harness/rand` (seeded, never clock-seeded) and `@harness/log` (tracing only); `plugin test` adds `@harness/test` (golden files). Their types are one type-only module each in `crates/harness/plugin-api/`, which a `.luaurc` alias points luau-lsp and luau-analyze at. There is no I/O, network, process or clock.
 
-Why Luau: the owner chose it; the interpreter is small and runs where the app runs, including mobile **[inference]**; plugins are mostly AI-written, so an exact typed host API matters more than ecosystem size; the sandbox, memory cap and interrupt are one crate away (`mlua`).
+Why Luau: it was a project decision; the interpreter is small and runs where the app runs, including mobile **[inference]**; plugins are mostly AI-written, so an exact typed host API matters more than ecosystem size; the sandbox, memory cap and interrupt are one crate away (`mlua`).
 
 **Native plugins (built, `crates/harness/src/plugins/native/`, `docs/plugins.md` §12).** The `Plugin` trait carries the in-tree Rust plugins that need system access, and seven are built in: `code-parse`, `live-search` (`net`), `image-set` (`fs-read`), `code-runner`, `repl`, `cas` (each `exec`) and `sandbox` (below). Each keeps its manifest, schemas, fragments and view under `native/<id>/` and compiles them in. They use the same `plugin.toml` shape and reach the planner, tool list, plan limits, artifacts, answer-mode grading and consent screen the same way as a package. Differences, all in code: they register after packages so none can be shadowed, `Harness` keeps one instance of each across registry rebuilds (a running REPL survives), `PluginInfo.builtin` is set and `remove_plugin` refuses them, and **a built-in that declares a permission starts disabled**: enabling it in Settings → Plugins (behind the consent screen, in plain words) is the consent, recorded in `settings.json` → `enabledPlugins`. Until then it is not in the planner's catalog, `plugin_request` refuses it and its tools aren't offered. The `exec` ones run programs installed on the device through `native/exec.rs`: scrubbed environment, temporary working directory, timeout, output cap, process-group kill, and on Linux with user namespaces no network; the file system is not isolated (`docs/plugins.md` §12). They list `desktop` only, because a phone has no such toolchains; `code-parse`, `live-search` and `image-set` list `mobile`. A desktop-only native follows the mobile rule like any desktop-only plugin (never offered or granted on a phone; a call refused; a session that used one is locked there, `docs/sync-build.md` "Sessions on mobile"). `cas` also exposes `cas::equivalent` as a Rust API for core code; nothing calls it yet.
 
@@ -832,7 +832,7 @@ Every artifact also has its static SVG fallback: replays, read-only sessions, a 
 
 **Answer mode.** A view may declare `answer = true`. `question_ask` then takes `view: { artifactId, task, target }` instead of a typed answer; the target is committed in the call op and never shown to the learner. The learner works in the view and submits; the host calls the plugin's `grade(answer, target)` with the view's `submit { answer }` value exactly as the view sent it; the plugin returns `{ correct, detail }`, and the tutor gets `{ questionId, artifactId, answer, view }` as the tool result. The tutor still calls `verdict_record` with the same `questionId`. **The plugin never records a verdict**, so grading policy stays in the agent loop (details: `docs/plugins.md` §7.4).
 
-**Registries, install and consent.** A registry is an HTTPS URL (or a `file://` URL or absolute local path) serving one `index.json`. Indexes are cached device-locally at `<config>/registry-cache/<sha256(url)>.json`; install downloads, verifies sha256, unpacks to `<config>/plugins/<id>/<sha256>/`, validates the package and records it in the data repo's `plugins.lock`. Prior art: Typst Universe (a reviewed package repository) and Cargo's sparse index. The owner's registry (`DissatisfiedP/Ps-learning-harness-plugins`, served from GitHub Pages) is built in as the default and fetched in the background at startup when its cached index is missing or over a day old; the learner can remove it and add others in Settings. Installing third-party code requires explicit consent; every Luau api-1 plugin shows "No access to your files, network or programs" because it has no privileged capability. There are no automatic updates and no separate update command: installing another version is refused while any session has a tutor turn running with that plugin active, so an update never lands mid-turn. Startup loads the version whose sha256 matches `plugins.lock`. Folder plugins are the development path: added by path, recorded in device-local settings and the lock, preferred over an installed copy with the same id, and reloaded from disk when their files change.
+**Registries, install and consent.** A registry is an HTTPS URL (or a `file://` URL or absolute local path) serving one `index.json`. Indexes are cached device-locally at `<config>/registry-cache/<sha256(url)>.json`; install downloads, verifies sha256, unpacks to `<config>/plugins/<id>/<sha256>/`, validates the package and records it in the data repo's `plugins.lock`. Prior art: Typst Universe (a reviewed package repository) and Cargo's sparse index. The default registry (`DissatisfiedP/Ps-learning-harness-plugins`, served from GitHub Pages) is built in and fetched in the background at startup when its cached index is missing or over a day old; the learner can remove it and add others in Settings. Installing third-party code requires explicit consent; every Luau api-1 plugin shows "No access to your files, network or programs" because it has no privileged capability. There are no automatic updates and no separate update command: installing another version is refused while any session has a tutor turn running with that plugin active, so an update never lands mid-turn. Startup loads the version whose sha256 matches `plugins.lock`. Folder plugins are the development path: added by path, recorded in device-local settings and the lock, preferred over an installed copy with the same id, and reloaded from disk when their files change.
 
 **Planner search, not planner install.** `plugin_search { query }` splits the query into whitespace-separated terms and requires every term to appear (case-insensitive) in id, title, description or `use_when`; only entries that list this device's platform are offered. It returns at most five uninstalled matches as JSON (`id`, `title`, `description`, `useWhen`, `avoidWhen`, `platforms`, `permissions`, highest semver `version`, `registry`). `plan_write` may then name an uninstalled plugin in a section; validation accepts it only if a cached index lists it *and* the entry lists this device's platform, and code sets that section's `needsInstall: [<id>, …]` from the installed/enabled/on-platform catalog at that moment — the model cannot set it. The plan card shows an **install** chip for ids still missing from the live installed list (it re-renders when that list changes), and approval g…
 
@@ -1250,7 +1250,7 @@ Webview caveat: rendering differs across WKWebView (iOS/macOS), Android WebView,
 
 ### 6.2 Language: Rust core, web UI
 
-**Chosen (built, owner decision):**
+**Chosen (built, project decision):**
 - Rust for providers, storage, the agent loop and tools: `crates/providers`, `crates/harness`, `crates/research-search`.
 - `crates/app` is a thin Tauri command layer with one command per `Harness` method.
 - The UI is plain ES modules in the webview, with no bundler.

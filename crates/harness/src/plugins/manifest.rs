@@ -1,4 +1,4 @@
-//! Plugin package manifest (`plugin.toml`) and strict validation (W5).
+//! Plugin package manifest (`plugin.toml`) and strict validation.
 //!
 //! Unknown keys are errors: a typo in an AI-written manifest must fail loudly
 //! rather than silently drop a permission or an agent scope.
@@ -179,7 +179,7 @@ impl Files<'_> {
 /// Permissions a native plugin may declare (docs/plugins.md §8.4).
 pub const NATIVE_PERMISSIONS: &[&str] = &["exec", "net", "fs-read", "fs-write"];
 
-/// Everything the loader refuses, each with the problem named (W5 acceptance).
+/// Everything the loader refuses, each with the problem named.
 pub fn validate(m: &PluginManifest, dir: &Path) -> Result<(), String> {
     validate_in(m, &Files::Dir(dir))
 }

@@ -1,4 +1,4 @@
-//! The agent runtime (architecture §4.10, §4.15; build prompt M4/M5).
+//! The agent runtime (architecture §4.10, §4.15).
 //!
 //! One tutor turn: compose the system prompt for the current phase, build the
 //! messages from the ops, stream one model call with the phase's tools,
@@ -1835,7 +1835,7 @@ impl Harness {
         }
     }
 
-    /// Answer-mode gate (W7): the referenced artifact must exist, belong to an
+    /// Answer-mode gate: the referenced artifact must exist, belong to an
     /// installed, enabled plugin that is active in the current section and
     /// whose view declares `answer = true`, and carry a `target` that stays
     /// in the call op.
@@ -1957,7 +1957,7 @@ impl Harness {
     }
 
     /// Read roots for this session: home, the attached workspace, and every
-    /// path a learner attachment granted (W3/W4).
+    /// path a learner attachment granted.
     fn file_roots(&self, session_id: &str, state: &SessionState) -> Vec<std::path::PathBuf> {
         let mut roots = Vec::new();
         if let Some(home) = files::home_dir() {
@@ -2163,7 +2163,7 @@ impl Harness {
         self.start_teaching_with(text, &[]).await
     }
 
-    /// As [`start_teaching`], with the attachments chosen on Home (W3).
+    /// As [`start_teaching`], with the attachments chosen on Home.
     pub async fn start_teaching_with(
         self: &Arc<Self>,
         text: &str,
@@ -2313,7 +2313,7 @@ impl Harness {
     }
 
     /// Image attachments are refused up front when the Tutor model is known
-    /// to lack vision; the composer asks first (W2/W3). A linked library
+    /// to lack vision; the composer asks first. A linked library
     /// that no longer exists is refused the same way, before anything is
     /// written.
     pub(crate) fn check_vision(

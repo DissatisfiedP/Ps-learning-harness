@@ -1,4 +1,4 @@
-// The shared composer (build prompt W3, D11): one component on Home and in
+// The shared composer: one component on Home and in
 // sessions. Attachments are staged as soon as they arrive (images in a
 // device-local staging folder, files and folders referenced by path) but are
 // only sent with the next learner message; Send moves staged images into

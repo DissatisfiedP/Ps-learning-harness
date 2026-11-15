@@ -1,4 +1,4 @@
-//! Learner attachments (build prompt W3, D11).
+//! Learner attachments.
 //!
 //! Images (pasted, picked or dropped) wait in a device-local staging folder
 //! (`<config>/staged-images/`) while they are chips in the composer, and move
@@ -259,7 +259,7 @@ pub fn image_block(repo: &Path, a: &Attachment) -> Option<(String, String)> {
     ))
 }
 
-/// One line for the model per referenced file/folder (W3: path, type, size).
+/// One line for the model per referenced file/folder (path, type, size).
 /// The "read it" hint is added only when the agent has the file tools. A
 /// linked reference library (Home '+', `library.rs`) is named by id: its
 /// text is in the repo, read with the library tools.

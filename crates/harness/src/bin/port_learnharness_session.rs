@@ -35,8 +35,8 @@
 //! - `goal` is the learner's own first sentence; `approach` is the tutor's
 //!   plan paragraph; both are excerpts of the source, never new prose.
 //! - Section `exit` is left empty: the source states no per-topic exit
-//!   criterion. **[inference]** — the plan's shape is knowledge-based, the
-//!   learner never authored this exact document.
+//!   criterion. The plan's shape is knowledge-based; the learner never
+//!   authored this exact document.
 //!
 //! Teaching progress per *proposition* is deliberately not invented: the
 //! source's questions are tagged at topic level, so evidence stays at topic

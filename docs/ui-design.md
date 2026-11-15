@@ -77,7 +77,7 @@ small samples. I read abstracts and summaries, not every full text (see §13).
 
 ### 2.5 Reading typography — *Mixed: some strong, some contested*
 - **Size:** larger sizes (18 pt and up in their setup) improved readability and comprehension for 104 readers. Extreme line spacings (0.8 and 1.8) hurt [Rello 2016]. Viewing distance changes the absolute numbers, so treat this as "bigger than the 14–16 px habit". *Moderate.*
-- **Measure:** ~55 cpl gave the best comprehension at normal and fast reading speeds in one study [Dyson & Haselgrove 2001]. The review literature is mixed: longer lines are sometimes read faster, while moderate lengths are preferred [Dyson 2004]. Typographic practice puts it at 45–90 characters [Butterick, line length]. *Moderate/contested.* I target ~60–72 characters where the window is narrow, and let the column grow on a wide screen (§5.2): the owner reports that a fixed short measure made reading *harder* on a large display, because the eye has to find the start of a short line far from the last word of the previous one. The wide-screen step is owner-requested (2026-11-07) and sits at the top of the contested range, not beyond what the evidence says is safe for a paragraph of this size.
+- **Measure:** ~55 cpl gave the best comprehension at normal and fast reading speeds in one study [Dyson & Haselgrove 2001]. The review literature is mixed: longer lines are sometimes read faster, while moderate lengths are preferred [Dyson 2004]. Typographic practice puts it at 45–90 characters [Butterick, line length]. *Moderate/contested.* I target ~60–72 characters where the window is narrow, and let the column grow on a wide screen (§5.2): a fixed short measure made reading *harder* on a large display in use, because the eye has to find the start of a short line far from the last word of the previous one. The wide-screen step was added 2026-11-07 and sits at the top of the contested range, not beyond what the evidence says is safe for a paragraph of this size.
 - **Serif vs sans:** serifs themselves make no reliable legibility difference [Arditi & Cho 2005]. The choice is free on evidence. Here a serif is chosen for *register* (it separates the tutor's text from the UI) and for harmony with KaTeX's Computer Modern-style math. It is not chosen for speed.
 - **Polarity:** dark-on-light (positive polarity) gives better acuity and proofreading in both younger and older adults [Piepenbrock 2013]. Light-on-dark is worst for glance legibility in a dark room [Dobres 2017]. Users still want dark themes at night, and "dark mode reduces eye strain" claims are not well supported. *Moderate for legibility; weak for comfort claims.* Decision: follow the OS setting, with a manual override, and tune the dark theme for contrast. Neither is the "focus" theme.
 - **Screen reading:** comprehension of expository text is slightly worse on screens than on paper (g ≈ −0.21), more so under time pressure [Delgado 2018]. *Moderate.* This supports a self-paced, stable page with no pressure cues (timers, ticking counters).
@@ -169,7 +169,7 @@ Each principle is binding. The evidence keys refer to §2.
 - **P1. One center.** At any moment exactly one region invites action: the desk composer, *or* the pending exercise, *or* the plan document, *or* an open sheet. Everything else is static. (§2.3, §2.8) An interactive view in the flow (§7.2.15) that is not an answer surface is **part of the page, not a second center**: it is the figure the sentence beside it refers to, and moving its controls is reading that figure, so the desk composer stays the one place to act and nothing the view does changes the desk. A view in answer mode *is* the pending exercise. [learning] Animations and simulations help when the learner is told what to manipulate (Höffler & Leutner 2007, doi:10.1016/j.learninstruc.2007.09.013; Rutten, van Joolingen & van der Veen 2012, doi:10.1016/j.compedu.2011.07.017); placing the view inside the prose that does the telling keeps instruction and manipulation in one place (§2.3 split attention).
 - **P2. Nothing moves that the learner did not move.** No autoscroll during streaming. No looping animation anywhere. No sliding-in. The only animation is the open and close of a sheet the learner requested, and it is removed under `prefers-reduced-motion`. (§2.1, §2.5 Schotter)
 - **P3. Background work stays in the background.** Job progress updates in place, as text. Anything that needs the learner (plan ready, question pending, failure) is surfaced at a turn boundary in the desk. It never takes focus away from where the learner is reading. (§2.2)
-- **P4. The page is a page.** The tutor's words are set like a book: serif, 20 px, line-height 1.55, ragged right, on one measured column that follows the window (56 ch on a narrow screen, up to 104 ch on a wide one — §5.2; owner-requested, 2026-11-07). The learner's words are set as notes: sans, indented, labelled "You". There are no bubbles, cards or avatars. (§2.3, §2.5)
+- **P4. The page is a page.** The tutor's words are set like a book: serif, 20 px, line-height 1.55, ragged right, on one measured column that follows the window (56 ch on a narrow screen, up to 104 ch on a wide one — §5.2; added 2026-11-07). The learner's words are set as notes: sans, indented, labelled "You". There are no bubbles, cards or avatars. (§2.3, §2.5)
 - **P5. Effort before answers.** Exercises invite generation (typed answer first, "your best guess is fine"). The answer is never in the DOM before submission. Confidence has no default. Verdicts appear beside stated confidence, in neutral ink, never in alarm red. (§2.6)
 - **P6. Goals and progress at honest granularity.** Each section opens with its title and exit goal. The head shows "Section n of m". There are no percentages or meters. (§2.4, §2.7)
 - **P7. Resumption cues everywhere.** Opening a session, closing the sheet, recovering from an error or answering a question all leave the learner at the start of the relevant turn, with the section label visible. (§2.2 Altmann & Trafton)
@@ -228,14 +228,14 @@ Where each stack is used:
 **Measure:**
 
 - `--measure` is in `ch` and is applied once, as `inline-size: min(var(--measure) + 2*var(--gutter), 100%)` on the shared `.col`. Because the column's `font-family` is `--font-read`, `ch` tracks the serif in use.
-- **It steps with the viewport** (owner direction, 2026-11-07): `56ch` below 1024 px, **`76ch` ≥ 1024 px, `92ch` ≥ 1280 px, `104ch` ≥ 1600 px**. The owner's words: the column used to be "a narrow column in the middle" and "it makes reading a bit hard" on a wide screen — at 1280–2560 px a 56ch strip leaves most of the window empty and the line return is hard to find. The steps are in `styles.css` next to the `.col` rule, so the flow, the running head, the desk, Home and (through it) every other column widen together; nothing else sets a measure.
+- **It steps with the viewport** (decided 2026-11-07): `56ch` below 1024 px, **`76ch` ≥ 1024 px, `92ch` ≥ 1280 px, `104ch` ≥ 1600 px**. The column used to be a narrow strip in the middle, which made reading hard on a wide screen — at 1280–2560 px a 56ch strip leaves most of the window empty and the line return is hard to find. The steps are in `styles.css` next to the `.col` rule, so the flow, the running head, the desk, Home and (through it) every other column widen together; nothing else sets a measure.
 - **Measured in Chromium at 20 px** (DejaVu Serif in the headless build, 11.18 px per `ch`):
   - The old fixed rule: 56 ch → **626 px**.
   - 1280 px viewport → 92 ch → **1028.5 px** of prose.
   - 2560 px viewport → 104 ch → **1162.7 px** of prose (still 45 % of the window).
   - Prose stays a text column, never full bleed, and the widest step is still well inside the window at every width since the window is the `min()`'s other side only below the step.
 - **What does not change:** code blocks and tables keep `overflow-x: auto` (§7.2.15, `.prose pre` / `.prose table`), the artifact figures keep `max-inline-size: 100%`, and the Settings sheet keeps its own 640 px column. Widening the flow never wraps a table or squeezes a view.
-- **Acceptance range (§12 A4): 58–72 characters per line below 1024 px, ~90–100 above 1280 px.** Long lines on a wide screen are the researched *moderate/contested* case (§2.5): what the owner reports losing is the line return, not the words, and a column that fills a wide window restores it.
+- **Acceptance range (§12 A4): 58–72 characters per line below 1024 px, ~90–100 above 1280 px.** Long lines on a wide screen are the researched *moderate/contested* case (§2.5): what is lost in use is the line return, not the words, and a column that fills a wide window restores it.
 - On phones the measure is limited by width. At 358 px of text and 18 px it is 39–51 cpl (measured), which is acceptable for phone reading.
 
 Prose details:
@@ -373,7 +373,7 @@ See §8 for where these may be used.
 ```
 
 - The scroller is `#messages` (keep the id). The running head and the desk are outside the scroller; they are sticky siblings in a grid `grid-template-rows: auto 1fr auto`.
-- The running head, page and desk share one inline axis: `inline-size: min(var(--measure) + 2*var(--gutter), 100%)`, centered. The eye never has to travel to the viewport corners. `--measure` steps with the viewport (§5.2): the axis widens on a big screen instead of leaving a narrow strip in the middle of it (owner direction, 2026-11-07).
+- The running head, page and desk share one inline axis: `inline-size: min(var(--measure) + 2*var(--gutter), 100%)`, centered. The eye never has to travel to the viewport corners. `--measure` steps with the viewport (§5.2): the axis widens on a big screen instead of leaving a narrow strip in the middle of it (decided 2026-11-07).
 - Backgrounds:
   - The page is `--paper` edge to edge.
   - The running head is `--paper` with a bottom `--hair`.
@@ -535,7 +535,7 @@ Desktop:
 - **Sync panel:** the icon is a disclosure (`aria-expanded`, `aria-controls`) for a small panel. The panel is the session head's `.menu` dropdown, right-aligned under the icon, at most 280 px and never wider than the column, so it stays inside the viewport at 320 px. It holds:
   - one line per configured target ("Git · Last synced 5 min ago", "WebDAV · Not synced · last 3 h ago"), with that target's last error under it in `--danger`, small and wrapping;
   - "⟨n⟩ files need a look" when the needs-attention list isn't empty;
-  - a secondary "Sync now" button that reads "Syncing…" and is disabled while it runs, with a status line below: the report ("Synced. Git: … WebDAV: …"), or, after a failure, which targets failed and which synced ("Git didn't sync (see above). WebDAV synced."). Each target's own error is already under its name, so the line never repeats one; an unlabelled error under the button read as the last target's (owner, 2026-11-09). The raw error shows only when no target recorded one;
+  - a secondary "Sync now" button that reads "Syncing…" and is disabled while it runs, with a status line below: the report ("Synced. Git: … WebDAV: …"), or, after a failure, which targets failed and which synced ("Git didn't sync (see above). WebDAV synced."). Each target's own error is already under its name, so the line never repeats one; an unlabelled error under the button read as the last target's (found in use, 2026-11-09). The raw error shows only when no target recorded one;
   - a "Sync settings" text button. It closes the panel and opens Settings with Sync expanded, focus on its heading button.
 
   Opening the panel re-reads `sync_status`, and a refresh or a sync redraws it in place, so it stays open. Escape closes it and returns focus to the icon; a click outside or on the icon closes it too, and leaving Home closes it.
@@ -759,12 +759,12 @@ No spinner and no colored dot.
 #### 7.2.9 Plan card (await approval) and the plan sheet (reference while teaching)
 
 **Plan card** (`#plan-slot`, after the timeline, phase `awaitApproval`). Rendered as a document,
-not a boxed card: a top `--hair` and `--s7` spacing. **Owner direction, 2026-11-07: the card *is*
+not a boxed card: a top `--hair` and `--s7` spacing. **Decided 2026-11-07: the card *is*
 the flowchart.** It used to be a topic drawing followed by a long list of editable section blocks;
-the owner's verdict was "i dont like how it shows the flowchart then a massive wall of text where you
-can edit. i want you to change it so its a flow chart with a button in the corner to expand the view
-to the whole screen. then each square in the flowchart has the 3 dots inside it which opens a little
-frame maybe on the side of the screen that shows the long description and the actions you can take."
+a flowchart followed by a wall of editable text read badly. The card is now a flowchart with a
+button in the corner that expands the view to the whole screen, and each box in the flowchart has
+a "⋯" inside it that opens a frame at the side of the screen with the long description and the
+actions available.
 The list is gone: the drawing, its boxes' own state, and one side drawer per box carry it all.
 
 ```
@@ -819,7 +819,7 @@ The list is gone: the drawing, its boxes' own state, and one side drawer per box
 
 **Plan overlay** (teach, close or ended — opened by the head's "Plan" button; also opened while a
 plan awaits approval by the card's corner "Expand", which forces the *Topics* level and reads
-"⟨N⟩ sections · not approved yet" in its bar). Owner direction,
+"⟨N⟩ sections · not approved yet" in its bar). Decided
 2026-11-07: **the plan takes the whole screen and the session blurs behind it.** It was a 420 px
 rail holding a scrolling diagram — the one surface the learner opens on purpose was the smallest
 one in the app, and a diagram read through a letterbox is not a plan.
@@ -1241,7 +1241,7 @@ and a seductive detail (§2.1, §2.3; [Rosenholtz 2007; Sundararajan & Adesope 2
 to practise is a deliberate, separate task, which is when an open learner model helps most
 [Mitrovic & Martin 2007; Long & Aleven 2017].
 
-**Why it may be flashy (owner decision, 2026-11-06).** The Map is where the learner sees what
+**Why it may be flashy (decided 2026-11-06).** The Map is where the learner sees what
 their hours bought; it's motivational, not a reading surface. Two findings shape the flash:
 
 - Juicy (abundant, immediate) feedback motivated players through *competence* when it was
@@ -1256,7 +1256,7 @@ remains is the opening burst, the click sparks and rings, and the HUD count-up. 
 Carrel motion rules (§8); the Map is the one exempt page, and the learner reaches it only on
 purpose, from Home.
 
-**No edge motion, and no per-claim state (owner decisions, 2026-11-07).** The light particles that
+**No edge motion, and no per-claim state (decided 2026-11-07).** The light particles that
 travelled along lit edges are removed; so are the ignite sequence, the needs-work breathing halo,
 the selection ring's rotating dash and the star twinkle. Two reasons: an animation that runs
 without the learner's hand is exactly what §2.1's onset rule forbids, and the graph has **no
@@ -1429,7 +1429,7 @@ home position):
   rule that whatever needs a claim sits below it. A spring across clusters is weak (0.1 within one
   root, 0.02 across roots) and the "sits below" rule applies inside a cluster only: across islands
   both would drag claims out of their topic into the water.
-- **Stiff, not elastic** (owner direction, 2026-11-07). Velocity damping 0.38 → 0.55, cooling
+- **Stiff, not elastic** (decided 2026-11-07). Velocity damping 0.38 → 0.55, cooling
   0.018 → 0.035, home pull roughly doubled (x 0.07 → 0.16, y 0.11 → 0.22), springs 0.6 → 1.0, and
   a flung claim is capped at 20 units/tick instead of 40. Measured on the real graph: rest in
   **175** ticks instead of 343 (~3 s instead of ~6), mean distance from the layered home slot 144
@@ -1510,7 +1510,7 @@ browser. Now:
 world units, so a zoomed-out view still says which topic sits where; each is pinned inside the
 stage and placed above its cluster, else one title-height further up, and never below it: a title
 reads as the heading of the ideas under it, and one under its cluster looked like a topic with no
-ideas (owner report, 2026-11-10). It is **dropped rather than overprinted** when it would collide
+ideas (reported in use, 2026-11-10). It is **dropped rather than overprinted** when it would collide
 with another title, another topic's claim or a folded disc. Zooming in separates the clusters and
 the dropped titles return. Only open topics have titles; a block wholly beside the stage has none
 (pinning a far island's title to the edge named a topic that wasn't there).
@@ -1564,7 +1564,7 @@ Mix them together rather than one at a time.
 - Quotient rule (in “Mathematics › Calculus › Exponential and logarithmic rules”)
 ```
 
-No "from my Learn sessions" line: the map is knowledge, not a session (owner decision). Without a
+No "from my Learn sessions" line: the map is knowledge, not a session (design decision). Without a
 model the desk shows "Choose a model first." in `--danger` under the button and opens Settings. The
 selection survives leaving the Map for Home and coming back; it is cleared once a practice session
 starts.
@@ -1641,7 +1641,7 @@ Where these rules and a learning feature conflict, the feature wins and this sec
 
 #### 7.7.1 Plan card boxes: the "⋯" inside a box and its side drawer
 
-Owner direction, 2026-11-07. The card is the flowchart (§7.2.9), so **every section box carries a
+Decided 2026-11-07. The card is the flowchart (§7.2.9), so **every section box carries a
 "⋯" inside its own bounds** and its own state in words under its title. The "⋯" opens one drawer
 pinned to the side of the window with that section's long description and every action it used to
 have in the list.
@@ -1926,7 +1926,7 @@ Sessions run for hours. Focus mode keeps the rest of the computer out of view wh
 
 - **Full screen.** Showing the session view (Learn, including ended and read-only, and Practice) makes the window full screen; "← Sessions" puts back the state it had before the session. The Map is reached from Home only, so it never inherits full screen. In Tauri this is `getCurrentWindow().setFullscreen()` (capabilities `core:window:allow-set-fullscreen`, `core:window:allow-is-fullscreen`); outside Tauri, `requestFullscreen()`, with refusals ignored. F11 toggles it anywhere in the session view, and the "More" menu has "Full screen" / "Exit full screen" (label read from the window each time the menu opens), so the learner can always get out without a shortcut. Reason: other windows, the taskbar and other apps are peripheral cues that trigger self-interruption [Dabbish 2011]; in a field study, a week without email meant fewer window switches and longer focus per window [Mark, Voida & Cardello 2012]. Tools that block distractions are a recognised class of digital self-control tools [Lyngs 2019]; that full screen helps learning here is [inference].
 - **Silenced notifications (Linux, best effort).** On session open the app asks the backend (`focus_dnd(on: true)`) to turn on do-not-disturb, and turns it off on "← Sessions". The backend tries, in order, `makoctl` (mode `do-not-disturb`), `swaync-client` (`-dn`/`-df`, state `-D`), `dunstctl` (`set-paused`, `is-paused`), and GNOME `gsettings` `org.gnome.desktop.notifications show-banners` (only when `XDG_CURRENT_DESKTOP` contains GNOME). A backend counts only when its binary is on `PATH` and a live state query succeeds. If do-not-disturb is already on, the app leaves it alone and never turns it off: it undoes only what it did. A marker file (`focus-dnd` in the app config dir, naming the backend) is written when the app turns it on and removed when restored; restore also runs on app exit and, if the marker survived a crash, at the next start. `focus_dnd_support()` returns the backend name for the Settings label ("(mako)"), or `null` on macOS, Windows, or with no backend, and the option is then hidden. Reason: a notification that is merely received already harms performance on an attention task [Stothart 2015].
-- **Break nudge.** A clock counts active time: a session view is shown, the document is visible, and the window has focus. It pauses otherwise. A pause of 5 minutes or more resets it, since that pause was the break [inference]. Once 50 active minutes have passed since the last nudge, the next turn boundary gets one static line in the flow, `--fs-small` `--ink-3`: "50 minutes in. Stand up for a minute." The boundaries are a section opener (the line goes just before it) and a finished tutor reply in Learn or Practice (the line goes after it). No timer is shown, nothing moves, and there is no extra announcement. The line is UI-only: no op is written, and it is gone when the session is reopened. A debug key, `localStorage["lh.debug.breakMinutes"]`, shortens the interval for testing. Reason: in a meta-analysis, micro-breaks raised vigor (d ≈ 0.36) and reduced fatigue (d ≈ 0.35), with no significant overall effect on performance (d ≈ 0.16), and longer breaks helped performance more [Albulescu 2022]. The nudge therefore aims at well-being over hours, not speed. Turn boundaries are where an interruption costs least [Adamczyk & Bailey 2004]. The 50-minute interval is the owner's choice, not derived from evidence [inference].
+- **Break nudge.** A clock counts active time: a session view is shown, the document is visible, and the window has focus. It pauses otherwise. A pause of 5 minutes or more resets it, since that pause was the break [inference]. Once 50 active minutes have passed since the last nudge, the next turn boundary gets one static line in the flow, `--fs-small` `--ink-3`: "50 minutes in. Stand up for a minute." The boundaries are a section opener (the line goes just before it) and a finished tutor reply in Learn or Practice (the line goes after it). No timer is shown, nothing moves, and there is no extra announcement. The line is UI-only: no op is written, and it is gone when the session is reopened. A debug key, `localStorage["lh.debug.breakMinutes"]`, shortens the interval for testing. Reason: in a meta-analysis, micro-breaks raised vigor (d ≈ 0.36) and reduced fatigue (d ≈ 0.35), with no significant overall effect on performance (d ≈ 0.16), and longer breaks helped performance more [Albulescu 2022]. The nudge therefore aims at well-being over hours, not speed. Turn boundaries are where an interruption costs least [Adamczyk & Bailey 2004]. The 50-minute interval is a chosen value, not derived from evidence [inference].
 
 ### 7.9 Momentum (resume on Home, practise at the end)
 
@@ -1939,7 +1939,7 @@ Two places used to end in a dead end: Home after an interruption (find the sessi
 
 ### 7.10 Copy
 
-Rules for every visible string (UI owner direction, 2026-11-06). Concise, scannable text measured 58 % more usable than promotional or wordy text in Morkes & Nielsen's web-writing study [Morkes & Nielsen 1997]; extraneous words are extraneous load (§2.3).
+Rules for every visible string (decided 2026-11-06). Concise, scannable text measured 58 % more usable than promotional or wordy text in Morkes & Nielsen's web-writing study [Morkes & Nielsen 1997]; extraneous words are extraneous load (§2.3).
 
 1. Delete any sentence that explains what a visible control already says. Example: the desk note for a pending exercise was "Answer the question to continue." next to "Go to question"; it is now "Question waiting.".
 2. Labels at most three words; status and notes at most about six.
@@ -1962,7 +1962,7 @@ The composer's vision note is gone: each image chip already says "This model can
    shockwaves, the pan/zoom/fit camera and the HUD count-up. Reason: the Map is a motivational
    surface the learner opens on purpose, between sessions, and every remaining effect answers the
    learner's own hand [Kao 2024]. The flowing light on edges, the ignite sequence, the needs-work
-   halo, the selection orbit's rotation and the star twinkle are removed (owner decision,
+   halo, the selection orbit's rotation and the star twinkle are removed (decided
    2026-11-07): they were untriggered motion, and with no per-claim check state they would have
    animated facts the graph does not hold. The rules below still bind every session view, and the
    canvas stops drawing frames entirely once the picture is still. Under reduced motion or forced
@@ -2194,7 +2194,7 @@ Nothing in this table scrolls, moves focus or animates.
    - in-place `rerenderItem`;
    - incremental session-list updates (one entry per `session` event, no re-list);
    - `session_state` debounce;
-   - deferred KaTeX warm-up via `requestIdleCallback`.
+   - deferred KaTeX warm-up via `requestIdleCallback` (script, stylesheet and every font face, so the first formula never paints in a fallback font).
    Removing autoscroll must not add layout reads per paint.
 4. **No new dependencies beyond the vendored set, no bundler, no runtime font downloads.** System font stacks only (§5.1). Vendored marked, DOMPurify and KaTeX are unchanged; KaTeX's CSS is only overridden for `font-size` (§5.2). The outputs build added two vendored libraries, both loaded on demand (`docs/architecture.md` §4.24): Prism (`ui/vendor/prism/`, core plus per-language grammars loaded when a finished code block needs one) and Mermaid (`ui/vendor/mermaid/`, loaded on the first `mermaid` block). Nothing is fetched from the network.
 5. **Practice is the coach** (§7.3, §11b): the shared composer is the Learn composer (images, files, `@`; no library link), sent as `attachments` on `practice_submit`. The surface is §7.3 (`ui/practice.js`).
@@ -2372,7 +2372,7 @@ command is `knowledge_map` since the 2026-11-07 graph rebuild; see the revision 
 
 | Area | Change |
 |---|---|
-| Home | The "Or try:" suggestions and the visible Enter hint are gone (owner decision; §6.3, §7.1). "Map" sits next to "Settings". |
+| Home | The "Or try:" suggestions and the visible Enter hint are gone (design decision; §6.3, §7.1). "Map" sits next to "Settings". |
 | Finalize jump | The streaming reply carried the class `live`, which also matched `.live > *` (32 px margin) until finalize removed it: the reply jumped up 32 px. It is now `.streaming`; measured shift on finalize: 0 px. |
 | Mid-turn scroll | A second model call in the same turn re-ran the turn-start alignment. Now only `turnStart` aligns (§7.2.2); measured: `scrollTop` unchanged across a second segment. |
 | Anchoring | Scroll anchoring was switched off for the whole scroller while streaming; it now stays on, with only the streaming entry and `#live` excluded (§7.2.2). M2/M3 re-measured: unchanged `scrollTop`. |
@@ -2449,7 +2449,7 @@ committed checks cover plugin views only); the throwaway driver was deleted.
 | Map: titles | Cluster titles are screen-space and placed above/below with collision rejection; at whole-graph zoom the two titles that cannot be placed are dropped rather than overprinted. |
 | Map: a11y | 9 fieldsets (legends = full topic paths), 49 checkboxes labelled "⟨title⟩, ⟨kind⟩" with `aria-describedby` their depends-on list, two focusable label buttons per claim. |
 
-### Flowchart-first plan card and the widened measure (verification, 2026-11-07, owner-requested)
+### Flowchart-first plan card and the widened measure (verification, 2026-11-07)
 
 Same harness shape as `scripts/ui-check/run.sh` (serve `ui/` as `http://tauri.localhost` under the
 app CSP, inject a `window.__TAURI__` mock before the modules, drive Chromium over the DevTools

@@ -461,7 +461,7 @@ export function questionCard(item, { onAnswer, readOnly, ctx = {}, reading = nul
     block.append(h('p', 'view-task', args.view.task));
     if (item.answer) {
       // The plugin's grade goes to the tutor only: its detail can name the
-      // target, which the learner never sees (W7). The verdict follows.
+      // target, which the learner never sees. The verdict follows.
       block.append(youBlock([[viewAnswerSummary(item.answer.answer), 'you-text']]));
       if (item.verdict) {
         block.append(verdictLine(item));
@@ -1136,7 +1136,7 @@ function createPlanEditor(plan, {
       const legend = h('legend', '');
       legend.innerHTML = `Tools<span class="sr-only"> for ${escapeHtml(section.title ?? section.id)}</span>`;
       fs.append(legend);
-      // `needsInstall` (W9) is the code-computed set of plugins the planner
+      // `needsInstall` is the code-computed set of plugins the planner
       // proposed that weren't installed at plan_write — all registry-
       // installable and on this platform. The live `installed` set wins for a
       // plugin installed since the plan was written (it becomes a checkbox);
@@ -1149,7 +1149,7 @@ function createPlanEditor(plan, {
         if (!installed.has(plugin)) {
           const missing = h('span', 'tool missing');
           if (onInstall && (proposed.has(plugin) || section.needsInstall == null)) {
-            // Offer consent; never install as a side effect of approving (W9).
+            // Offer consent; never install as a side effect of approving.
             const chip = button(`${label} — install`, 'text install-chip');
             chip.addEventListener('click', () => onInstall(plugin, chip));
             missing.append(chip);

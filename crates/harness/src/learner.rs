@@ -46,7 +46,7 @@
 //! a teaching `check` or a `predict`, 90 s for a practice problem (`stream`,
 //! `set`, `exam`). `durationSec` runs from the moment the question is shown to
 //! the moment the answer is sent, reading included. The limits are a
-//! heuristic **[inference]**: FSRS's "Easy" was fitted on flashcards.
+//! heuristic: FSRS's "Easy" was fitted on flashcards.
 //!
 //! # Readers
 //!

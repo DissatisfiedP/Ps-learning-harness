@@ -1,4 +1,4 @@
-//! Background jobs (architecture §4.16; build prompt M4 "Jobs").
+//! Background jobs (architecture §4.16).
 //!
 //! Each job is a tokio task with a persisted `job` op (queued → running →
 //! done/failed/aborted). Concurrency is bounded per model role (Reader 3,

@@ -1,5 +1,5 @@
-//! Derived state and model messages, both rebuilt from the op log (build
-//! prompt M4: "never store derived state").
+//! Derived state and model messages, both rebuilt from the op log; derived
+//! state is never stored.
 //!
 //! [`replay_state`] folds ops into a [`SessionState`]. [`conversation`] turns
 //! the conversation ops (learner/tutor messages, the tutor's tool calls and
@@ -745,7 +745,7 @@ pub(crate) fn conversation(ops: &[Op]) -> Vec<Message> {
 }
 
 /// As [`conversation`], resolving image attachments from `repo` and dropping
-/// them when the model is known to lack vision (W2/W3). `file_tools` says
+/// them when the model is known to lack vision. `file_tools` says
 /// whether the agent can read attached files.
 pub(crate) fn conversation_with(
     ops: &[Op],
@@ -765,7 +765,7 @@ pub(crate) fn conversation_with(
         ));
     }
     // Latest view-state summary per artifact since the last learner message;
-    // rendered as tagged lines on the next one (W7).
+    // rendered as tagged lines on the next one.
     let mut view_states: BTreeMap<&str, &str> = Default::default();
     for op in tail {
         match op {

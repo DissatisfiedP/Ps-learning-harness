@@ -1,4 +1,4 @@
-//! Artifacts and their placement (build prompt W6, D7/D8).
+//! Artifacts and their placement.
 //!
 //! A plugin tool returns `{ text, artifact: { kind: "svg", svg, data } }`.
 //! The core sanitizes the SVG (no scripts, event handlers or external
