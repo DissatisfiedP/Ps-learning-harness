@@ -1364,7 +1364,7 @@ async function practice() {
       label: document.getElementById('prompt-label').textContent, buttons: ${qa('#practice-answer .actions button')}.map((b) => b.textContent), note: ${note()},
       primary: ${shown('#practice-primary')}, stop: ${shown('#practice-stop')}, send: document.getElementById('send').className }; })()`);
   expect(open.kicker === 'Problem 1' && open.math > 0 && !open.named && open.confidence.join() === '10,30,50,70,90' && open.composerIn && open.focus === 'prompt'
-    && open.label === 'Your working or answer' && open.buttons.join('|') === 'Hint|I give up — show me' && open.note === 'Problem 1' && !open.primary && !open.stop
+    && open.label === 'Your working or answer' && open.buttons.join('|') === 'Hint|I give up' && open.note === 'Problem 1' && !open.primary && !open.stop
     && /primary/.test(open.send), `open problem: ${JSON.stringify(open)}`);
 
   // A hint: the count is shown, never a rung; the coach's reply arrives once (the streamed copy gives way to the feed).
@@ -1413,7 +1413,7 @@ async function practice() {
   await page.evaluate(click('practice-primary'));
   await until('problem 2', () => page.evaluate(`${qa('#practice-flow .problem')}.length === 2 && ${shown('#practice-answer .confidence')}`));
   expect((await page.evaluate(argsOf('practice_next'))).length === 1, 'practice_next once');
-  await page.evaluate(press('I give up — show me', '#practice-answer'));
+  await page.evaluate(press('I give up', '#practice-answer'));
   const armed = await page.evaluate(`({ label: ${qa('#practice-answer .actions button')}[1].textContent, calls: ${argsOf('practice_dismiss')}.length })`);
   expect(armed.label === 'Sure? It counts as missed' && armed.calls === 0, `give up asks first: ${JSON.stringify(armed)}`);
   await page.evaluate(press('Sure? It counts as missed', '#practice-answer'));

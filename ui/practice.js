@@ -909,7 +909,7 @@ export function createPractice(deps) {
       const actions = h('div', 'actions');
       built.hint = button('Hint', 'secondary');
       built.hint.addEventListener('click', () => act('practice_hint', {}, 'Couldn’t get a hint'));
-      built.giveUp = button('I give up — show me', 'text');
+      built.giveUp = button('I give up', 'text');
       built.giveUp.addEventListener('click', () => giveUp(built));
       actions.append(built.hint, built.giveUp);
       card.append(actions);
@@ -934,7 +934,7 @@ export function createPractice(deps) {
 
   function disarm(b) {
     delete b.dataset.armed;
-    b.textContent = 'I give up — show me';
+    b.textContent = 'I give up';
   }
 
   function renderAnswer() {

@@ -328,7 +328,7 @@ function questionForm(item, onAnswer, reading = null) {
 
   const actions = h('div', 'actions');
   const submit = button('Submit', 'primary', 'submit');
-  const idk = button('I don’t know — show me', 'text');
+  const idk = button('I don’t know', 'text');
   actions.append(submit, idk);
   const status = statusLine();
   form.append(actions, status.el);
