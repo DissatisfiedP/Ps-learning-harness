@@ -245,6 +245,11 @@
             <button class="btn pad-tool" id="pad-undo" type="button">Undo</button>
             <button class="btn pad-tool" id="pad-clear" type="button">Clear</button>
           </div>
+          <div class="pad-group" role="group" aria-label="Zoom">
+            <button class="btn pad-tool" id="pad-zoom-out" type="button" aria-label="Zoom out" title="Zoom out (Ctrl+−)">−</button>
+            <button class="btn pad-tool pad-zoom" id="pad-zoom-fit" type="button" aria-label="Zoom 100%. Fit the drawing" title="Fit the drawing (Ctrl+0)">100%</button>
+            <button class="btn pad-tool" id="pad-zoom-in" type="button" aria-label="Zoom in" title="Zoom in (Ctrl++)">+</button>
+          </div>
           <label class="pad-bg-pick" id="pad-bg-pick" hidden>
             <span>Draw on</span>
             <select class="input" id="pad-bg"></select>
@@ -253,7 +258,7 @@
         <div class="pad-stage" id="pad-stage">
           <div class="pad-board" id="pad-board">
             <div class="pad-bg" id="pad-bg-layer" aria-hidden="true"></div>
-            <canvas class="pad-canvas" id="pad-canvas" role="img" aria-label="Drawing area. Draw with a pen."></canvas>
+            <canvas class="pad-canvas" id="pad-canvas" role="img" aria-label="Drawing area. Draw with a pen; pinch or Ctrl+scroll to zoom, scroll or drag with two fingers to move."></canvas>
           </div>
         </div>
         <div class="pad-send">

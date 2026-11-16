@@ -1782,8 +1782,10 @@ const fill2 = (sel, value) => `(() => { const el = ${q(sel)}; el.value = ${JSON.
 // The scratch pad and the Pen settings tab (ui/scratchpad.js, ui/pen.js):
 // a session's pad docks beside the lesson on a wide screen and is a full
 // overlay on a narrow one, a phone has no pad, strokes / eraser / undo /
-// clear, the pen's buttons, a figure as the background, a drawing sent with
-// the reasoning and the answer (and with a message), kept per session.
+// clear, the pen's buttons, zoom (buttons, Ctrl+wheel, a pinch, fit) and
+// panning, a figure as the background, a drawing sent with the reasoning
+// and the answer (and with a message) as its bounding box with a margin,
+// the overlay showing more board at the same scale, kept per session.
 async function pad() {
   const openSession = async (opts = {}) => {
     const page = await openApp('none', { query: '&fixture=learn&reading=predict&padFigure=1', ...opts });
@@ -1813,9 +1815,11 @@ async function pad() {
     el.dispatchEvent(new PointerEvent('${type}', { pointerType: 'pen', pointerId: 7, isPrimary: true, buttons: ${buttons}, pressure: ${buttons & 1 ? 0.6 : 0},
       clientX: b.left + ${at[0]} * b.width, clientY: b.top + ${at[1]} * b.height, bubbles: true, cancelable: true })); })()`;
   const nonWhite = (dataUrl) => `new Promise((done) => { const img = new Image(); img.onload = () => { const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
-    const x = c.getContext('2d'); x.drawImage(img, 0, 0); const d = x.getImageData(0, 0, c.width, c.height).data; let n = 0;
-    for (let i = 0; i < d.length; i += 4) if (d[i] < 250 || d[i + 1] < 250 || d[i + 2] < 250) n++;
-    done({ n, corner: [...x.getImageData(0, 0, 1, 1).data] }); }; img.src = ${JSON.stringify(dataUrl)}; })`;
+    const x = c.getContext('2d'); x.drawImage(img, 0, 0); const d = x.getImageData(0, 0, c.width, c.height).data; let n = 0, x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+    for (let i = 0; i < d.length; i += 4) if (d[i] < 250 || d[i + 1] < 250 || d[i + 2] < 250) { n++; const px = (i / 4) % c.width, py = Math.floor(i / 4 / c.width);
+      x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py); }
+    done({ n, corner: [...x.getImageData(0, 0, 1, 1).data], size: [c.width, c.height], margins: [x0, y0, c.width - 1 - x1, c.height - 1 - y1] }); }; img.src = ${JSON.stringify(dataUrl)}; })`;
+  const zoomLabel = () => page.evaluate(`document.getElementById('pad-zoom-fit').textContent`);
   const line = [[0.2, 0.5], [0.4, 0.45], [0.6, 0.55], [0.8, 0.5]];
 
   // --- a wide screen: docked beside the lesson ---
@@ -1853,9 +1857,13 @@ async function pad() {
   expect(await page.evaluate(PIXELS) === restored, 'undoing an erase did not bring the stroke back');
 
   // Pen buttons: the barrel button held erases; as an action it undoes; touch and mouse follow the setting.
+  // A mouse that doesn't draw (Settings says pen only) drags the board instead.
   await page.evaluate(`localStorage.setItem('lh.pen', JSON.stringify({ inputs: 'pen' }))`);
   await draw(page, [[0.1, 0.9], [0.9, 0.9]]);
-  expect(await page.evaluate(PIXELS) === restored, 'the mouse drew while Settings says pen only');
+  const panned = await page.evaluate(PIXELS);
+  expect(panned < restored / 2, `a pen-only mouse drag did not move the board (${panned} of ${restored} pixels left)`);
+  await draw(page, [[0.9, 0.9], [0.1, 0.9]]);
+  expect(await page.evaluate(PIXELS) === restored, 'the mouse drew while Settings says pen only, or dragging back did not bring the drawing back');
   await page.evaluate(`localStorage.setItem('lh.pen', JSON.stringify({ inputs: 'mouse' }))`);
   await page.evaluate(penEvent('document.getElementById("pad-canvas")', 'pointerdown', 3, [0.3, 0.25]));
   await page.evaluate(penEvent('document.getElementById("pad-canvas")', 'pointerup', 0, [0.3, 0.25]));
@@ -1866,6 +1874,30 @@ async function pad() {
   await page.evaluate(penEvent('document.body', 'pointerdown', 2));
   expect(await page.evaluate(PIXELS) === restored, 'the barrel button set to Undo did not undo');
   await page.evaluate(`localStorage.removeItem('lh.pen')`);
+
+  // Zoom: the buttons zoom about the centre, Ctrl+wheel at the pointer, the label fits the drawing; strokes are redrawn, not stretched pixels.
+  expect(await zoomLabel() === '100%', `a new pad is not at 100%: ${await zoomLabel()}`);
+  await page.evaluate(click('pad-zoom-in'));
+  const zoomed = await page.evaluate(PIXELS);
+  expect(await zoomLabel() === '141%' && zoomed > restored * 1.5, `zooming in: ${await zoomLabel()}, ${zoomed} vs ${restored} pixels`);
+  await page.evaluate(click('pad-zoom-out'));
+  const unzoomed = await page.evaluate(PIXELS);
+  expect(await zoomLabel() === '100%' && Math.abs(unzoomed - restored) <= restored * 0.01, `zooming back out: ${await zoomLabel()}, ${unzoomed} vs ${restored} pixels`);
+  await page.evaluate(`(() => { const c = document.getElementById('pad-canvas'); const b = c.getBoundingClientRect();
+    c.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, clientX: b.left + 0.2 * b.width, clientY: b.top + 0.5 * b.height, bubbles: true, cancelable: true })); })()`);
+  expect(await zoomLabel() === '141%', `Ctrl+wheel did not zoom in: ${await zoomLabel()}`);
+  // Two fingers pinch about their midpoint (palm rejection off: the synthetic pen was just here).
+  await page.evaluate(`localStorage.setItem('lh.pen', JSON.stringify({ palm: false }))`);
+  const [px, py] = await page.evaluate(`(() => { const b = document.getElementById('pad-canvas').getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
+  await page.touch('touchStart', [[px - 40, py], [px + 40, py]]);
+  await page.touch('touchMove', [[px - 60, py], [px + 60, py]]);
+  await page.touch('touchMove', [[px - 80, py], [px + 80, py]]);
+  await page.touch('touchEnd', []);
+  await page.evaluate(`localStorage.removeItem('lh.pen')`);
+  expect(await zoomLabel() === '283%', `a pinch did not zoom about the fingers: ${await zoomLabel()}`);
+  await page.evaluate(click('pad-zoom-fit'));
+  const fitted = await page.evaluate(PIXELS);
+  expect(await zoomLabel() !== '141%' && fitted > restored, `fitting the drawing: ${await zoomLabel()}, ${fitted} vs ${restored} pixels`);
 
   // The figure the tutor made is a background; the picture sent has it under the strokes.
   expect(await page.evaluate(shown('#pad-bg-pick')) && await page.evaluate(`[...document.getElementById('pad-bg').options].map((o) => o.textContent).join('|')`) === 'Plain paper|Figure 1: Voltage divider', 'the figure is not offered as a background');
@@ -1881,6 +1913,7 @@ async function pad() {
   expect(staged.length === 1 && staged[0].data.startsWith('data:image/png;base64,') && staged[0].name === 'Scratch pad.png', `staged: ${JSON.stringify(staged.map((s) => s.name))}`);
   const plain = await page.evaluate(nonWhite(staged[0].data));
   expect(plain.corner.join() === '255,255,255,255' && plain.n > 300, `the picture is ink on white paper: ${JSON.stringify(plain)}`);
+  expect(Math.max(...plain.size) === 1600 && plain.margins.every((m) => m >= 28 && m <= 36), `the picture is the drawing's bounding box with a margin: ${JSON.stringify(plain)}`);
 
   await page.evaluate(`(() => { const s = document.getElementById('pad-bg'); s.value = 'A1'; s.dispatchEvent(new Event('change')); })()`);
   expect(await page.evaluate(`Boolean(document.querySelector('#pad-bg-layer svg')) && document.getElementById('pad-bg-layer').getClientRects().length > 0`), 'the figure did not become the background');
@@ -1890,8 +1923,9 @@ async function pad() {
   await until('the sketch on the answer', () => page.evaluate(`document.querySelectorAll('#timeline .ex-sketch:not([hidden])').length === 2`));
   staged = await page.evaluate(argsOf('stage_image'));
   const withFigure = await page.evaluate(nonWhite(staged[1].data));
-  expect(staged[1].name === 'Scratch pad on Figure 1: Voltage divider.png' && withFigure.n > plain.n && withFigure.corner.join() === '255,255,255,255',
-    `the figure is in the picture: ${JSON.stringify({ name: staged[1].name, plain: plain.n, withFigure: withFigure.n })}`);
+  // Picked while the view fits the strokes, the figure lands inside their box: same picture size, more ink.
+  expect(staged[1].name === 'Scratch pad on Figure 1: Voltage divider.png' && withFigure.size.join() === plain.size.join() && withFigure.n > plain.n && withFigure.corner.join() === '255,255,255,255',
+    `the figure is in the picture: ${JSON.stringify({ name: staged[1].name, plain, withFigure })}`);
   await page.shot('pad-sketches-attached');
 
   // Replacing a sketch drops the staged one.
@@ -1916,10 +1950,15 @@ async function pad() {
   await until('the chip', () => page.evaluate(`document.querySelectorAll('#attach-chips li').length === 1 && !document.getElementById('composer-attach').hidden`));
   expect(await page.evaluate(`document.querySelector('#attach-chips .chip-name').textContent`) === 'Scratch pad on Figure 1: Voltage divider.png', 'the message chip is not the drawing');
 
-  // Dock / overlay switch, Escape only closes the overlay, the drawing outlives closing.
+  // Dock / overlay switch (the bigger panel shows more of the board at the same scale), Escape only closes the overlay, the drawing outlives closing.
+  const dockedInk = await page.evaluate(PIXELS);
+  const dockedWidth = await page.evaluate(`document.getElementById('pad-canvas').width`);
   await page.evaluate(click('pad-mode'));
+  await until('the canvas to grow', () => page.evaluate(`document.getElementById('pad-canvas').width > ${dockedWidth}`));
   g = await page.evaluate(geometry);
   expect(g.mode === 'overlay' && !g.docked && g.pad[2] === g.vw && g.pad[3] === g.vh, `overlay: ${JSON.stringify(g)}`);
+  const overlayInk = await page.evaluate(PIXELS);
+  expect(overlayInk === dockedInk && await zoomLabel() !== '100%', `the overlay scaled the drawing instead of showing more board: ${overlayInk} vs ${dockedInk} pixels`);
   expect(await page.evaluate(`document.querySelector('.pad-mode-dock').getClientRects().length > 0 && document.querySelector('.pad-mode-expand').getClientRects().length === 0
     && document.getElementById('pad-mode').getAttribute('aria-label') === 'Dock beside the lesson'`), 'the mode switch shows the wrong icon or name in the overlay');
   await page.shot('pad-overlay');
@@ -1995,7 +2034,7 @@ async function pad() {
   const penErrors = await page.evaluate('window.__errors');
   expect(penErrors.length === 0, `page errors: ${penErrors.join(' | ')}`);
   await page.close();
-  console.log('pad: toggle in a learn session (not on a phone); docked beside the lesson on a wide screen with a dock/overlay switch, always an overlay on a narrow one; strokes, undo, clear, eraser; pen-only setting and the pen buttons (hold to erase, undo); the tutor’s figure as the background and in the picture; a drawing goes with the reasoning, the answer or the next message and shows on the answered card; kept per session; Settings tabs with arrow keys and Settings → Pen');
+  console.log('pad: toggle in a learn session (not on a phone); docked beside the lesson on a wide screen with a dock/overlay switch (the overlay shows more board at the same scale), always an overlay on a narrow one; strokes, undo, clear, eraser; pen-only setting (the mouse pans) and the pen buttons (hold to erase, undo); zoom by buttons, Ctrl+wheel and a pinch, fit to the drawing; the tutor’s figure as the background and in the picture; the picture is the drawing’s bounding box with a margin; a drawing goes with the reasoning, the answer or the next message and shows on the answered card; kept per session; Settings tabs with arrow keys and Settings → Pen');
 }
 
 // Touch and the graphs: the head names only the current phase, a title's
