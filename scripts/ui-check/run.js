@@ -1875,6 +1875,64 @@ async function pad() {
   expect(await page.evaluate(PIXELS) === restored, 'the barrel button set to Undo did not undo');
   await page.evaluate(`localStorage.removeItem('lh.pen')`);
 
+  // WebKitGTK gives the page a pen as a mouse: pressure 0.5, the barrels as the middle and right buttons (and GTK on
+  // Wayland drops a held barrel from `buttons` once the tip is down), the eraser as the left button, and the tip touching
+  // while a barrel is held as a chorded pointermove. The shell's `app-pen` events (crates/app/src/pen.rs) say which events
+  // are the pen and which barrels are down; these replay what a Wacom AES pen sent through GTK on Wayland (2026-11-16).
+  const gtkPen = (detail) => page.evaluate(`window.dispatchEvent(new CustomEvent('app-pen', { detail: ${JSON.stringify({ pen: true, eraser: false, eraserButton: null, barrel: false, barrel2: false, pressure: 0, ...detail })} }))`);
+  const gtkEvent = (type, button, buttons, at = [0.3, 0.25]) => `(() => { const c = document.getElementById('pad-canvas'); const b = c.getBoundingClientRect();
+    c.dispatchEvent(new PointerEvent('${type}', { pointerType: 'mouse', pointerId: 1, isPrimary: true, button: ${button}, buttons: ${buttons}, pressure: ${buttons ? 0.5 : 0},
+      clientX: b.left + ${at[0]} * b.width, clientY: b.top + ${at[1]} * b.height, bubbles: true, cancelable: true })); })()`;
+  const INK_AT = `(() => { const c = document.getElementById('pad-canvas'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let s = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) s = (s + i) % 1e9; return s; })()`;
+  const unchanged = await page.evaluate(INK_AT);
+  await gtkPen({});
+  await page.evaluate(gtkEvent('pointermove', -1, 0));
+  await gtkPen({ barrel: true });
+  await page.evaluate(gtkEvent('pointerdown', 1, 4)); // the barrel (BTN_STYLUS, the middle button), hovering
+  await gtkPen({ barrel: true, pressure: 0.4 });
+  await page.evaluate(gtkEvent('pointermove', 0, 1)); // the tip touches; the held barrel is gone from `buttons`
+  await gtkPen({ barrel: true, pressure: 0.5 });
+  await page.evaluate(gtkEvent('pointermove', -1, 1));
+  await gtkPen({ barrel: true });
+  await page.evaluate(gtkEvent('pointerup', 0, 0)); // the tip lifts
+  await gtkPen({});
+  await page.evaluate(gtkEvent('pointerup', 1, 0)); // the barrel is let go
+  const gtkErased = await page.evaluate(PIXELS);
+  expect(gtkErased === penErased, `WebKitGTK: drawing with the barrel held did not erase, or the middle button dragged the board (${gtkErased}, a pen's barrel erase leaves ${penErased})`);
+  // An eraser button (libwacom's EraserType=Button): GTK switches to the eraser tool while it is held, with no button
+  // event, and the shell sees the same tool ids as the pen's. It is the second barrel, whose default action is Undo.
+  await gtkPen({ eraser: true, eraserButton: true });
+  await page.evaluate(gtkEvent('pointermove', -1, 0, [0.5, 0.5]));
+  expect(await page.evaluate(INK_AT) === unchanged, 'WebKitGTK: pressing the eraser button (the second barrel) did not undo');
+  await page.evaluate(`localStorage.setItem('lh.pen', JSON.stringify({ barrel2: 'erase', eraser: 'none' }))`);
+  await gtkPen({ eraser: true, eraserButton: true, pressure: 0.3 });
+  await page.evaluate(gtkEvent('pointerdown', 0, 1));
+  await gtkPen({ eraser: true, eraserButton: true });
+  await page.evaluate(gtkEvent('pointerup', 0, 0));
+  expect(await page.evaluate(PIXELS) === penErased, 'WebKitGTK: drawing with the eraser button held (second barrel: Erase while held) did not erase, or it read as the eraser end');
+  await gtkPen({});
+  await page.evaluate(gtkEvent('pointermove', -1, 0));
+  await page.evaluate(`localStorage.removeItem('lh.pen')`);
+  await page.evaluate(click('pad-undo'));
+  expect(await page.evaluate(INK_AT) === unchanged, 'undoing the eraser button’s erase did not bring the stroke back');
+  await gtkPen({ pressure: 0.9 });
+  await page.evaluate(gtkEvent('pointerdown', 0, 1, [0.6, 0.7]));
+  await gtkPen({ pressure: 0.2 });
+  await page.evaluate(gtkEvent('pointermove', -1, 1, [0.8, 0.7]));
+  await gtkPen({});
+  await page.evaluate(gtkEvent('pointerup', 0, 0, [0.8, 0.7]));
+  await until('WebKitGTK: the stroke to keep the pen’s pressure', () => page.evaluate(`(JSON.parse(localStorage.getItem('lh.pad.L1'))?.strokes.at(-1)?.p ?? [])
+    .filter((_, i) => i % 3 === 2).join() === '0.9,0.2'`));
+  // "The eraser is: An end of the pen" overrides the shell's guess: the eraser end erases.
+  await page.evaluate(`localStorage.setItem('lh.pen', JSON.stringify({ eraserIs: 'end' }))`);
+  await gtkPen({ eraser: true, eraserButton: true, pressure: 0.6 });
+  await page.evaluate(gtkEvent('pointerdown', 0, 1, [0.7, 0.7]));
+  await page.evaluate(gtkEvent('pointerup', 0, 0, [0.7, 0.7]));
+  expect(await page.evaluate(INK_AT) === unchanged, 'WebKitGTK: the eraser end (set in Settings) did not erase');
+  await page.evaluate(`localStorage.removeItem('lh.pen')`);
+  await gtkPen({ pen: false });
+
   // Zoom: the buttons zoom about the centre, Ctrl+wheel at the pointer, the label fits the drawing; strokes are redrawn, not stretched pixels.
   expect(await zoomLabel() === '100%', `a new pad is not at 100%: ${await zoomLabel()}`);
   await page.evaluate(click('pad-zoom-in'));
@@ -2026,6 +2084,26 @@ async function pad() {
   await page.evaluate(`document.getElementById('pen-test').dispatchEvent(new PointerEvent('pointermove', { pointerType: 'pen', pointerId: 3, buttons: 34, pressure: 0.4, bubbles: true }))`);
   const readout = await page.evaluate(`document.getElementById('pen-test-readout').textContent`);
   expect(/pen · pressure 0\.40/.test(readout) && /barrel button \+ eraser end down/.test(readout), `the pen test readout: ${readout}`);
+  // WebKitGTK: mouse events the shell says are the pen read as the pen: an eraser end touching, then a pen whose eraser is
+  // a button (the second barrel) drawing with it and the barrel held, which GTK leaves out of `buttons`; then the
+  // setting "The eraser is: An end of the pen" over the shell's guess.
+  const gtkReadout = (detail) => page.evaluate(`window.dispatchEvent(new CustomEvent('app-pen', { detail: ${JSON.stringify({ pen: true, eraser: false, eraserButton: null, barrel: false, barrel2: false, ...detail })} }));
+    document.getElementById('pen-test').dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', pointerId: 1, buttons: 1, pressure: 0.5, bubbles: true }));
+    window.dispatchEvent(new CustomEvent('app-pen', { detail: { pen: false } }));
+    document.getElementById('pen-test-readout').textContent`);
+  const eraserEnd = await gtkReadout({ eraser: true, eraserButton: false, pressure: 0.25 });
+  expect(/^pen · pressure 0\.25 · hovering · eraser end down/.test(eraserEnd), `the pen test readout of a WebKitGTK eraser end: ${eraserEnd}`);
+  const eraserButton = await gtkReadout({ eraser: true, eraserButton: true, barrel: true, pressure: 0.5 });
+  expect(/^pen · pressure 0\.50 · touching · barrel button \+ second barrel button \(the eraser button\) down/.test(eraserButton), `the pen test readout of a WebKitGTK pen with an eraser button: ${eraserButton}`);
+  expect(await page.evaluate(`document.querySelector('#pen-eraser-kind input:checked')?.value`) === 'auto', 'The eraser is: does not default to Automatic');
+  await page.evaluate(`document.querySelector('#pen-eraser-kind input[value="end"]').click()`);
+  const overridden = await gtkReadout({ eraser: true, eraserButton: true, pressure: 0.5 });
+  expect(JSON.parse(await page.evaluate(`localStorage.getItem('lh.pen')`)).eraserIs === 'end' && /hovering · eraser end down/.test(overridden),
+    `The eraser is: An end of the pen did not override the shell's guess: ${overridden}`);
+  await page.evaluate(`document.querySelector('#pen-eraser-kind input[value="button"]').click();
+    document.getElementById('pen-test').dispatchEvent(new PointerEvent('pointermove', { pointerType: 'pen', pointerId: 3, buttons: 32, pressure: 0.4, bubbles: true }))`);
+  const nativeButton = await page.evaluate(`document.getElementById('pen-test-readout').textContent`);
+  expect(/^pen · pressure 0\.40 · touching · second barrel button \(the eraser button\) down/.test(nativeButton), `The eraser is: A button on the barrel, for a pen the browser reports: ${nativeButton}`);
   await page.evaluate(`document.getElementById('settings').close()`);
   await page.evaluate(click('open-settings'));
   await until('Settings again', () => page.evaluate(`document.getElementById('settings').open`));
@@ -2034,7 +2112,7 @@ async function pad() {
   const penErrors = await page.evaluate('window.__errors');
   expect(penErrors.length === 0, `page errors: ${penErrors.join(' | ')}`);
   await page.close();
-  console.log('pad: toggle in a learn session (not on a phone); docked beside the lesson on a wide screen with a dock/overlay switch (the overlay shows more board at the same scale), always an overlay on a narrow one; strokes, undo, clear, eraser; pen-only setting (the mouse pans) and the pen buttons (hold to erase, undo); zoom by buttons, Ctrl+wheel and a pinch, fit to the drawing; the tutor’s figure as the background and in the picture; the picture is the drawing’s bounding box with a margin; a drawing goes with the reasoning, the answer or the next message and shows on the answered card; kept per session; Settings tabs with arrow keys and Settings → Pen');
+  console.log('pad: toggle in a learn session (not on a phone); docked beside the lesson on a wide screen with a dock/overlay switch (the overlay shows more board at the same scale), always an overlay on a narrow one; strokes, undo, clear, eraser; pen-only setting (the mouse pans) and the pen buttons (hold to erase, undo); a WebKitGTK pen (mouse events plus the shell’s app-pen: pressure, a barrel held while drawing erases without panning though GTK drops it from buttons, an eraser button is the second barrel, an eraser end); zoom by buttons, Ctrl+wheel and a pinch, fit to the drawing; the tutor’s figure as the background and in the picture; the picture is the drawing’s bounding box with a margin; a drawing goes with the reasoning, the answer or the next message and shows on the answered card; kept per session; Settings tabs with arrow keys and Settings → Pen');
 }
 
 // Touch and the graphs: the head names only the current phase, a title's

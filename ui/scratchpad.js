@@ -19,7 +19,7 @@
 
 import { message } from './api.js';
 import { cleanSvg } from './artifacts.js';
-import { penButtons, penPrefs } from './pen.js';
+import { penButtons, penPrefs, pointerOf } from './pen.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -39,6 +39,7 @@ const EXPORT_LONG = 1600;
 const EXPORT_PAD = 32;
 /** A touch this soon after the pen was last seen is a resting palm. */
 const PALM_MS = 800;
+const PEN_CONTACT = 0b100001; // the tip or the eraser end on the screen
 const MAX_HISTORY = 100;
 const KEY = (id) => `lh.pad.${id}`;
 /** The picture that is sent is always dark ink on white paper, whatever the theme. */
@@ -54,7 +55,8 @@ let history = [];
 let active = null; // the stroke or erase gesture in progress
 let saveTimer = null;
 let lastPenAt = 0;
-let penSideButtons = 0;
+let penHeld = 0; // the pen's buttons at its last event (bits as in `penButtons`)
+let penWas = 0; // and at the event before
 let host = null; // the screen the pad is open beside (it gets `pad-docked`)
 let ctx = null;
 let dpr = 1;
@@ -409,22 +411,23 @@ function clearAll() {
 
 // ---------- pointer input ----------
 
-function accepts(e, prefs) {
-  if (e.pointerType === 'pen') return true;
-  if (e.pointerType === 'mouse') return prefs.inputs !== 'pen' && e.button === 0;
-  if (e.pointerType === 'touch') return prefs.inputs === 'all';
+// These read `pointerOf(e)`, not the event: WebKitGTK reports a pen as a mouse.
+function accepts(p, prefs) {
+  if (p.type === 'pen') return true;
+  if (p.type === 'mouse') return prefs.inputs !== 'pen' && p.button === 0;
+  if (p.type === 'touch') return prefs.inputs === 'all';
   return false;
 }
 
 /** A pointer that moves the view instead of drawing: a finger that doesn't draw, a second finger, the middle button, a mouse that doesn't draw. */
-function navigates(e, prefs) {
-  if (e.pointerType === 'touch') return nav.pts.size > 0 || prefs.inputs !== 'all';
-  if (e.pointerType === 'mouse') return e.button === 1 || (e.button === 0 && prefs.inputs === 'pen');
+function navigates(p, prefs) {
+  if (p.type === 'touch') return nav.pts.size > 0 || prefs.inputs !== 'all';
+  if (p.type === 'mouse') return p.button === 1 || (p.button === 0 && prefs.inputs === 'pen');
   return false;
 }
 
-function pressureOf(e, prefs) {
-  return e.pointerType === 'pen' && prefs.pressure && e.pressure > 0 ? e.pressure : 0.5;
+function pressureOf(p, prefs) {
+  return p.type === 'pen' && prefs.pressure && p.pressure > 0 ? p.pressure : 0.5;
 }
 
 function capture(e) {
@@ -438,7 +441,8 @@ function capture(e) {
 function onDown(e) {
   if (!pad?.view) return;
   const prefs = penPrefs();
-  const touch = e.pointerType === 'touch';
+  const p = pointerOf(e);
+  const touch = p.type === 'touch';
   if (touch && prefs.palm && performance.now() - lastPenAt < PALM_MS) return;
   if (active) {
     // A second finger turns a finger's stroke into a pinch; anything else waits for the stroke to end.
@@ -449,17 +453,17 @@ function onDown(e) {
   } else if (nav.pts.size && !touch) {
     return;
   }
-  if (navigates(e, prefs)) {
+  if (navigates(p, prefs)) {
     e.preventDefault();
     capture(e);
     nav.pts.set(e.pointerId, stagePoint(e));
     anchorNav();
     return;
   }
-  if (!accepts(e, prefs)) return;
-  const b = penButtons(e.buttons);
+  if (!accepts(p, prefs)) return;
+  const b = penButtons(p.buttons);
   let tool = ui.tool;
-  if (e.pointerType === 'pen') {
+  if (p.type === 'pen') {
     // A press on a button alone (or the eraser end set to another action)
     // is not a stroke; the button's own action already ran.
     if (!b.tip && !b.eraser) return;
@@ -482,7 +486,7 @@ function onDown(e) {
     eraseTo(x, y);
     return;
   }
-  const stroke = { id: pad.nextId++, c: ui.color, w: ui.width / z, p: [[x, y, pressureOf(e, prefs)]] };
+  const stroke = { id: pad.nextId++, c: ui.color, w: ui.width / z, p: [[x, y, pressureOf(p, prefs)]] };
   active.stroke = stroke;
   pad.strokes.push(stroke);
   ctx.lineCap = 'round';
@@ -493,6 +497,18 @@ function onMove(e) {
   if (nav.pts.has(e.pointerId)) {
     nav.pts.set(e.pointerId, stagePoint(e));
     moveNav();
+    return;
+  }
+  // WebKitGTK reports a pen as a mouse, so its tip or eraser touching down or
+  // lifting while a barrel button is held is a chorded pointermove, not a
+  // pointerdown or pointerup. `trackPen` has already read this event.
+  const p = pointerOf(e);
+  if (p.type === 'pen' && !active && penHeld & PEN_CONTACT & ~penWas) {
+    onDown(e);
+    return;
+  }
+  if (p.type === 'pen' && active?.id === e.pointerId && !(p.buttons & PEN_CONTACT)) {
+    endGesture(false);
     return;
   }
   if (!active || e.pointerId !== active.id) return;
@@ -508,7 +524,7 @@ function onMove(e) {
     const s = active.stroke;
     const last = s.p[s.p.length - 1];
     if (Math.hypot(x - last[0], y - last[1]) < active.step) continue;
-    s.p.push([x, y, pressureOf(ev, active.prefs)]);
+    s.p.push([x, y, pressureOf(pointerOf(ev), active.prefs)]);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     drawSegment(ctx, s, s.p.length - 2, palette());
@@ -583,11 +599,12 @@ function runAction(action) {
  * is a hold, read per stroke in `onDown`, not an action on press.
  */
 function trackPen(e) {
-  if (e.pointerType !== 'pen') return;
+  const p = pointerOf(e);
+  if (p.type !== 'pen') return;
   lastPenAt = performance.now();
-  const now = e.buttons & 0b100110;
-  const pressed = now & ~penSideButtons;
-  penSideButtons = now;
+  penWas = penHeld;
+  penHeld = p.buttons;
+  const pressed = penHeld & ~penWas & 0b100110;
   if (!pressed) return;
   const prefs = penPrefs();
   for (const [bit, name] of SIDE_BUTTONS) if (pressed & bit) runAction(prefs[name]);
@@ -596,7 +613,7 @@ function trackPen(e) {
 /** A barrel button reads as a right click on most systems; the pad owns it. */
 function onContextMenu(e) {
   if (isOpen && els.pad.contains(e.target)) e.preventDefault();
-  else if (e.pointerType === 'pen' && SIDE_BUTTONS.some(([, name]) => penPrefs()[name] === 'pad')) e.preventDefault();
+  else if (pointerOf(e).type === 'pen' && SIDE_BUTTONS.some(([, name]) => penPrefs()[name] === 'pad')) e.preventDefault();
 }
 
 // ---------- toolbar ----------

@@ -17,6 +17,9 @@ export const BUTTON_ACTIONS = [
 
 export const INPUTS = ['pen', 'mouse', 'all'];
 
+/** What the pen's eraser is: `auto` takes the app shell's guess (Linux), `end` a flip-over end, `button` a held button. */
+export const ERASER_KINDS = ['auto', 'end', 'button'];
+
 const DEFAULTS = {
   inputs: 'mouse',
   pressure: true,
@@ -24,14 +27,51 @@ const DEFAULTS = {
   barrel: 'erase',
   barrel2: 'undo',
   eraser: 'erase',
+  eraserIs: 'auto',
 };
 
 const BUTTON_NAMES = { barrel: 'barrel button', barrel2: 'second barrel button', eraser: 'eraser end' };
 
-/** `PointerEvent.buttons` bits: 1 tip or left, 2 barrel, 4 second barrel (middle), 32 eraser. */
+/** `PointerEvent.buttons` bits: 1 tip or left, 2 barrel, 4 second barrel (or an eraser button), 32 eraser end. */
 export function penButtons(buttons) {
   const b = Number(buttons) || 0;
   return { tip: Boolean(b & 1), barrel: Boolean(b & 2), barrel2: Boolean(b & 4), eraser: Boolean(b & 32) };
+}
+
+// WebKitGTK (the Linux webview) gives the page a stylus as a mouse:
+// pointerType "mouse", pressure 0.5 while a button is down, the eraser
+// touching as the left button, and the barrel buttons as the middle and right
+// buttons, which GTK on Wayland drops from `buttons` while the tip is down. The
+// app shell reads the tablet from GTK and sends `app-pen` window events
+// `{ pen, eraser, eraserButton, barrel, barrel2, pressure }` before WebKit
+// passes the same event on (crates/app/src/pen.rs); `pointerOf` folds them
+// back in. GTK calls an eraser button (many laptop pens have one instead of
+// an eraser end) the eraser too; `eraserButton` is the shell's guess, and the
+// "The eraser is" setting can override it.
+let tablet = null;
+window.addEventListener('app-pen', (e) => {
+  tablet = e.detail?.pen ? e.detail : null;
+});
+
+/**
+ * What a pointer (or contextmenu) event means: `type` ('pen', 'mouse', 'touch'),
+ * `button`, `buttons` (bits as in `penButtons`; an eraser button is the second
+ * barrel), `pressure`, and `eraserButton` when the second barrel is the eraser button.
+ */
+export function pointerOf(e) {
+  if (tablet && (e.pointerType ?? 'mouse') === 'mouse') {
+    const kind = tablet.eraser ? penPrefs().eraserIs : null;
+    const eraserButton = kind === 'button' || (kind === 'auto' && tablet.eraserButton === true);
+    // Only the left button (the tip or the eraser on the screen) is WebKit's; the barrels are the shell's.
+    let buttons = (tablet.barrel ? 2 : 0) | (tablet.barrel2 || eraserButton ? 4 : 0);
+    if (e.buttons & 1) buttons |= tablet.eraser && !eraserButton ? 32 : 1;
+    return { type: 'pen', button: e.button, buttons, pressure: tablet.pressure ?? e.pressure ?? 0, eraserButton };
+  }
+  if (e.pointerType === 'pen' && e.buttons & 32 && penPrefs().eraserIs === 'button') {
+    // Where the browser reports a pen itself, an eraser touching is buttons 32.
+    return { type: 'pen', button: e.button, buttons: (e.buttons & ~32) | 5, pressure: e.pressure, eraserButton: true };
+  }
+  return { type: e.pointerType, button: e.button, buttons: e.buttons, pressure: e.pressure, eraserButton: false };
 }
 
 /** Where the choices live when localStorage is unavailable. */
@@ -54,6 +94,7 @@ export function penPrefs() {
   if (INPUTS.includes(saved.inputs)) out.inputs = saved.inputs;
   for (const k of ['pressure', 'palm']) if (typeof saved[k] === 'boolean') out[k] = saved[k];
   for (const k of ['barrel', 'barrel2', 'eraser']) if (actions.includes(saved[k])) out[k] = saved[k];
+  if (ERASER_KINDS.includes(saved.eraserIs)) out.eraserIs = saved.eraserIs;
   return out;
 }
 
@@ -80,7 +121,7 @@ export function penSeen() {
 export function watchForPen() {
   if (penSeen()) return;
   const onPen = (e) => {
-    if (e.pointerType !== 'pen') return;
+    if (pointerOf(e).type !== 'pen') return;
     document.removeEventListener('pointermove', onPen, true);
     document.removeEventListener('pointerdown', onPen, true);
     try {
@@ -106,13 +147,15 @@ function renderDetected() {
 
 /** Describes one pen event for the test box. */
 function describe(e, seen) {
-  const b = penButtons(e.buttons);
-  const held = [b.barrel && BUTTON_NAMES.barrel, b.barrel2 && BUTTON_NAMES.barrel2, b.eraser && BUTTON_NAMES.eraser]
+  const p = pointerOf(e);
+  const b = penButtons(p.buttons);
+  const barrel2 = p.eraserButton ? `${BUTTON_NAMES.barrel2} (the eraser button)` : BUTTON_NAMES.barrel2;
+  const held = [b.barrel && BUTTON_NAMES.barrel, b.barrel2 && barrel2, b.eraser && BUTTON_NAMES.eraser]
     .filter(Boolean);
   for (const name of held) seen.add(name);
-  const parts = [e.pointerType || 'unknown'];
-  if (e.pointerType === 'pen') parts.push(`pressure ${e.pressure.toFixed(2)}`);
-  if (e.pointerType === 'pen' && (e.tiltX || e.tiltY)) parts.push(`tilt ${Math.round(e.tiltX)}°, ${Math.round(e.tiltY)}°`);
+  const parts = [p.type || 'unknown'];
+  if (p.type === 'pen') parts.push(`pressure ${p.pressure.toFixed(2)}`);
+  if (p.type === 'pen' && (e.tiltX || e.tiltY)) parts.push(`tilt ${Math.round(e.tiltX)}°, ${Math.round(e.tiltY)}°`);
   parts.push(b.tip ? 'touching' : 'hovering');
   if (held.length) parts.push(`${held.join(' + ')} down`);
   const known = seen.size ? ` Buttons seen so far: ${[...seen].join(', ')}.` : '';
@@ -145,8 +188,9 @@ function wireTest() {
   const ink = () => getComputedStyle(box).color;
   box.addEventListener('pointerdown', (e) => {
     if (!canvas.width) fit();
-    if (e.pointerType === 'pen' || e.pointerType === 'mouse') box.setPointerCapture(e.pointerId);
-    drawing = Boolean(e.buttons & 1) || Boolean(e.buttons & 32);
+    const p = pointerOf(e);
+    if (p.type === 'pen' || p.type === 'mouse') box.setPointerCapture(e.pointerId);
+    drawing = Boolean(p.buttons & 1) || Boolean(p.buttons & 32);
     readout.textContent = describe(e, seen);
     if (drawing) {
       const [x, y] = at(e);
@@ -157,10 +201,11 @@ function wireTest() {
   box.addEventListener('pointermove', (e) => {
     readout.textContent = describe(e, seen);
     if (!drawing) return;
+    const p = pointerOf(e);
     const [x, y] = at(e);
     ctx.strokeStyle = ink();
     ctx.lineCap = 'round';
-    ctx.lineWidth = 1 + (e.pointerType === 'pen' ? e.pressure : 0.5) * 5;
+    ctx.lineWidth = 1 + (p.type === 'pen' ? p.pressure : 0.5) * 5;
     ctx.lineTo(x, y);
     ctx.stroke();
     ctx.beginPath();
@@ -185,6 +230,10 @@ export function initPenSettings() {
   for (const r of inputs.querySelectorAll('input')) {
     r.checked = r.value === prefs.inputs;
     r.addEventListener('change', () => r.checked && setPenPref('inputs', r.value));
+  }
+  for (const r of document.querySelectorAll('#pen-eraser-kind input')) {
+    r.checked = r.value === prefs.eraserIs;
+    r.addEventListener('change', () => r.checked && setPenPref('eraserIs', r.value));
   }
   for (const box of toggles.querySelectorAll('input[data-pen]')) {
     box.checked = prefs[box.dataset.pen];

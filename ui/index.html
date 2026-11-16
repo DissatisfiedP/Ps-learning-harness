@@ -502,7 +502,14 @@
       </section>
       <section class="settings-section" aria-labelledby="pen-buttons-heading">
         <h2 id="pen-buttons-heading">Pen buttons</h2>
-        <p class="help">What each button does on the scratch pad. A button your pen does not have is never pressed, so its setting does nothing.</p>
+        <p class="help">What each button does on the scratch pad. Press a button over the test box below to see which one it is. A button your pen does not have is never pressed, so its setting does nothing.</p>
+        <fieldset class="theme-choice" id="pen-eraser-kind">
+          <legend>The eraser is</legend>
+          <label><input type="radio" name="pen-eraser-kind" value="auto" /> Automatic</label>
+          <label><input type="radio" name="pen-eraser-kind" value="end" /> An end of the pen</label>
+          <label><input type="radio" name="pen-eraser-kind" value="button" /> A button on the barrel</label>
+        </fieldset>
+        <p class="help">Many laptop pens have an eraser button instead of an eraser end: it counts as the second barrel button. Automatic tells them apart on Linux; elsewhere it means an end.</p>
         <div class="field">
           <label for="pen-barrel">Barrel button</label>
           <select class="input" id="pen-barrel" data-pen-button="barrel"></select>

@@ -8,6 +8,8 @@
 
 mod focus;
 #[cfg(target_os = "linux")]
+mod pen;
+#[cfg(target_os = "linux")]
 mod pinch;
 
 use std::path::PathBuf;
@@ -1139,6 +1141,10 @@ pub fn run() {
             // page (the Map) gets the pinch instead.
             #[cfg(target_os = "linux")]
             pinch::route_to_page(app);
+            // WebKitGTK gives the page a stylus as a mouse; the page learns
+            // which events are the pen, its eraser end and its pressure.
+            #[cfg(target_os = "linux")]
+            pen::route_to_page(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

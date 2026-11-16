@@ -116,7 +116,8 @@ need WebKitGTK 4.1 (~840 MB with its dependencies, from cache.nixos.org).
   installed yourself.
 - Secure storage is proven on Linux only.
 - A two-finger pinch on a touch screen under WebKitGTK may zoom the whole window.
-- The scratch pad has never been used with a real pen.
+- The scratch pad has been tried with one pen only (a Wacom AES pen on Linux), and never with a
+  pen that has a flip-over eraser end.
 - An exam timer does not survive an app restart until the next action in that session.
 - The Map's confidence line and frontier list come from the newest session only, and a
   resource the graph builder attached to the wrong topic cannot be corrected in the UI.

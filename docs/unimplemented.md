@@ -20,12 +20,14 @@ built, except the items below. What remains is mostly **proof**, not code.
   papers and marking**, and whether the measurer and planner actually skip what the learner model shows as held.
 - **The UI is verified in headless Chromium only**, against a mocked Tauri bridge (fifteen `scripts/ui-check`
   cases) — never in WebKitGTK and never on a device. Plugin-view isolation likewise: Chromium, not WebKitGTK.
-- **No real pen has touched the scratch pad** (`docs/ui-design.md` §7.2.19), which is on the Learn and Practice
-  screens (sets and exam papers included). The `pad` and `pad-practice` checks draw with mouse events and synthetic
-  pen `PointerEvent`s. Unverified: that WebKitGTK, WKWebView and Android WebView report a pen as
-  `pointerType: "pen"`, that the barrel button is `buttons & 2`, the second barrel `& 4` and the eraser end `& 32`
-  (Settings → Pen has a test box for finding out), that a barrel press while hovering reaches the page, and that
-  `getCoalescedEvents` is there. A drawing sent to a model has not been read by a real vision model.
+- **The scratch pad's pen support is proven with one pen only** (`docs/ui-design.md` §7.2.19). WebKitGTK reports a
+  pen as a mouse; the shell's `app-pen` bridge (`crates/app/src/pen.rs`) restores pressure, the barrel buttons and
+  the eraser. A Wacom AES pen (eraser button, no eraser end) on Wayland confirmed pressure, both buttons and the
+  eraser-button guess in the app; no pen with a flip-over eraser end has been tried on Linux, so the guess that a
+  different hardware id means an eraser end is unproven (Settings → Pen → "The eraser is" overrides it). Unverified:
+  that WKWebView and Android WebView report a pen as `pointerType: "pen"` with the barrel `buttons & 2`, the second
+  `& 4` and the eraser end `& 32`, and that `getCoalescedEvents` is there. A drawing sent to a model has not been
+  read by a real vision model.
 - **A touch-screen pinch on WebKitGTK may still magnify the whole window.** The Map and the plan diagram handle two
   fingers, ctrl+wheel, Safari gestures and the app shell's touchpad `app-pinch`, and `ui/zoomguard.js` cancels any
   other pinch; none of it has run on a real touch screen under WebKitGTK, and `crates/app/src/pinch.rs` only takes
