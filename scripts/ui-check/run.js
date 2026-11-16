@@ -1796,7 +1796,8 @@ async function pad() {
     await until('the question card', () => page.evaluate(`Boolean(document.querySelector('#timeline .exercise.pending .ex-form'))`));
     return page;
   };
-  const PIXELS = `(() => { const c = document.getElementById('pad-canvas'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  // The board is redrawn once a frame after the view changes: read it after the frame.
+  const PIXELS = `(async () => { await new Promise((r) => requestAnimationFrame(r)); const c = document.getElementById('pad-canvas'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
     let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n; })()`;
   const geometry = `(() => { const r = (id) => { const b = document.getElementById(id).getBoundingClientRect(); return [b.left, b.top, b.width, b.height].map(Math.round); };
     return { mode: document.getElementById('pad').dataset.mode, docked: document.getElementById('conversation').classList.contains('pad-docked'),
@@ -1883,7 +1884,7 @@ async function pad() {
   const gtkEvent = (type, button, buttons, at = [0.3, 0.25]) => `(() => { const c = document.getElementById('pad-canvas'); const b = c.getBoundingClientRect();
     c.dispatchEvent(new PointerEvent('${type}', { pointerType: 'mouse', pointerId: 1, isPrimary: true, button: ${button}, buttons: ${buttons}, pressure: ${buttons ? 0.5 : 0},
       clientX: b.left + ${at[0]} * b.width, clientY: b.top + ${at[1]} * b.height, bubbles: true, cancelable: true })); })()`;
-  const INK_AT = `(() => { const c = document.getElementById('pad-canvas'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const INK_AT = `(async () => { await new Promise((r) => requestAnimationFrame(r)); const c = document.getElementById('pad-canvas'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
     let s = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) s = (s + i) % 1e9; return s; })()`;
   const unchanged = await page.evaluate(INK_AT);
   await gtkPen({});
@@ -1977,6 +1978,19 @@ async function pad() {
   await page.evaluate(shellPinch({ phase: 'update', scale: 3, x: 5, y: 5, dx: 0, dy: 0 }));
   await page.evaluate(shellPinch({ phase: 'end', scale: 3, x: 5, y: 5, dx: 0, dy: 0 }));
   expect(await zoomLabel() === '141%', `a pinch begun off the board zoomed it: ${await zoomLabel()}`);
+  // A pinch reports faster than the screen refreshes, and the engine rasterises every redraw and every path it is
+  // given: twenty updates inside one frame redraw the board once, and a stroke of one width is one path, not one per
+  // segment (redrawn per event and per segment, a board of 134 strokes zoomed at 3 frames a second in WebKitGTK).
+  const redrawn = await page.evaluate(`(async () => { const P = CanvasRenderingContext2D.prototype; const { clearRect, stroke } = P; let clears = 0, paths = 0;
+    P.clearRect = function (...a) { clears++; return clearRect.apply(this, a); }; P.stroke = function (...a) { paths++; return stroke.apply(this, a); };
+    const pinch = (phase, scale) => window.dispatchEvent(new CustomEvent('app-pinch', { detail: { phase, scale, x: ${px}, y: ${py}, dx: 0, dy: 0 } }));
+    pinch('begin', 1); for (let i = 20; i >= 0; i--) pinch('update', 1 - i / 100); pinch('end', 1);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    P.clearRect = clearRect; P.stroke = stroke;
+    const saved = JSON.parse(localStorage.getItem(Object.keys(localStorage).find((k) => k.startsWith('lh.pad.'))));
+    return { clears, paths, lines: saved.strokes.filter((s) => s.p.length > 3).length, segments: saved.strokes.reduce((n, s) => n + s.p.length / 3 - 1, 0) }; })()`);
+  expect(redrawn.clears === 1 && redrawn.paths > 0 && redrawn.paths <= redrawn.lines && redrawn.lines < redrawn.segments && await zoomLabel() === '141%',
+    `a burst of pinch updates: ${JSON.stringify(redrawn)}, ${await zoomLabel()}`);
   await page.evaluate(click('pad-zoom-in'));
   await page.evaluate(click('pad-zoom-in'));
   expect(await zoomLabel() === '283%', `zooming back in: ${await zoomLabel()}`);
@@ -1998,7 +2012,11 @@ async function pad() {
   expect(staged.length === 1 && staged[0].data.startsWith('data:image/png;base64,') && staged[0].name === 'Scratch pad.png', `staged: ${JSON.stringify(staged.map((s) => s.name))}`);
   const plain = await page.evaluate(nonWhite(staged[0].data));
   expect(plain.corner.join() === '255,255,255,255' && plain.n > 300, `the picture is ink on white paper: ${JSON.stringify(plain)}`);
-  expect(Math.max(...plain.size) === 1600 && plain.margins.every((m) => m >= 28 && m <= 36), `the picture is the drawing's bounding box with a margin: ${JSON.stringify(plain)}`);
+  // The picture is the drawing at the size it was written (drawn at 100 %, so no larger than the board on screen)
+  // with a 14 px margin. It used to be blown up to 1600 px on its long side, which a model is charged for by area.
+  const [boardW, boardH] = await page.evaluate(`(() => { const b = document.getElementById('pad-canvas').getBoundingClientRect(); return [b.width, b.height]; })()`);
+  expect(Math.max(...plain.size) >= 200 && plain.size[0] <= boardW + 28 && plain.size[1] <= boardH + 28 && plain.margins.every((m) => m >= 13 && m <= 15),
+    `the picture is the drawing's bounding box at the size it was written, with a margin: ${JSON.stringify({ plain, board: [boardW, boardH] })}`);
 
   await page.evaluate(`(() => { const s = document.getElementById('pad-bg'); s.value = 'A1'; s.dispatchEvent(new Event('change')); })()`);
   expect(await page.evaluate(`Boolean(document.querySelector('#pad-bg-layer svg')) && document.getElementById('pad-bg-layer').getClientRects().length > 0`), 'the figure did not become the background');

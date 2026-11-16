@@ -15,7 +15,7 @@
 // figure the tutor made (an artifact's SVG, e.g. a circuit) can sit under
 // the strokes as the background, placed where the learner was looking when
 // they picked it. The picture that is sent is the drawing's bounding box
-// (strokes and figure) with a margin, scaled to a fixed long side.
+// (strokes and figure) with a margin, as small as keeps it readable.
 
 import { message } from './api.js';
 import { cleanSvg } from './artifacts.js';
@@ -35,9 +35,22 @@ const Z_MAX = 100;
 const ZOOM_STEP = Math.SQRT2;
 /** CSS px kept free around the drawing when zooming to fit it. */
 const FIT_MARGIN = 24;
-/** The long side of the picture that is sent, and the white margin around the drawing in it, in px. */
-const EXPORT_LONG = 1600;
-const EXPORT_PAD = 32;
+/**
+ * The picture that is sent, in px. A vision model is charged by the picture's
+ * area (Claude: one token per 28×28 px) and sees every pixel of it up to a
+ * size limit, so the picture is no larger than the drawing's detail needs:
+ * the writing at the size it had on the learner's screen while they wrote it
+ * (a pen line EXPORT_LINE wide, the pen's own default; the learner could read
+ * it at that size) and the tutor's figure at its own size. Never under
+ * EXPORT_MIN_LONG on its long side (a very small picture is misread), never
+ * over EXPORT_MAX_LONG (the long edge Claude's standard models take; a
+ * longer one is shrunk by the service), with EXPORT_PAD of white around the
+ * drawing.
+ */
+const EXPORT_LINE = 6;
+const EXPORT_MIN_LONG = 200;
+const EXPORT_MAX_LONG = 1568;
+const EXPORT_PAD = 14;
 /** A touch this soon after the pen was last seen is a resting palm. */
 const PALM_MS = 800;
 const PEN_CONTACT = 0b100001; // the tip or the eraser end on the screen
@@ -178,11 +191,47 @@ function drawDot(c, stroke, colors) {
   c.fill();
 }
 
-function drawStroke(c, stroke, colors) {
+/**
+ * A whole stroke. The engine rasterises every `stroke()` it is given, so the
+ * segments are not drawn one by one: widths are rounded to `step` (board
+ * units; the caller passes a quarter of a device pixel), a run of equal ones
+ * is one path, and a segment wholly outside `view` ({ x0, y0, x1, y1 }) is
+ * left out. Zoomed out, a stroke is a few paths; zoomed in, only the part on
+ * screen is drawn. No line is thinner than `least`.
+ */
+function drawStroke(c, stroke, colors, step, view = null, least = step) {
+  const p = stroke.p;
   c.lineCap = 'round';
   c.lineJoin = 'round';
-  if (stroke.p.length === 1) drawDot(c, stroke, colors);
-  for (let j = 0; j + 1 < stroke.p.length; j++) drawSegment(c, stroke, j, colors);
+  if (p.length === 1) drawDot(c, stroke, colors);
+  c.strokeStyle = colors[stroke.c];
+  let width = -1; // of the path being built; none when negative
+  for (let j = 0; j + 1 < p.length; j++) {
+    const [ax, ay] = j === 0 ? p[0] : mid(p[j - 1], p[j]);
+    const [bx, by] = p[j];
+    const [dx, dy] = j === p.length - 2 ? p[j + 1] : mid(p[j], p[j + 1]);
+    const w = Math.max(least, Math.round((stroke.w * widthFactor((p[j][2] + p[j + 1][2]) / 2)) / step) * step);
+    // The curve lies inside the triangle of its three points.
+    const out =
+      view &&
+      (Math.max(ax, bx, dx) + w / 2 < view.x0 ||
+        Math.min(ax, bx, dx) - w / 2 > view.x1 ||
+        Math.max(ay, by, dy) + w / 2 < view.y0 ||
+        Math.min(ay, by, dy) - w / 2 > view.y1);
+    if (width >= 0 && (out || w !== width)) {
+      c.stroke();
+      width = -1;
+    }
+    if (out) continue;
+    if (width < 0) {
+      width = w;
+      c.lineWidth = w;
+      c.beginPath();
+      c.moveTo(ax, ay);
+    }
+    c.quadraticCurveTo(bx, by, dx, dy);
+  }
+  if (width >= 0) c.stroke();
 }
 
 /** A stroke's extent in world units, ink included; kept once the stroke is finished. */
@@ -222,14 +271,30 @@ function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
   ctx.setTransform(k, 0, 0, k, -x * k, -y * k);
-  const right = x + els.canvas.width / k;
-  const bottom = y + els.canvas.height / k;
+  const view = { x0: x, y0: y, x1: x + els.canvas.width / k, y1: y + els.canvas.height / k };
   const colors = palette();
   for (const s of pad.strokes) {
     const b = boxOf(s);
-    if (b.x1 >= x && b.x0 <= right && b.y1 >= y && b.y0 <= bottom) drawStroke(ctx, s, colors);
+    if (b.x1 >= view.x0 && b.x0 <= view.x1 && b.y1 >= view.y0 && b.y0 <= view.y1) drawStroke(ctx, s, colors, 0.25 / k, view);
   }
   placeBackground();
+}
+
+/** The frame a redraw is waiting for, or 0. */
+let renderFrame = 0;
+
+/**
+ * Redraws the board in the next frame, however often the view changed before
+ * it. A pinch or a drag reports faster than the screen refreshes (a touchpad
+ * about 140 times a second, each finger of a pinch on its own), and the
+ * engine rasterises every redraw it is given: drawn once per event, a board
+ * of 134 strokes zoomed at 3 frames a second.
+ */
+function requestRender() {
+  renderFrame ||= requestAnimationFrame(() => {
+    renderFrame = 0;
+    render();
+  });
 }
 
 const stageSize = () => [els.stage.clientWidth, els.stage.clientHeight];
@@ -271,7 +336,7 @@ function toWorld([sx, sy]) {
 
 function setView(x, y, z) {
   pad.view = { x, y, z };
-  render();
+  requestRender();
   updateZoom();
   scheduleSave();
 }
@@ -788,13 +853,30 @@ async function paintBackground(c, s) {
 }
 
 /**
+ * How many px of the picture a board unit gets (see EXPORT_LINE). The pen
+ * line it goes by is the tenth percentile of the strokes' widths, so what
+ * was written small, zoomed in, decides and one stray hairline does not.
+ */
+function exportScale(box) {
+  const widths = pad.strokes.map((s) => s.w).sort((a, b) => a - b);
+  let scale = EXPORT_LINE / widths[Math.floor(widths.length / 10)];
+  const fig = currentFigure();
+  const own = fig && pad.bgRect && figureSvg(fig);
+  if (own) scale = Math.max(scale, own.w / pad.bgRect.w);
+  const long = Math.max(box.w, box.h, 1e-9);
+  scale = Math.max(scale, (EXPORT_MIN_LONG - 2 * EXPORT_PAD) / long);
+  return Math.min(scale, (EXPORT_MAX_LONG - 2 * EXPORT_PAD) / long);
+}
+
+/**
  * The drawing as a PNG data URL: dark ink on white, the figure underneath.
- * The picture is the drawing's bounding box with a white margin, scaled so
- * its long side is EXPORT_LONG px, whatever the zoom it was drawn at.
+ * The picture is the drawing's bounding box with a white margin, at the
+ * scale its detail needs, whatever the zoom it was drawn at. PNG because the
+ * picture is line art: it is small as it is, and a lossy format blurs ink.
  */
 async function exportPng() {
   const box = contentBox();
-  const scale = (EXPORT_LONG - 2 * EXPORT_PAD) / Math.max(box.w, box.h, 1e-9);
+  const scale = exportScale(box);
   const canvas = document.createElement('canvas');
   canvas.width = Math.ceil(box.w * scale) + 2 * EXPORT_PAD;
   canvas.height = Math.ceil(box.h * scale) + 2 * EXPORT_PAD;
@@ -807,7 +889,8 @@ async function exportPng() {
   } catch {
     throw new Error('Couldn’t draw the figure into the picture. Pick “Plain paper” to send the drawing alone.');
   }
-  for (const s of pad.strokes) drawStroke(c, s, EXPORT);
+  // A line under a pixel wide would fade into the paper.
+  for (const s of pad.strokes) drawStroke(c, s, EXPORT, 0.25 / scale, null, 1 / scale);
   return canvas.toDataURL('image/png');
 }
 
