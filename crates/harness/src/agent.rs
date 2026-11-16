@@ -353,6 +353,22 @@ impl Harness {
 
     // ---- composition -------------------------------------------------------
 
+    /// Adds the learner's writing instructions (Settings → Learning) to a
+    /// prompt whose text they read: the `writing_style` flag and its value,
+    /// only when they wrote any. Read on every compose, so a change reaches
+    /// each session, old ones too, on its next turn.
+    pub(crate) fn apply_writing_style(
+        &self,
+        flags: &mut HashSet<String>,
+        values: &mut TemplateValues,
+    ) {
+        let text = lock(&self.config).settings.writing_style.clone();
+        if let Some(style) = Composer::writing_style_value(&text) {
+            flags.insert("writing_style".to_owned());
+            values.set("writing_style", style);
+        }
+    }
+
     /// The tutor's system prompt and tool list for `phase` (normally the
     /// session's phase).
     pub(crate) fn compose_tutor(
@@ -456,6 +472,7 @@ impl Harness {
                 .clone()
                 .unwrap_or_else(|| "workspace".into()),
         );
+        self.apply_writing_style(&mut flags, &mut base);
         let active: Vec<String> = state
             .active_plugins
             .iter()
@@ -492,6 +509,13 @@ impl Harness {
         set_section_level_values(&mut values, None);
         let (file, label) = match phase {
             Phase::Measure => {
+                // The tutor can only ask for a plugin it knows is installed;
+                // the brief names plugins late, and only for some strands.
+                let catalog = self.plugin_registry().available();
+                values.set(
+                    "plugin_catalog",
+                    composer.plugin_catalog(&state.platform, &catalog),
+                );
                 values.set("active_plugins", fragments);
                 ("tutor/phases/measure.md", "measure")
             }
@@ -613,6 +637,7 @@ impl Harness {
             "session_state",
             Composer::session_state_with(state, Some(&self.saved_starting_point())),
         );
+        self.apply_writing_style(&mut flags, &mut values);
         values.set("hunt.state", state.hunt_state());
         values.set(
             "hunt",

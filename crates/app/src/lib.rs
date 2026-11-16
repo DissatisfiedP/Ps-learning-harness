@@ -829,6 +829,13 @@ async fn set_starting_point(h: H<'_>, value: String) -> Result<()> {
     blocking(&h, move |h| h.set_starting_point(&value)).await
 }
 
+/// Saves the learner's writing instructions for every session (empty clears
+/// them). The UI sends `{ value }`.
+#[tauri::command]
+async fn set_writing_style(h: H<'_>, value: String) -> Result<()> {
+    blocking(&h, move |h| h.save_writing_style(&value)).await
+}
+
 #[tauri::command]
 async fn test_role(h: H<'_>, role: ModelRole) -> Result<RoleTestResult> {
     h.test_role(role).await.map_err(err)
@@ -1203,6 +1210,7 @@ pub fn run() {
             set_base_url,
             set_role_model,
             set_starting_point,
+            set_writing_style,
             test_role,
             list_roles,
             role_usage,

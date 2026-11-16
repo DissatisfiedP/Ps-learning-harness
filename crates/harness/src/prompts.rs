@@ -132,6 +132,27 @@ impl Composer {
         }
     }
 
+    /// The learner's writing instructions (Settings → Learning) as the
+    /// `{{writing_style}}` value, or `None` when they wrote nothing. The text
+    /// is the learner's own, so a `{{` in it is split: left whole it would
+    /// read as an unfilled placeholder and fail the render.
+    pub fn writing_style_value(text: &str) -> Option<String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut prev = '\0';
+        for c in text.chars() {
+            if c == '{' && prev == '{' {
+                out.push(' ');
+            }
+            out.push(c);
+            prev = c;
+        }
+        Some(out)
+    }
+
     // ---- composition ----------------------------------------------------
 
     /// Tutor system prompt: shared fragments → base → phase instructions.
@@ -147,6 +168,7 @@ impl Composer {
     ) -> Result<String, Error> {
         let mut shared = vec![
             "shared/voice.md",
+            "shared/writing.md",
             "shared/accuracy.md",
             "shared/learner-signals.md",
             "shared/questions.md",
@@ -155,6 +177,9 @@ impl Composer {
         ];
         if flags.contains("workspace") {
             shared.push("shared/workspace.md");
+        }
+        if flags.contains("writing_style") {
+            shared.push("shared/writing-style.md");
         }
         let mut parts = Vec::with_capacity(shared.len() + 1);
         for p in shared {
@@ -179,12 +204,15 @@ impl Composer {
         exam_mode: Option<&str>,
         flags: &HashSet<String>,
     ) -> Result<String, Error> {
-        let shared = [
+        let mut shared = vec![
             "shared/accuracy.md",
             "shared/learner-signals.md",
             "shared/learner-files.md",
         ];
-        let mut parts = Vec::with_capacity(shared.len() + 2);
+        if flags.contains("writing_style") {
+            shared.push("shared/writing-style.md");
+        }
+        let mut parts = Vec::with_capacity(shared.len() + 1);
         for p in shared {
             parts.push(self.load(p)?);
         }
@@ -228,14 +256,19 @@ impl Composer {
         values: &TemplateValues,
         flags: &HashSet<String>,
     ) -> Result<String, Error> {
-        let mut parts = Vec::new();
-        for p in [
+        let mut files = vec![
             "shared/voice.md",
+            "shared/writing.md",
             "shared/accuracy.md",
             "shared/learner-signals.md",
             "shared/formatting.md",
-            "coach/base.md",
-        ] {
+        ];
+        if flags.contains("writing_style") {
+            files.push("shared/writing-style.md");
+        }
+        files.push("coach/base.md");
+        let mut parts = Vec::with_capacity(files.len());
+        for p in files {
             parts.push(self.load(p)?);
         }
         render(&parts.join("\n\n"), values, flags)
@@ -737,6 +770,7 @@ mod tests {
 
         let mut measure = TemplateValues::new();
         measure.set("active_plugins", "");
+        measure.set("plugin_catalog", c.plugin_catalog("desktop", &[]));
         measure.set("hunt.state", "out");
         measure.set("hunt", hunt.clone());
         out.push((
@@ -958,6 +992,39 @@ mod tests {
                 && researcher.contains("`entryLevel`"),
             "researcher lacks the venue instructions"
         );
+    }
+
+    /// The learner's writing instructions reach the planner and the coach
+    /// too, ahead of each agent's base, and render with a `{{` in them.
+    #[test]
+    fn writing_instructions_compose_for_the_planner_and_the_coach() {
+        let c = Composer::new(Path::new("/nonexistent"));
+        let style = Composer::writing_style_value(" Write in French. Never print {{{x}}. ").unwrap();
+        assert_eq!(style, "Write in French. Never print { { {x}}.");
+        assert_eq!(Composer::writing_style_value("  \n "), None);
+        let mut f = learning_flags();
+        f.insert("writing_style".to_owned());
+
+        let state = representative_state();
+        let mut pv = TemplateValues::new();
+        pv.set("session_state", Composer::session_state(&state));
+        pv.set("plugin_catalog", c.plugin_catalog("desktop", &[]));
+        pv.set("hunt.state", "out");
+        pv.set("hunt", "");
+        pv.set("section.targetLevel", "use");
+        pv.set("section.knownNote", "");
+        pv.set("section.learnerNote", "");
+        pv.set("writing_style", style.clone());
+        let planner = c.compose_planner(&pv, None, &f).unwrap();
+        let at = planner.find(&style).expect("the planner gets the instructions");
+        assert!(at < planner.find("# Planner").unwrap());
+
+        let mut cv = TemplateValues::new();
+        cv.set("session_state", "- Format: stream\n");
+        cv.set("writing_style", style.clone());
+        let coach = c.compose_coach(&cv, &f).unwrap();
+        let at = coach.find(&style).expect("the coach gets the instructions");
+        assert!(at < coach.find("# Practice coach").unwrap());
     }
 
     #[test]

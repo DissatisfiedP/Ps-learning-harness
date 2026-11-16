@@ -565,6 +565,7 @@ impl Harness {
         }
         let mut values = TemplateValues::new();
         values.set("session_state", calibrated.1);
+        self.apply_writing_style(&mut flags, &mut values);
         let composer = Composer::new(&self.repo);
         let mut system = composer.compose_coach(&values, &flags)?;
 

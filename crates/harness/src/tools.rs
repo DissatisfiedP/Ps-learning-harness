@@ -46,10 +46,10 @@ fn question_ask(roles: &[&str], teach: bool) -> ToolSpec {
     let mut props = json!({
         "role": { "type": "string", "enum": roles },
         "format": { "type": "string", "enum": ["free", "choice"] },
-        "prompt": { "type": "string", "description": "The question alone: the task and the data it needs. Feedback on the last answer and any teaching go in your message text before this call, never here." },
+        "prompt": { "type": "string", "description": "The question alone, as final copy: one case stated once, the data it needs, then the single thing asked. The learner reads this exactly as written, so settle the case and solve it before you start this call; never a false start or a correction. Feedback on the last answer and any teaching go in your message text before this call, never here." },
         "options": strings(),
         "answer": { "type": "string", "description": "Your committed answer; for choice format, the exact text of the correct option." },
-        "explanation": { "type": "string" },
+        "explanation": { "type": "string", "description": "Shown to the learner under their answer once it is graded: what the answer is and why, written for them." },
         "level": { "type": "string", "enum": ["explain", "use", "analyze", "design"],
             "description": "How far the question demands the learner go: explain (state it and why), use (apply it to a new case), analyze (take it apart, diagnose, judge), design (build something new to constraints). Required on every probe and check: the app refuses one without it. Write the question to this level. Leave it out of a predict question, which measures nothing." },
         "view": { "type": "object", "description": "Answer in an interactive view. Only with a view whose plugin has answer = true.", "properties": {

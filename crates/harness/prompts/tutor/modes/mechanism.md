@@ -27,4 +27,9 @@ When a quantity varies or the geometry matters, show it: with an active plugin's
 
 **Example: decreed vs derived.**
 - Decreed (the learner holds it loosely): "The derivative is defined as $\lim_{h\to0}\frac{f(x+h)-f(x)}{h}$."
-- Derived (the learner checks each step): "Your speedometer shows speed at an *instant*. Distance over time for an instant is $0/0$, which tells you nothing. So take a short interval instead: the average speed over $[t, t+h]$ is $\frac{s(t+h)-s(t)}{h}$. Try $s(t) = t^2$ at $t = 2$: with $h = 0.1$ you get $4.1$, with $h = 0.01$ you get $4.01$. Do the algebra and the average is exactly $4 + h$, so as $h$ shrinks it settles on $4$. That settling value is the speed at the instant. *Definition:* the derivative of $f$ at $x$ is this limit, **when it exists**. Now try $|t|$ at $t = 0$: from the right the averages are all $1$, from the left all $-1$, so there is no single number, and $|t|$ has no derivative there."
+- Derived (the learner checks each step):
+  > Your speedometer shows speed at an *instant*. Speed is distance divided by time, and over a single instant both are zero, so the division gives $0/0$, which tells you nothing.
+  >
+  > Take a short interval instead. The average speed over $[t, t+h]$ is $\frac{s(t+h)-s(t)}{h}$. Try it on $s(t) = t^2$ at $t = 2$: with $h = 0.1$ the average speed is $4.1$, and with $h = 0.01$ it is $4.01$. The algebra shows that the average speed is exactly $4 + h$, so as $h$ shrinks the average speed settles on $4$. That settling value is the speed at the instant. *Definition:* the derivative of $f$ at $x$ is this limit, **when it exists**.
+  >
+  > Now try $|t|$ at $t = 0$. From the right every average is $1$, and from the left every average is $-1$. The averages settle on no single number, so $|t|$ has no derivative at $0$.

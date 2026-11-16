@@ -87,13 +87,13 @@ The learner picks a model per role in Settings. The harness maps agents to roles
 ## Composition
 
 **Tutor system prompt**, in order:
-1. `shared/voice.md`, `accuracy.md`, `learner-signals.md`, `questions.md`, `formatting.md`, `learner-files.md`, then `shared/workspace.md` when the session has an attached workspace.
+1. `shared/voice.md`, `writing.md`, `accuracy.md`, `learner-signals.md`, `questions.md`, `formatting.md`, `learner-files.md`, then `shared/workspace.md` when the session has an attached workspace.
 2. `tutor/base.md`, with:
    - `{{session_state}}`: the pinned goal record, field brief, probe map, plan and current section, platform, and `## Learner state` (built by `graph::read::learner_state` from the learner's knowledge graph each turn: node and topic counts, the topic tree with nodes homed per topic, then up to eight nodes whose id, title, statement or home matches the goal record's words, each with the learner's record; ≤ 1,600 characters, "no graph yet" when the graph is empty; the planner gets the same block), then a `## This device` section when this device lacks something: on mobile, the desktop-only plugins the session used (their tools and fragments are left out; `docs/sync-build.md`, "Sessions on mobile"), and on any device, a folder attached on another device ("The folder `<name>` is attached on another device; its files aren't available here.");
    - `{{phase}}`;
    - `{{phase_instructions}}`, filled from the phase file.
 3. Inside the phase file:
-   - **measure:** `{{active_plugins}}` from the plugins the tutor asked for while measuring (`plugin_request`), each package's `prompts/tutor.md`. Empty until it asks.
+   - **measure:** `{{plugin_catalog}}` (one manifest line per installed, enabled plugin available on the platform, the planner's catalog), so the tutor can ask for a tool before the brief names one; `{{active_plugins}}` from the plugins the tutor asked for while measuring (`plugin_request`), each package's `prompts/tutor.md`. Empty until it asks.
    - **teach:** the section header fields (including `section.notes`, written by the planner), `{{mode}}` from `tutor/modes/<section.mode>.md`, and `{{active_plugins}}` from the section's active **plugin packages** (each package's `prompts/tutor.md`) plus any granted mid-section. Learning-system flags add more (see below): `section.targetLevel`, `section.learnerNote`, `section.knownNote` (with `known_section`), and `{{hunt}}` = the body of `tutor/hunt.md` with `{{hunt.state}}` filled (with `hunt_active`).
 
 **Planner system prompt:**
@@ -102,7 +102,9 @@ The learner picks a model per role in Settings. The harness maps agents to roles
 
 Its **messages** are the session conversation (the same messages the tutor sees, compacted the same way), followed by the request it is answering: the initial plan, a learner change request, or a `plan_change_request`.
 
-**Coach system prompt:** `shared/voice.md`, `accuracy.md`, `learner-signals.md`, `formatting.md`, then `coach/base.md` with `{{session_state}}` (built by code, `practice/coach.rs`: format, targets with layers, R and open misconceptions, the app's `next:` requests with their hosts, host candidates, the open problem **with its committed solution** so compaction can't lose the answer key, held nodes, surfaces used, outcomes so far, the retest list, calibration), then `## Plugins you may use for this problem` with the `practice` fragments of the plugins active when the target was taught (tools scoped `practice` are offered too), then the libraries paragraph. Flags: `mermaid`, `calibration` (when the block exists). The **problem checker** gets `jobs/problem-checker.md` cut at `## Turn 2`: the first half is its system prompt, the second is posted after `audit_submit`, so the target's name is never in the first turn.
+**Coach system prompt:** `shared/voice.md`, `writing.md`, `accuracy.md`, `learner-signals.md`, `formatting.md`, then `coach/base.md` with `{{session_state}}` (built by code, `practice/coach.rs`: format, targets with layers, R and open misconceptions, the app's `next:` requests with their hosts, host candidates, the open problem **with its committed solution** so compaction can't lose the answer key, held nodes, surfaces used, outcomes so far, the retest list, calibration), then `## Plugins you may use for this problem` with the `practice` fragments of the plugins active when the target was taught (tools scoped `practice` are offered too), then the libraries paragraph. Flags: `mermaid`, `calibration` (when the block exists). The **problem checker** gets `jobs/problem-checker.md` cut at `## Turn 2`: the first half is its system prompt, the second is posted after `audit_submit`, so the target's name is never in the first turn.
+
+**The learner's writing instructions** (`shared/writing-style.md`, with the `writing_style` flag): the text the learner saved in Settings → Learning ("How I should write to you": the language, how plain or advanced the wording is, the layout), as `{{writing_style}}`. It is the last shared fragment of the tutor, planner and coach prompts, before the agent's base, and is left out whole when the setting is empty. It overrides the voice, writing and formatting rules where they disagree, never accuracy, grading or the method; a request made inside the session wins over it. The setting is read on every compose (`Harness::apply_writing_style`), so a change reaches every session, old ones too, on its next turn. It lives in the device's `settings.json` (`writingStyle`, at most 2,000 characters) and is not synced.
 
 **Jobs:** their own file, with `{{task}}` and the other placeholders filled from the job record.
 
@@ -117,6 +119,7 @@ Fragments wrapped in `{{#flag}} … {{/flag}}` are included only when the flag i
 | `mermaid` | every tutor and coach compose: the UI renders Mermaid. The planner never sets it (its text has no Mermaid) | arch §4.24 |
 | `workspace` | per tutor compose: the session has an attached workspace folder (adds `shared/workspace.md`, fills `{{workspace_name}}`) | arch §4.25 |
 | `message_send` | per tutor compose: the Tutor model is on the Anthropic wire, where reply text written before a tool call can come back as unreadable reasoning. Adds the "How your words reach them" rule to `tutor/base.md` and the `message_send` tool | `docs/claude-subscription.md` |
+| `writing_style` | per compose (tutor, planner, coach): the learner saved writing instructions in Settings. Adds `shared/writing-style.md` and fills `{{writing_style}}` (a `{{` in the learner's text is split so it can't read as a placeholder) | `docs/ui-design.md` §7.7.7 |
 | `levels` | target levels are built | `docs/learning-system.md` §2 |
 | `starting_point` | the starting-point setting is built: `tutor/phases/measure.md` asks for it, and `planner/base.md` starts `unprobed`/`new` strands at the field's roots | §3 |
 | `plan_controls` | plan-card controls and known sections are built | §4 |
@@ -179,7 +182,7 @@ A plugin is a **package**, not a prompt file: `plugin.toml` (manifest), `src/*.l
 
 What the prompts depend on:
 
-- **Catalog lines.** The planner sees one line per installed, enabled, platform-available plugin: title, id, tool names, platforms, `use_when`, `avoid_when`, `cost`.
+- **Catalog lines.** The planner, and the tutor while measuring, see one line per installed, enabled, platform-available plugin: title, id, tool names, platforms, `use_when`, `avoid_when`, `cost`.
 - **Fragments.** While a plugin is active in the current section (or while measuring, once the tutor asked for it there), the tutor gets its `prompts/tutor.md` in `{{active_plugins}}` in Measure, Teach and Close. The coach gets the `prompts/practice.md` of the plugins that were active when the problem's target was taught (the scheduler records them in the problem's plan). Nothing from an inactive, disabled or missing plugin reaches a prompt.
 - **Tools.** In Measure and Teach, the active plugins' tools scoped to `tutor` are added to the tool list with the manifest's names and JSON Schemas. A tool name starts with `<id>_` (dashes → underscores), e.g. `circuit_draw`. A plugin error comes back as a tool error starting `plugin error:`; result text is capped at 16 KiB. The call op records the plugin's id and `platforms`. On mobile, a call to a plugin known not to run there is refused with "`<id>` only runs on desktop; teach without it", and the session locks on that device after the turn unless the learner already chose "Continue here anyway" (`docs/sync-build.md`, "Sessions on mobile").
 - **Install offers.** A plugin wanted where the session is (the current section's plan plugins, or one the tutor asked for) that this device can't run yet adds a line to `## This device`: "`<id>` isn't installed on this device; the learner has been asked to install it. Work without it until you are told it is active.", or for a built-in waiting for consent "`<id>` is built in but off on this device until the learner allows it; they have been asked. …". A declined one adds "The learner turned `<id>` down. Don't ask for it again here." Once it can run it is granted at the start of the next tutor turn.
@@ -236,14 +239,16 @@ The learner's attachments are readable through `file_find` / `file_read`: home, 
 
 | File | Ceiling | File | Ceiling |
 |---|---|---|---|
-| `shared/voice.md` | 150 | `tutor/base.md` | 1365 |
-| `shared/accuracy.md` | 174 | `tutor/phases/measure.md` | 1840 |
-| `shared/learner-signals.md` | 406 | `tutor/phases/teach.md` | 2025 |
-| `shared/questions.md` | 810 | `tutor/hunt.md` | 690 |
-| `shared/formatting.md` | 216 | `tutor/modes/argument.md` | 463 |
+| `shared/voice.md` | 170 | `tutor/base.md` | 1450 |
+| `shared/writing.md` | 600 | | |
+| `shared/accuracy.md` | 174 | `tutor/phases/measure.md` | 1955 |
+| `shared/learner-signals.md` | 406 | `tutor/phases/teach.md` | 2040 |
+| `shared/questions.md` | 1050 | `tutor/hunt.md` | 690 |
+| `shared/formatting.md` | 225 | `tutor/modes/argument.md` | 463 |
 | `shared/learner-files.md` | 228 | `tutor/modes/fact.md` | 378 |
-| `shared/workspace.md` | 122 | `tutor/modes/mechanism.md` | 460 |
+| `shared/workspace.md` | 122 | `tutor/modes/mechanism.md` | 835 |
 | `shared/library.md` | 250 | | |
+| `shared/writing-style.md` | 130 | | |
 | `planner/base.md` | 2490 | `tutor/modes/perceptual.md` | 370 |
 | `planner/exam.md` | 510 | `tutor/modes/procedure.md` | 483 |
 | `coach/base.md` | 2050 | | |
@@ -273,3 +278,7 @@ Raised on 2026-11-14 for the question gates: `shared/questions.md` 733 → 810 (
 Raised on 2026-11-15 for the delivery channel: `tutor/base.md` 1277 → 1365 (the `message_send` block: when reply text may not be shown, and what to do).
 
 Raised on 2026-11-15 for install offers: `tutor/phases/measure.md` 1655 → 1840 (when a probe needs a tool: `plugin_request`, `plugin_search`, the learner decides), `tutor/phases/teach.md` 1969 → 2025 (a plugin the device can't run yet is offered to the learner), `planner/base.md` 2403 → 2490 (built-ins waiting for permission can be planned; the learner is asked again when the section starts).
+
+Raised on 2026-11-16 for explanations in standard English prose, after two real sessions (probe feedback as dense paragraphs with drifting pronouns; a probe whose prompt corrected itself mid-sentence and described a circuit in words with the circuit plugin installed): added `shared/writing.md` at 600 (clearer sentences at the same depth: a stated subject, repeat the noun, one name per thing, no note form; prose rather than bullets or numbered steps; a before/after pair), composed for the tutor and the coach; `shared/voice.md` 150 → 170 (cutting filler is not cutting clarity); `shared/formatting.md` 216 → 225 (explanation stays in paragraphs); `shared/questions.md` 810 → 1050 (every field is final copy, show a figure instead of describing it, `explanation` is learner-facing); `tutor/base.md` 1365 → 1450 (working vocabulary stays out of learner text); `tutor/phases/measure.md` 1840 → 1955 (the installed-plugin catalog, what to write after a probe answer); `tutor/phases/teach.md` 2025 → 2040 (the cycle example in full sentences); `tutor/modes/mechanism.md` 460 → 835 (already 806 since the checkable-steps rewrite; now the derived example as paragraphs).
+
+Added on 2026-11-16 for the learner's own writing instructions: `shared/writing-style.md` at 130 (the learner's text is not counted).

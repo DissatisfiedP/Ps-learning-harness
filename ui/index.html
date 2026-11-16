@@ -424,6 +424,15 @@
         </fieldset>
         <p class="help">How much I check what you already know before planning. You can change it per session.</p>
         <p class="status" id="starting-point-status" role="status"></p>
+        <div class="field">
+          <label for="writing-style-input">How I should write to you</label>
+          <textarea class="input resizable" id="writing-style-input" rows="4" maxlength="2000" aria-describedby="writing-style-help" placeholder="For example: Write in Arabic and keep technical terms in English. University-level wording. Plain paragraphs, no bullet lists."></textarea>
+          <p class="help" id="writing-style-help">Your own instructions for every session: the language, how plain or advanced the wording is, the layout. They apply from the next reply, in sessions you already started too. Leave it empty for my usual style.</p>
+          <div class="actions">
+            <button class="btn secondary" id="writing-style-save" type="button" disabled>Save</button>
+          </div>
+          <p class="status" id="writing-style-status" role="status"></p>
+        </div>
       </section>
       <section class="settings-section" aria-labelledby="focus-heading">
         <h2 id="focus-heading">Focus</h2>

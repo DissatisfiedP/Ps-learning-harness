@@ -21,6 +21,9 @@ const themeChoice = document.getElementById('theme-choice');
 const focusChoice = document.getElementById('focus-choice');
 const startingPointChoice = document.getElementById('starting-point');
 const startingPointStatus = document.getElementById('starting-point-status');
+const writingStyleInput = document.getElementById('writing-style-input');
+const writingStyleSave = document.getElementById('writing-style-save');
+const writingStyleStatus = document.getElementById('writing-style-status');
 
 const THEME_KEY = 'lh.theme';
 
@@ -63,6 +66,11 @@ export function initSettings(h) {
   startingPointChoice?.addEventListener('change', (e) => {
     if (e.target.name === 'starting-point' && e.target.checked) saveStartingPoint(e.target.value);
   });
+  writingStyleInput?.addEventListener('input', () => {
+    writingStyleSave.disabled = writingStyleInput.value.trim() === writingStyle();
+    writingStyleStatus.textContent = '';
+  });
+  writingStyleSave?.addEventListener('click', saveWritingStyle);
   renderDndRow();
   initSections('providers', 'sync');
   initLibrarySettings();
@@ -93,6 +101,31 @@ async function saveStartingPoint(value) {
     startingPointStatus.classList.add('error');
     // Put the stored choice back: the radio must never claim a saved default.
     renderStartingPoint();
+  }
+}
+
+/** The stored writing instructions; empty when the learner wrote none. */
+const writingStyle = () => settings.writingStyle ?? '';
+
+/** Shows the stored text, unless the learner is in the middle of editing it. */
+function renderWritingStyle() {
+  if (!writingStyleInput || !writingStyleSave.disabled) return;
+  writingStyleInput.value = writingStyle();
+}
+
+async function saveWritingStyle() {
+  const value = writingStyleInput.value.trim();
+  writingStyleStatus.classList.remove('error');
+  writingStyleStatus.textContent = 'Saving…';
+  try {
+    await call('set_writing_style', { value });
+    settings.writingStyle = value;
+    writingStyleInput.value = value;
+    writingStyleSave.disabled = true;
+    writingStyleStatus.textContent = value ? 'Saved. It applies from the next reply.' : 'Cleared.';
+  } catch (e) {
+    writingStyleStatus.textContent = message(e);
+    writingStyleStatus.classList.add('error');
   }
 }
 
@@ -188,6 +221,7 @@ async function reload() {
   renderSecretStorage();
   renderModelForm();
   renderStartingPoint();
+  renderWritingStyle();
   hooks.changed({ providers, settings });
 }
 

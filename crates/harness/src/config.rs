@@ -197,6 +197,11 @@ pub struct Settings {
     /// may still set a different one per goal.
     #[serde(default = "default_starting_point")]
     pub starting_point: String,
+    /// The learner's own instructions on how to be written to, for every
+    /// session: the language, how plain or advanced the wording is, the
+    /// layout (`prompts/shared/writing-style.md`). Empty means none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub writing_style: String,
 }
 
 /// The default starting point: the full probe, which is the most useful one

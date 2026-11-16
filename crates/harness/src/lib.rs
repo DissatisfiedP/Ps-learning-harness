@@ -78,6 +78,9 @@ pub use sync::{
 
 const LOGIN_POLL: Duration = Duration::from_millis(1500);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// The longest writing instructions the learner can save: they ride in every
+/// tutor, planner and coach prompt.
+const MAX_WRITING_STYLE: usize = 2000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -705,6 +708,21 @@ impl Harness {
         }
         let mut config = lock(&self.config);
         config.settings.starting_point = point.to_owned();
+        config.save_settings()
+    }
+
+    /// Save the learner's writing instructions (Settings → Learning); empty
+    /// clears them. They reach the tutor, planner and coach prompts on each
+    /// compose.
+    pub fn save_writing_style(&self, text: &str) -> Result<(), Error> {
+        let text = text.trim();
+        if text.chars().count() > MAX_WRITING_STYLE {
+            return Err(Error::Invalid(format!(
+                "writing instructions can be at most {MAX_WRITING_STYLE} characters"
+            )));
+        }
+        let mut config = lock(&self.config);
+        config.settings.writing_style = text.to_owned();
         config.save_settings()
     }
 

@@ -201,6 +201,10 @@
       settings.roles[role] = choice;
       return null;
     },
+    set_writing_style: ({ value }) => {
+      settings.writingStyle = value;
+      return null;
+    },
     workbuddy_login_start: () => ({ state: 'check-state', authUrl: 'https://workbuddy.example/sign-in' }),
     workbuddy_login_wait: () => new Promise((resolve) => {
       finishLogin = (account) => {

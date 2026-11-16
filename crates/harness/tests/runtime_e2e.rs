@@ -1030,6 +1030,43 @@ async fn a_course_goal_normalises_explore_depth_and_starting_point() {
     assert_eq!(h.settings().starting_point, "new");
 }
 
+/// The learner's writing instructions (Settings → Learning) are in the
+/// tutor's next request, with a `{{` of theirs kept from reading as a
+/// placeholder, and are gone from it once cleared.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn saved_writing_instructions_reach_the_tutor_until_cleared() {
+    let script = Arc::new(Script::default());
+    let release = Arc::new(Semaphore::new(0));
+    let base = serve(Arc::clone(&script), Arc::clone(&release)).await;
+    let (repo, config) = temp_dirs("writing-style");
+    let h = harness(&repo, &config, &base).await;
+    h.save_writing_style("  Write in French. Never print {{x}}.  ")
+        .unwrap();
+
+    let s = &*script;
+    s.push("tutor", Reply::Text("Bonjour."));
+    s.push("title", Reply::Text("Circuits"));
+    h.start_teaching("I want to learn circuits").await.unwrap();
+    let with = script.requests_of("tutor").pop().unwrap().to_string();
+    assert!(
+        with.contains("Write in French. Never print { {x}}."),
+        "the saved instructions are in the tutor's prompt"
+    );
+
+    h.save_writing_style("").unwrap();
+    s.push("tutor", Reply::Text("Hello."));
+    s.push("title", Reply::Text("Optics"));
+    h.start_teaching("I want to learn optics").await.unwrap();
+    let without = script.requests_of("tutor").pop().unwrap().to_string();
+    assert!(!without.contains("Write in French"));
+    assert!(!without.contains("The learner's writing instructions"));
+
+    // Too long to ride in every prompt: refused, and nothing is stored.
+    let bad = h.save_writing_style(&"x".repeat(2001)).unwrap_err();
+    assert!(bad.to_string().contains("at most 2000"), "{bad}");
+    assert_eq!(h.settings().writing_style, "");
+}
+
 /// A valid ULID string for a hand-written legacy file.
 fn ulid_like() -> String {
     // 2026-01-01T00:00:00Z in ms, Crockford base32, plus fixed randomness.

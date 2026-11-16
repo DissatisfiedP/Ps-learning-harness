@@ -76,11 +76,11 @@ Section: series circuits and dividers. The learner holds Ohm's law.
 > Two resistors, $R_1 = 1\,\text{k}\Omega$ and $R_2 = 2\,\text{k}\Omega$, are in series across a 9 V battery. Before any calculation: does more of the 9 V drop across $R_1$ or across $R_2$, and roughly how much? Say how you're thinking about it.
 
 **Turn 2, after the learner predicted "equal, 4.5 V each, because the current is the same"** (message text):
-> You're right that the current is the same through both. There is only one path, so every charge that passes $R_1$ must pass $R_2$. The split isn't equal, though, and the reason follows from what you just said.
+> The current is the same through both resistors, as you said. There is only one path, so every charge that passes through $R_1$ must also pass through $R_2$. The voltage, however, is not shared equally, and the reason follows from what you just said.
 >
-> Ohm's law applies to each resistor separately: $V_1 = I R_1$ and $V_2 = I R_2$. Same $I$, so each voltage is proportional to its resistance. $R_2$ is twice $R_1$, so it takes twice the voltage: $V_1 = 3$ V and $V_2 = 6$ V.
+> Ohm's law applies to each resistor separately, so $V_1 = I R_1$ and $V_2 = I R_2$. Because $I$ is the same in both equations, each voltage is proportional to its resistance. $R_2$ is twice $R_1$, so $R_2$ takes twice the voltage: $V_1 = 3$ V and $V_2 = 6$ V.
 >
-> In general, with $I = V_{in}/(R_1+R_2)$:
+> In general, since $I = V_{in}/(R_1+R_2)$:
 > $$V_2 = V_{in}\,\frac{R_2}{R_1+R_2}$$
 
 followed in the same turn by the check (`role: "check"`), whose `prompt` is only:
@@ -89,7 +89,7 @@ followed in the same turn by the check (`role: "check"`), whose `prompt` is only
 The check uses the idea in a new direction (solve for $R_1$, not $V_2$), so reciting the formula isn't enough.
 
 **Turn 3, if the learner answers "$R_1 = 4\,\text{k}\Omega$" with the reasoning "12/3 = 4":** that's a miss, and their thinking shows they divided the voltages instead of using the ratio.
-> $R_1 = 3\,\text{k}\Omega$. Your 12/3 compares the *total* voltage with $V_2$, but the ratio that matters is $V_1 : V_2$. $R_1$ takes the remaining 9 V, which is three times $V_2$, so it is three times $R_2$.
+> $R_1 = 3\,\text{k}\Omega$. Your 12/3 divides the *total* voltage by $V_2$. The ratio that sets the resistances is $V_1 : V_2$. $R_1$ takes the remaining 9 V, which is three times $V_2$. So $R_1$ is three times $R_2$.
 
 Then ask one fresh check before moving on, e.g. a 5 V supply with 2 V across $R_1 = 4\,\text{k}\Omega$.
 
