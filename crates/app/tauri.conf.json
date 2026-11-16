@@ -30,6 +30,14 @@
       "icons/128x128.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["libssl3", "libdbus-1-3"]
+      },
+      "rpm": {
+        "depends": ["libssl.so.3()(64bit)", "libdbus-1.so.3()(64bit)"]
+      }
+    }
   }
 }

@@ -14,11 +14,13 @@
   makeDesktopItem,
   openssl,
   zlib,
+  dbus,
   gtk3,
   webkitgtk_4_1,
   libsoup_3,
   librsvg,
   glib-networking,
+  xdg-utils,
 }:
 let
   desktop = import ./desktop-item.nix { inherit makeDesktopItem; };
@@ -58,6 +60,8 @@ rustPlatform.buildRustPackage {
   buildInputs = [
     openssl
     zlib
+    # Tauri's windowing crate (tao) links libdbus-1.
+    dbus
     gtk3
     webkitgtk_4_1
     libsoup_3
@@ -68,6 +72,11 @@ rustPlatform.buildRustPackage {
 
   desktopItems = [ desktop.desktopItem ];
   postInstall = desktop.installIcon;
+  # Links and sign-in pages open through xdg-open (tauri-plugin-opener): the
+  # user's own when there is one, this one otherwise.
+  preFixup = ''
+    gappsWrapperArgs+=(--suffix PATH : ${lib.makeBinPath [ xdg-utils ]})
+  '';
 
   meta = {
     description = "A tutor that measures, plans, teaches and tracks what you can do";

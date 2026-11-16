@@ -21,6 +21,7 @@
   webkitgtk_4_1,
   libsoup_3,
   glib-networking,
+  xdg-utils,
 }:
 let
   desktop = import ./desktop-item.nix { inherit makeDesktopItem; };
@@ -54,6 +55,11 @@ stdenv.mkDerivation {
   ];
 
   desktopItems = [ desktop.desktopItem ];
+  # Links and sign-in pages open through xdg-open (tauri-plugin-opener): the
+  # user's own when there is one, this one otherwise.
+  preFixup = ''
+    gappsWrapperArgs+=(--suffix PATH : ${lib.makeBinPath [ xdg-utils ]})
+  '';
 
   installPhase = ''
     runHook preInstall

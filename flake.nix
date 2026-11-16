@@ -83,6 +83,10 @@
           # Libraries Tauri v2 links on Linux (WebKitGTK 4.1 + libsoup 3).
           libs = with pkgs; [
             openssl
+            # libgit2-sys links it; without it the crate compiles its own copy.
+            zlib
+            # Tauri's windowing crate (tao) links libdbus-1.
+            dbus
             gtk3
             webkitgtk_4_1
             libsoup_3
@@ -109,6 +113,10 @@
             export GSETTINGS_SCHEMA_DIR="${pkgs.lib.concatStringsSep ":" (map (d: "${d}/glib-2.0/schemas") schemaDirs)}"
             # Prepend the same dirs for child processes; keep the inherited value.
             export XDG_DATA_DIRS="${pkgs.lib.concatStringsSep ":" schemaDirs}''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+            # TLS for WebKit's own network stack (pictures over https): GIO finds
+            # glib-networking only through this, and the session's own value, where
+            # there is one, is for the system's GLib.
+            export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
           '';
 
           common = {
