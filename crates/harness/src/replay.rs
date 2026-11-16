@@ -763,20 +763,45 @@ pub(crate) fn after_cut(ops: &[Op]) -> (Option<&str>, &[Op]) {
 /// Provider messages for the conversation (tutor; also the planner's context).
 #[cfg(test)]
 pub(crate) fn conversation(ops: &[Op]) -> Vec<Message> {
-    conversation_with(ops, None, true, true)
+    conversation_with(ops, None, true, true, &[])
 }
 
 /// As [`conversation`], resolving image attachments from `repo` and dropping
 /// them when the model is known to lack vision. `file_tools` says
-/// whether the agent can read attached files.
+/// whether the agent can read attached files. `finished` is the sections
+/// that are done: a picture the learner sent during one of them (an attached
+/// image, a drawing with an answer) was read when it mattered, and would be
+/// paid for again in every later request, so it replays as a line that says
+/// it was there. Pictures from before the first section, and from a section
+/// still open, are sent.
 pub(crate) fn conversation_with(
     ops: &[Op],
     repo: Option<&Path>,
     vision: bool,
     file_tools: bool,
+    finished: &[String],
 ) -> Vec<Message> {
+    use crate::attachments::{NO_VISION, SECTION_DONE};
     let pending = replay_pending(ops);
     let (summary, tail) = after_cut(ops);
+    // The section an op was written in is the one the last phase op named.
+    let mut section = ops[..ops.len() - tail.len()]
+        .iter()
+        .rev()
+        .find_map(|o| match o {
+            Op::Phase(p) => Some(p.section_id.as_deref()),
+            _ => None,
+        })
+        .flatten();
+    let withheld = |section: Option<&str>| {
+        if section.is_some_and(|id| finished.iter().any(|f| f == id)) {
+            Some(SECTION_DONE)
+        } else if vision {
+            None
+        } else {
+            Some(NO_VISION)
+        }
+    };
     let mut b = Builder {
         pending,
         ..Default::default()
@@ -830,13 +855,19 @@ pub(crate) fn conversation_with(
                 let mut lines = Vec::new();
                 for a in &m.attachments {
                     if a.kind == "image" {
-                        match repo.and_then(|r| crate::attachments::image_block(r, a)) {
-                            Some((media_type, data)) if vision => {
+                        let why = withheld(section);
+                        let image = match why {
+                            None => repo.and_then(|r| crate::attachments::image_block(r, a)),
+                            Some(_) => None,
+                        };
+                        match image {
+                            Some((media_type, data)) => {
                                 blocks.push(ContentBlock::Image { media_type, data });
                             }
-                            _ => lines.push(format!(
-                                "[image attached] {} (not sent to this model)",
-                                a.name.as_deref().unwrap_or(&a.path)
+                            None => lines.push(format!(
+                                "[image attached] {} ({})",
+                                a.name.as_deref().unwrap_or(&a.path),
+                                why.unwrap_or(NO_VISION)
                             )),
                         }
                     } else {
@@ -859,10 +890,15 @@ pub(crate) fn conversation_with(
                 Some(r) => {
                     b.result(&t.call_id, r.content.clone(), r.is_error);
                     if t.name == "question_ask" {
-                        b.defer(crate::attachments::sketch_blocks(repo, vision, &r.content));
+                        b.defer(crate::attachments::sketch_blocks(
+                            repo,
+                            withheld(section),
+                            &r.content,
+                        ));
                     }
                 }
             },
+            Op::Phase(p) => section = p.section_id.as_deref(),
             _ => {}
         }
     }
@@ -1148,7 +1184,7 @@ mod tests {
         m.attachments = vec![image];
         let ops = vec![Op::Message(m)];
         let images = |vision: bool| {
-            conversation_with(&ops, Some(&repo), vision, true)[0]
+            conversation_with(&ops, Some(&repo), vision, true, &[])[0]
                 .content
                 .iter()
                 .filter(|b| matches!(b, ContentBlock::Image { .. }))
@@ -1158,7 +1194,7 @@ mod tests {
         assert_eq!(images(false), 0);
         let blind = format!(
             "{:?}",
-            conversation_with(&ops, Some(&repo), false, true)[0].content
+            conversation_with(&ops, Some(&repo), false, true, &[])[0].content
         );
         assert!(
             blind.contains("[image attached] dot.png (not sent to this model)"),
@@ -1185,7 +1221,7 @@ mod tests {
             result("q1", "question_ask", &answer.to_string(), false),
             text(Role::Assistant, "good"),
         ];
-        let with = conversation_with(&ops, Some(&repo), true, true);
+        let with = conversation_with(&ops, Some(&repo), true, true, &[]);
         assert_eq!(with.len(), 5, "{with:?}");
         assert!(matches!(
             with[2].content[..],
@@ -1198,7 +1234,7 @@ mod tests {
         ));
         assert_eq!(with[4].role, Role::Assistant);
         // A model that can't see images is told a drawing exists.
-        let blind = conversation_with(&ops, Some(&repo), false, true);
+        let blind = conversation_with(&ops, Some(&repo), false, true, &[]);
         assert!(matches!(
             &blind[3].content[..],
             [ContentBlock::Text { text }] if text.contains("not sent to this model")
@@ -1209,7 +1245,78 @@ mod tests {
             call("q2", "question_ask", serde_json::json!({})),
             result("q2", "question_ask", "{\"answer\":\"x\"}", false),
         ];
-        assert_eq!(conversation_with(&plain, Some(&repo), true, true).len(), 2);
+        assert_eq!(
+            conversation_with(&plain, Some(&repo), true, true, &[]).len(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn pictures_of_a_finished_section_are_named_but_not_sent_again() {
+        let repo = std::env::temp_dir().join(format!("lh-replay-done-{}", ulid::Ulid::new()));
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let staging = repo.join("staging");
+        let stage = |name: Option<&str>| {
+            let image = crate::attachments::store_image(&staging, png, name).unwrap();
+            crate::attachments::commit(&repo, &staging, std::slice::from_ref(&image)).unwrap();
+            image
+        };
+        let attached = |said: &str, name: &str| {
+            let mut m = new_message(Role::User, said.into());
+            m.attachments = vec![stage(Some(name))];
+            Op::Message(m)
+        };
+        let answer = serde_json::json!({
+            "questionId": "q1", "answer": "", "thinking": "", "dontKnow": false,
+            "sketches": [{ "in": "answer", "path": stage(None).path }],
+        });
+        let mut ops = vec![
+            attached("what I am working from", "goal.png"),
+            in_section("s1"),
+            attached("my working", "s1.png"),
+            text(Role::Assistant, "draw it"),
+            call("q1", "question_ask", serde_json::json!({})),
+            result("q1", "question_ask", &answer.to_string(), false),
+            in_section("s2"),
+            attached("the next one", "s2.png"),
+        ];
+        let sent = |ops: &[Op], finished: &[String]| {
+            let all = format!(
+                "{:?}",
+                conversation_with(ops, Some(&repo), true, true, finished)
+            );
+            (all.matches("Image {").count(), all)
+        };
+        // No section is done: every picture is sent.
+        assert_eq!(sent(&ops, &[]).0, 4);
+        // s1 is done: its image and its drawing are lines. The picture from
+        // before the first section and the open section's stay.
+        let s1 = ["s1".to_owned()];
+        let (pictures, all) = sent(&ops, &s1);
+        assert_eq!(pictures, 2, "{all}");
+        assert!(
+            all.contains("[image attached] s1.png (from a finished section, not sent again)"),
+            "{all}"
+        );
+        assert!(
+            all.contains("[sketch drawn with the learner's answer] (from a finished section, not sent again)"),
+            "{all}"
+        );
+        assert!(!all.contains("goal.png (") && !all.contains("s2.png ("), "{all}");
+        // Notes that replace the start of the session, the phase op that
+        // opened s1 included, don't lose which section the rest was in.
+        let covered = &ops[1];
+        ops.push(Op::Compaction(CompactionOp {
+            op_id: op_id(),
+            at: crate::now_iso(),
+            summary: "NOTES".into(),
+            cut_at: covered.at().to_owned(),
+            cut_op_id: covered.op_id().to_owned(),
+        }));
+        let (pictures, all) = sent(&ops, &s1);
+        assert_eq!(pictures, 1, "{all}");
+        assert!(all.contains("s1.png (from a finished section"), "{all}");
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1225,7 +1332,7 @@ mod tests {
         }];
         let ops = vec![Op::Message(m)];
         // An agent without file tools: the path line only.
-        let practice = conversation_with(&ops, None, true, false);
+        let practice = conversation_with(&ops, None, true, false, &[]);
         assert_eq!(
             user_text(&practice[0]),
             "[attached file] /home/me/notes.md, 5 B"

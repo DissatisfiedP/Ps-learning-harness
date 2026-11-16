@@ -639,6 +639,8 @@ impl Harness {
                 Some(&self.repo),
                 self.role_vision(ModelRole::Tutor) != Some(false),
                 true,
+                // Practice has no sections: every picture stays.
+                &[],
             );
             ensure_user_last(&mut messages);
             let window = self.context_window(ModelRole::Tutor);

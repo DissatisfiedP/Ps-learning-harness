@@ -415,10 +415,20 @@ pub(crate) fn sketches_json(sketches: &[Sketch]) -> Value {
     )
 }
 
+/// Why a picture the learner sent is a line of text in a request and not
+/// the picture: the model can't see images (or the file is gone), or the
+/// section it was sent in is done.
+pub(crate) const NO_VISION: &str = "not sent to this model";
+pub(crate) const SECTION_DONE: &str = "from a finished section, not sent again";
+
 /// What the model gets after a stored answer that carried drawings: one
-/// label and the image per drawing, or a line saying it wasn't sent (no
-/// vision, or the file is gone). Empty for any other tool result.
-pub(crate) fn sketch_blocks(repo: Option<&Path>, vision: bool, content: &str) -> Vec<ContentBlock> {
+/// label and the image per drawing, or a line saying why it isn't there
+/// (`withheld`, or the file is gone). Empty for any other tool result.
+pub(crate) fn sketch_blocks(
+    repo: Option<&Path>,
+    withheld: Option<&str>,
+    content: &str,
+) -> Vec<ContentBlock> {
     if !content.contains("\"sketches\"") {
         return Vec::new();
     }
@@ -444,15 +454,20 @@ pub(crate) fn sketch_blocks(repo: Option<&Path>, vision: bool, content: &str) ->
             bytes: None,
             name: None,
         };
-        match repo.and_then(|r| image_block(r, &a)) {
-            Some((media_type, data)) if vision => {
+        let image = match withheld {
+            None => repo.and_then(|r| image_block(r, &a)),
+            Some(_) => None,
+        };
+        match image {
+            Some((media_type, data)) => {
                 out.push(ContentBlock::text(format!(
                     "[sketch the learner drew with their {on}]"
                 )));
                 out.push(ContentBlock::Image { media_type, data });
             }
-            _ => out.push(ContentBlock::text(format!(
-                "[sketch drawn with the learner's {on}] (not sent to this model)"
+            None => out.push(ContentBlock::text(format!(
+                "[sketch drawn with the learner's {on}] ({})",
+                withheld.unwrap_or(NO_VISION)
             ))),
         }
     }

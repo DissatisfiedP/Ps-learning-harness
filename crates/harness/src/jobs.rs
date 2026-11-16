@@ -772,6 +772,7 @@ impl Harness {
             Some(&self.repo),
             self.role_vision(ModelRole::Planner) != Some(false),
             true,
+            &state.completed_sections,
         );
         messages.push(Message::text(Role::User, request.to_owned()));
         let cache_key = format!("{sid}-planner");

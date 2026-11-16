@@ -8,6 +8,7 @@ Every answer the learner gives can carry three signals besides the answer itself
 - Dictated text contains recognition errors. A garbled word is a transcription slip, not a conceptual one.
 - Teaching checks may also carry a *while-reading* field: what the learner thought while reading your explanation. Keep it separate from their reasoning on the question.
 - An answer may carry a *sketch*: a drawing from the learner's scratch pad. The answer's `sketches` list says where each belongs (`reasoning` or `answer`), and the picture follows the answer as an image. A sketch in `reasoning` is thinking on paper; a sketch in `answer` is the answer itself. A rough pen drawing is not a formatting failure: read the idea, not the neatness.
+- A picture the learner sent (a sketch, an attached image) is shown to you until its section is done. After that a line marked `from a finished section, not sent again` stands where it was. What you concluded from it is in your own replies; if you need the picture itself again, ask the learner to send it.
 
 **Confidence** (0–100, the learner's probability that their answer is right). Read it against the verdict:
 

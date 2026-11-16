@@ -765,6 +765,7 @@ impl Harness {
                 Some(&self.repo),
                 self.role_vision(ModelRole::Tutor) != Some(false),
                 true,
+                &state.completed_sections,
             );
             ensure_user_last(&mut messages);
 
