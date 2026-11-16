@@ -17,8 +17,29 @@
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+
+      # The release CI writes after each GitHub release: where the prebuilt
+      # Linux binary is and its hash. `null` until the first such release.
+      binRelease = nixpkgs.lib.importJSON ./nix/bin.json;
     in
     {
+      # `default` is the prebuilt release binary where there is one (x86_64,
+      # a ~10 MB download, nothing compiled), else the source build.
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          source = pkgs.callPackage ./nix/package.nix { };
+          bin = pkgs.callPackage ./nix/package-bin.nix { release = binRelease; };
+          hasBin = binRelease != null && system == "x86_64-linux";
+        in
+        {
+          inherit source;
+          default = if hasBin then bin else source;
+        }
+        // nixpkgs.lib.optionalAttrs hasBin { inherit bin; }
+      );
+
       devShells = forAllSystems (
         system:
         let

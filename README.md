@@ -71,6 +71,22 @@ scripts/ui-check/run.sh    # the UI in headless Chromium
 Data lives in `~/.local/share/com.pslearningharness.app/repo` (override with
 `$LEARNING_HARNESS_REPO`), settings in `~/.config/com.pslearningharness.app`.
 
+### On NixOS
+
+```nix
+# flake.nix
+inputs.ps-learning-harness.url = "github:DissatisfiedP/Ps-learning-harness";
+
+# configuration
+environment.systemPackages = [ inputs.ps-learning-harness.packages.${pkgs.system}.default ];
+```
+
+On x86_64 `default` is the release's prebuilt binary linked against your nixpkgs: a ~10 MB
+download, nothing compiled, and it works with `inputs.nixpkgs.follows`. `.#source` (and
+`default` on aarch64, or before the first release with a Linux binary) builds only the app from
+source: ~100 MB of crate sources, ~1.7 GB of temporary build directory, ~2.5 GB of RAM. Both
+need WebKitGTK 4.1 (~840 MB with its dependencies, from cache.nixos.org).
+
 ## Edge cases
 
 - Keys and sign-ins go to the OS secure store. On a Linux desktop without a Secret Service they
@@ -87,14 +103,15 @@ Data lives in `~/.local/share/com.pslearningharness.app/repo` (override with
   only be imported on desktop.
 - The macOS build is not notarized: run
   `xattr -dr com.apple.quarantine "/Applications/P's Learning Harness.app"` once. The iOS build
-  is unsigned and has to be sideloaded.
+  is unsigned and has to be sideloaded. The Windows installer is unsigned: SmartScreen warns on
+  the first run ("More info" → "Run anyway").
 
 ## Known defects
 
 - It has barely run against a real model. Every agent path is tested with a scripted provider,
   so the quality of the teaching, planning, marking and graph building is unproven.
 - The UI has only been checked in headless Chromium, not in WebKitGTK or on a device.
-- The Android and iOS builds have never run on a device.
+- The Android, iOS and Windows builds have never run on a device.
 - Sync has only run against local test servers. On Android, git does not trust certificates you
   installed yourself.
 - Secure storage is proven on Linux only.

@@ -45,6 +45,10 @@ built, except the items below. What remains is mostly **proof**, not code.
   device. `cargo check -p harness --target aarch64-linux-android` passes (all natives included).
 - **The macOS and iOS bundles are unproven on hardware.** CI builds an ad-hoc-signed Apple Silicon DMG and an
   unsigned device IPA; no IPA has been installed and WKWebView rendering has not been checked.
+- **The Windows installer has never run.** CI builds an unsigned x64 NSIS installer; it has not been installed, and
+  WebView2 rendering, the Credential Manager store and the sandbox/exec plugins are unchecked on Windows. The
+  shipping crates pass `cargo clippy -D warnings` cross-compiled for `x86_64-pc-windows-msvc`, but the test suite
+  does not compile there (tests use `std::os::unix` symlinks and permissions), so no Windows test job exists.
 
 ## 2. Designed, not built
 

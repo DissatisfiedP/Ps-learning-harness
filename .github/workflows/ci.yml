@@ -1,6 +1,6 @@
 # Formatting, clippy, tests and the headless UI checks, then the bundle jobs
 # (Linux AppImage, one signed release Android APK per ABI, a macOS DMG, an
-# unsigned iOS IPA), which upload artifacts only.
+# unsigned Windows installer, an unsigned iOS IPA), which upload artifacts only.
 #
 # No publishing. The only secrets are the Android signing key, read by the
 # android job alone (see its signing step). The check jobs run in the order
@@ -141,6 +141,20 @@ jobs:
         with:
           name: appimage
           path: target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+      # The same binary alone, for the Nix flake's prebuilt package
+      # (nix/package-bin.nix): it links it against nixpkgs' own WebKitGTK, so
+      # a NixOS user downloads ~10 MB and compiles nothing.
+      - name: Pack the bare binary
+        run: |
+          mkdir -p dist
+          tar -C target/release -czf dist/ps-learning-harness-x86_64-linux.tar.gz ps-learning-harness
+          ls -l dist
+      - name: Upload the bare binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-bin
+          path: dist/ps-learning-harness-x86_64-linux.tar.gz
           if-no-files-found: error
 
   android:
@@ -362,6 +376,71 @@ jobs:
         with:
           name: macos-dmg
           path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows installer
+    # x64 only: no ARM64 Windows build.
+    runs-on: windows-latest
+    needs: [rust]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The runner's git checks text out with CRLF. Only *.md is pinned to LF
+      # in .gitattributes, and files the build bundles (the UI, plugin sources,
+      # fixtures) would otherwise differ from every other platform's bytes.
+      - name: Check out with the repository's line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+      - name: Cache the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: cargo-tauri-cli-v2-${{ runner.os }}
+      - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2" --locked
+      # NSIS rather than MSI: it installs per user without admin rights and
+      # needs no WiX. The installer fetches the WebView2 runtime if the machine
+      # lacks it (Windows 11 and current Windows 10 ship it). No code-signing
+      # certificate: SmartScreen warns on the first run ("More info" → "Run
+      # anyway").
+      - name: Build the installer
+        run: cargo tauri build --bundles nsis
+      - name: Check the installer
+        run: |
+          shopt -s nullglob
+          installers=(target/release/bundle/nsis/*-setup.exe)
+          if [ "${#installers[@]}" -ne 1 ]; then
+            echo "::error::expected one NSIS installer, found: ${installers[*]:-none}"
+            exit 1
+          fi
+          size=$(stat -c%s "${installers[0]}")
+          echo "built: ${installers[0]} (${size} bytes)"
+          test "$size" -gt 5000000
+      - name: Smoke-start the app (reported, never fatal)
+        # As for the AppImage: a GUI with no CLI, so "started" = still running
+        # after 25 s. Catches a binary whose DLLs do not resolve.
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath target/release/ps-learning-harness.exe -PassThru
+          Start-Sleep -Seconds 25
+          if ($p.HasExited) { "app exited early with code $($p.ExitCode)" } else { "app still running after 25 s, i.e. it started"; Stop-Process -Id $p.Id -Force }
+          exit 0
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis
+          path: target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
 
   ios:
