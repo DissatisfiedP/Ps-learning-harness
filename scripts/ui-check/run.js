@@ -1953,6 +1953,33 @@ async function pad() {
   await page.touch('touchEnd', []);
   await page.evaluate(`localStorage.removeItem('lh.pen')`);
   expect(await zoomLabel() === '283%', `a pinch did not zoom about the fingers: ${await zoomLabel()}`);
+  // The fingers on the board are the pad's alone: WebKitGTK scrolls for every touch the page has not cancelled
+  // (wheel events, and the fling's speed as one more when the finger lifts), which moved the board a second time.
+  const taken = await page.evaluate(`['touchstart', 'touchmove'].map((type) => { const e = Object.assign(new Event(type, { bubbles: true, cancelable: true }), { touches: [] });
+    document.getElementById('pad-canvas').dispatchEvent(e); return e.defaultPrevented; })`);
+  expect(taken.every(Boolean), `a touch on the board was left to the engine: ${taken}`);
+  // A touchpad pinch on Linux comes from the app shell: it zooms about the pointer and the board follows the fingers.
+  const viewOf = `(async () => { await new Promise((r) => setTimeout(r, 500)); return JSON.parse(localStorage.getItem(Object.keys(localStorage).find((k) => k.startsWith('lh.pad.')))).view; })()`;
+  const shellPinch = (detail) => `window.dispatchEvent(new CustomEvent('app-pinch', { detail: ${JSON.stringify(detail)} }))`;
+  const [ox, oy] = await page.evaluate(`(() => { const b = document.getElementById('pad-canvas').getBoundingClientRect(); return [b.left, b.top]; })()`);
+  const v0 = await page.evaluate(viewOf);
+  await page.evaluate(shellPinch({ phase: 'begin', scale: 1, x: px, y: py, dx: 0, dy: 0 }));
+  await page.evaluate(shellPinch({ phase: 'update', scale: 0.8, x: px, y: py, dx: 10, dy: -5 }));
+  await page.evaluate(shellPinch({ phase: 'update', scale: 0.5, x: px, y: py, dx: 20, dy: -15 }));
+  await page.evaluate(shellPinch({ phase: 'end', scale: 0.5, x: px, y: py, dx: 0, dy: 0 }));
+  const v1 = await page.evaluate(viewOf);
+  // The board point under the pointer at the start is under the fingers' centre, 30 px right and 20 px up, at the end.
+  const under = [v0.x + (px - ox) / v0.z, v0.y + (py - oy) / v0.z];
+  const now = [v1.x + (px - ox + 30) / v1.z, v1.y + (py - oy - 20) / v1.z];
+  expect(await zoomLabel() === '141%' && Math.abs(now[0] - under[0]) < 0.01 && Math.abs(now[1] - under[1]) < 0.01,
+    `a touchpad pinch from the shell: ${await zoomLabel()}, ${JSON.stringify({ v0, v1, under, now })}`);
+  await page.evaluate(shellPinch({ phase: 'begin', scale: 1, x: 5, y: 5, dx: 0, dy: 0 }));
+  await page.evaluate(shellPinch({ phase: 'update', scale: 3, x: 5, y: 5, dx: 0, dy: 0 }));
+  await page.evaluate(shellPinch({ phase: 'end', scale: 3, x: 5, y: 5, dx: 0, dy: 0 }));
+  expect(await zoomLabel() === '141%', `a pinch begun off the board zoomed it: ${await zoomLabel()}`);
+  await page.evaluate(click('pad-zoom-in'));
+  await page.evaluate(click('pad-zoom-in'));
+  expect(await zoomLabel() === '283%', `zooming back in: ${await zoomLabel()}`);
   await page.evaluate(click('pad-zoom-fit'));
   const fitted = await page.evaluate(PIXELS);
   expect(await zoomLabel() !== '141%' && fitted > restored, `fitting the drawing: ${await zoomLabel()}, ${fitted} vs ${restored} pixels`);
@@ -2149,6 +2176,21 @@ async function touchCase() {
   const during = await page.evaluate(scaleOf);
   await page.touch('touchEnd', []);
   expect(during > before * 1.5 && (await page.evaluate(`document.querySelector('#plan-panel .plan-stage').dataset.dragging`)) === undefined, `a pinch zooms the diagram (${before} → ${during})`);
+  // One finger: its touch stays the engine's while it may be a tap (the engine makes the click from it), and is the
+  // stage's once it drags or a second finger lands. WebKitGTK scrolls for a touch the page has not cancelled, and
+  // that scroll is a wheel, which zooms here: a wheel while the fingers move the stage changes nothing.
+  await page.evaluate(`(() => { window.__touches = []; for (const t of ['touchstart', 'touchmove'])
+    document.addEventListener(t, (e) => __touches.push(t + e.touches?.length + (e.defaultPrevented ? '!' : '')), { passive: true }); })()`);
+  await page.touch('touchStart', [[cx, cy]]);
+  await page.touch('touchMove', [[cx + 30, cy + 10]]);
+  await page.touch('touchMove', [[cx + 60, cy + 20]]);
+  const dragged = await page.evaluate(scaleOf);
+  await page.evaluate(`document.querySelector('#plan-panel .plan-stage').dispatchEvent(new WheelEvent('wheel', { deltaY: -400, cancelable: true, bubbles: true }))`);
+  const echoed = await page.evaluate(scaleOf);
+  await page.touch('touchStart', [[cx + 60, cy + 20, 0], [cx + 160, cy + 20, 1]]);
+  await page.touch('touchEnd', []);
+  const touches = await page.evaluate(`__touches.join(' ')`);
+  expect(/^touchstart1 (touchmove1 )?touchmove1! .*touchstart2!$/.test(touches) && echoed === dragged, `the stage's fingers: ${touches}; a wheel during the drag: ${dragged} → ${echoed}`);
   // Ctrl+wheel (a touchpad pinch) is the diagram's over it, and nobody's elsewhere.
   const wheel = (target) => `(() => { const e = new WheelEvent('wheel', { ctrlKey: true, deltaY: -10, cancelable: true, bubbles: true }); ${target}.dispatchEvent(e); return e.defaultPrevented; })()`;
   expect(await page.evaluate(wheel(`document.querySelector('#plan-panel .plan-stage')`)) && await page.evaluate(wheel('document.body')), 'ctrl+wheel was left to the page');
@@ -2177,6 +2219,53 @@ async function touchCase() {
   expect(cardText.title && !/[$\\]/.test(cardText.shown), `card math: ${JSON.stringify(cardText)}`);
   await until('the origin quote typeset', () => page.evaluate(`Boolean(document.querySelector('#map-page .map-card-origin-quote .katex'))`));
   await page.shot('map-math');
+
+  // Fingers on the Map. The canvas takes every touch from the engine: WebKitGTK scrolls for one the page has not
+  // cancelled, and a scroll over the Map is a zoom, so a one-finger pan zoomed too and a lift flung the zoom.
+  const mapCanvas = `document.querySelector('#map-page canvas')`;
+  expect(await page.evaluate(`(() => { const e = Object.assign(new Event('touchstart', { bubbles: true, cancelable: true }), { touches: [] }); ${mapCanvas}.dispatchEvent(e); return e.defaultPrevented; })()`),
+    'a touch on the Map was left to the engine');
+  // The card sits beside the focused idea: where it is says where the camera is.
+  const cardAt = `(async () => { await new Promise((r) => setTimeout(r, 150)); const c = document.querySelector('#map-page .map-card'); const r = c.getBoundingClientRect();
+    return c.hidden ? null : [Math.round(r.left), Math.round(r.top)]; })()`;
+  // Where the fingers go: a row of the canvas with nothing over it, and a corner of it for the taps.
+  const spots = await page.evaluate(`(() => { const c = ${mapCanvas}; const r = c.getBoundingClientRect(); const on = ([x, y]) => document.elementFromPoint(x, y) === c;
+    let row = null;
+    for (let y = r.bottom - 60; y > r.top + 60 && !row; y -= 20) for (let x = r.left + 60; x < r.right - 260 && !row; x += 20)
+      if ([[x - 20, y], [x + 20, y], [x + 60, y + 30], [x + 200, y]].every(on)) row = [x, y];
+    const corner = [[r.right - 30, r.bottom - 30], [r.left + 30, r.bottom - 30], [r.right - 30, r.top + 30]].find(on);
+    return row && corner ? [...row, corner] : 'over the corner: ' + document.elementFromPoint(r.right - 30, r.bottom - 30)?.className + ', a row: ' + row; })()`);
+  expect(Array.isArray(spots), `something covers the Map's canvas where the fingers go (${spots})`);
+  const [mx, my, corner] = spots;
+  const c0 = await page.evaluate(cardAt);
+  // CDP lifts every finger at once or none: one finger's lift is told to the canvas as that pointer's pointerup.
+  await page.evaluate(`(() => { window.__down = []; ${mapCanvas}.addEventListener('pointerdown', (e) => __down.push(e.pointerId)); })()`);
+  const lift = (i) => `${mapCanvas}.dispatchEvent(new PointerEvent('pointerup', { pointerId: __down.at(${i}), pointerType: 'touch', bubbles: true }))`;
+  // Two fingers down, one lifts: the one left behind pans from where it is.
+  await page.touch('touchStart', [[mx - 20, my], [mx + 20, my]]);
+  await page.evaluate(lift(-2));
+  await page.touch('touchMove', [[mx - 20, my], [mx + 40, my + 15]]);
+  await page.touch('touchMove', [[mx - 20, my], [mx + 60, my + 30]]);
+  await page.touch('touchEnd', []);
+  const c1 = await page.evaluate(cardAt);
+  expect(c0 && c1 && Math.abs(c1[0] - c0[0] - 40) <= 2 && Math.abs(c1[1] - c0[1] - 30) <= 2, `the finger left after a pinch pans the Map: ${c0} → ${c1}`);
+  // A third finger, then the first lifts: the pinch goes on from the two still down, without a jump.
+  await page.touch('touchStart', [[mx - 20, my], [mx + 20, my]]);
+  await page.touch('touchStart', [[mx - 20, my], [mx + 20, my], [mx + 200, my]]);
+  await page.evaluate(lift(-3));
+  await page.touch('touchMove', [[mx - 20, my], [mx + 24, my], [mx + 200, my]]);
+  await page.touch('touchEnd', []);
+  const c2 = await page.evaluate(cardAt);
+  expect(c2 && Math.hypot(c2[0] - c1[0], c2[1] - c1[1]) < 25, `a third finger made the Map jump: ${c1} → ${c2}`);
+  // One tap on open water does nothing; two frame the map (a finger's taps make no dblclick here).
+  const tap = async ([x, y]) => { await page.touch('touchStart', [[x, y]]); await page.touch('touchEnd', []); };
+  await tap(corner);
+  await sleep(600);
+  const c3 = await page.evaluate(cardAt);
+  await tap(corner);
+  await tap(corner);
+  const c4 = await page.evaluate(cardAt);
+  expect(String(c3) === String(c2) && String(c4) !== String(c3), `one tap, then two, on the Map: ${c2} → ${c3} → ${c4}`);
   const errors = await page.evaluate('window.__errors');
   expect(errors.length === 0, `page errors: ${errors.join(' | ')}`);
   await page.close();

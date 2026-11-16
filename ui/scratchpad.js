@@ -20,6 +20,7 @@
 import { message } from './api.js';
 import { cleanSvg } from './artifacts.js';
 import { penButtons, penPrefs, pointerOf } from './pen.js';
+import { ownTouches } from './zoomguard.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -62,6 +63,8 @@ let ctx = null;
 let dpr = 1;
 /** Pointers moving the view (a finger, a pinch, a middle-button or pen-only mouse drag): id → stage point. */
 const nav = { pts: new Map(), start: null };
+/** A Linux touchpad pinch in progress: the board point under the pointer when it began, where that point is on the stage now, the zoom it began at. */
+let shellPinch = null;
 /** The background figure's own size, from its SVG. */
 let bgSize = null;
 let gestureZ = 1;
@@ -308,7 +311,7 @@ function updateZoom() {
   els.zoomOut.disabled = z <= Z_MIN;
 }
 
-/** Ctrl/⌘+wheel (and a trackpad pinch, which arrives as one) zooms at the pointer; the wheel alone pans. */
+/** Ctrl/⌘+wheel (and a trackpad pinch in Chromium and on Windows, which arrives as one) zooms at the pointer; the wheel alone pans. */
 function onWheel(e) {
   if (!pad?.view) return;
   e.preventDefault();
@@ -342,6 +345,29 @@ function moveNav() {
   const z = pts.length > 1 && s.d > 0 ? clampZ((s.z * spreadOf(pts)) / s.d) : s.z;
   const [mx, my] = centreOf(pts);
   setView(s.world[0] - mx / z, s.world[1] - my / z, z);
+}
+
+/**
+ * A touchpad pinch on Linux, from the app shell as `app-pinch` window events
+ * (crates/app/src/pinch.rs): WebKitGTK never shows the page one. It zooms
+ * about the pointer and moves the board with the fingers.
+ */
+function onShellPinch(e) {
+  const { phase, scale, x, y, dx, dy } = e.detail ?? {};
+  if (phase === 'begin') {
+    shellPinch = null;
+    if (!isOpen || !pad?.view || active || nav.pts.size) return;
+    if (document.elementFromPoint(x, y) !== els.canvas) return;
+    const at = stagePoint({ clientX: x, clientY: y });
+    shellPinch = { world: toWorld(at), at, z: pad.view.z };
+  } else if (phase === 'update' && shellPinch && scale > 0) {
+    const g = shellPinch;
+    g.at = [g.at[0] + num(dx), g.at[1] + num(dy)];
+    const z = clampZ(g.z * scale);
+    setView(g.world[0] - g.at[0] / z, g.world[1] - g.at[1] / z, z);
+  } else if (phase === 'end') {
+    shellPinch = null;
+  }
 }
 
 // ---------- erasing and history ----------
@@ -542,6 +568,7 @@ function onUp(e, cancelled) {
 function stopNav() {
   nav.pts.clear();
   nav.start = null;
+  shellPinch = null;
 }
 
 function endGesture(cancelled) {
@@ -1062,6 +1089,9 @@ export function initScratchpad(h) {
   els.canvas.addEventListener('pointercancel', (e) => onUp(e, true));
   els.canvas.addEventListener('lostpointercapture', (e) => onUp(e, false));
   els.canvas.addEventListener('wheel', onWheel, { passive: false });
+  // Every finger on the board is the pad's, a resting palm it ignores included.
+  ownTouches(els.canvas);
+  window.addEventListener('app-pinch', onShellPinch);
   // Safari and WKWebView report a trackpad pinch as gesture events, not as Ctrl+wheel.
   els.canvas.addEventListener('gesturestart', (e) => {
     e.preventDefault();

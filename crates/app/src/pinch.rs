@@ -8,12 +8,16 @@
 //! bubble-phase gestures run and skips them when a handler stops the event,
 //! so this handler takes every `GDK_TOUCHPAD_PINCH` the view receives and
 //! forwards it to the page instead, as `app-pinch` window events
-//! `{ phase: "begin" | "update" | "end", scale, x, y }` (`scale` relative to
-//! the start, `x`/`y` the pinch centre in CSS px). The Map zooms itself when a
-//! pinch begins over it; anywhere else a pinch does nothing, like ctrl+wheel
-//! and the zoom keys (Tauri's `zoomHotkeysEnabled` is off). Touch-screen
-//! pinches are touch events, not touchpad ones: the page already gets them
-//! as pointers and the Map handles two pointers itself.
+//! `{ phase: "begin" | "update" | "end", scale, x, y, dx, dy }` (`scale`
+//! relative to the start, `x`/`y` the pointer in CSS px, `dx`/`dy` how far
+//! the fingers' centre moved since the last event: libinput keeps a gesture a
+//! pinch until the fingers lift, so the scroll that follows a pinch without
+//! lifting arrives here and not as a wheel). The Map, the plan diagram and the
+//! scratch pad zoom and pan themselves when a pinch begins over them;
+//! anywhere else a pinch does nothing, like ctrl+wheel and the zoom keys
+//! (Tauri's `zoomHotkeysEnabled` is off). Touch-screen pinches are touch
+//! events, not touchpad ones: the page gets them as pointers, and those
+//! surfaces take them from WebKit themselves (`ownTouches`, ui/zoomguard.js).
 
 use gtk::gdk;
 use gtk::glib::Propagation;
@@ -44,16 +48,18 @@ fn install<V: IsA<gtk::Widget>, R: Runtime>(view: &V, window: WebviewWindow<R>) 
             _ => "end", // end or cancel
         };
         let (x, y) = pinch.position();
-        send(&window, phase, pinch.scale(), x, y);
+        let (dx, dy) = pinch.delta();
+        send(&window, phase, pinch.scale(), [x, y, dx, dy]);
         Propagation::Stop
     });
 }
 
-fn send<R: Runtime>(window: &WebviewWindow<R>, phase: &str, scale: f64, x: f64, y: f64) {
-    if !(scale.is_finite() && x.is_finite() && y.is_finite()) {
+fn send<R: Runtime>(window: &WebviewWindow<R>, phase: &str, scale: f64, at: [f64; 4]) {
+    if !(scale.is_finite() && at.iter().all(|v| v.is_finite())) {
         return;
     }
+    let [x, y, dx, dy] = at;
     let _ = window.eval(format!(
-        "window.dispatchEvent(new CustomEvent('app-pinch',{{detail:{{phase:'{phase}',scale:{scale},x:{x},y:{y}}}}}))"
+        "window.dispatchEvent(new CustomEvent('app-pinch',{{detail:{{phase:'{phase}',scale:{scale},x:{x},y:{y},dx:{dx},dy:{dy}}}}}))"
     ));
 }

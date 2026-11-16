@@ -363,7 +363,7 @@ See §8 for where these may be used.
 │        │  │ Your reasoning (optional) [____________]       │  │  │
 │        │  │ Your answer [__________________________]       │  │  │
 │        │  │ How sure are you?  ○Guessing ○Unsure ○Even …   │  │  │
-│        │  │ [Submit]  I don't know — show me               │  │  │
+│        │  │ [Submit]  I don't know                         │  │  │
 │        │  └────────────────────────────────────────────────┘  │  │
 │        └──────────────────────────────────────────────────────┘  │
 │        ┌──────────── desk (column-aligned) ───────────────────┐  │
@@ -658,7 +658,7 @@ padding `--s5`; `--s4` on phone). It is a `<section aria-labelledby>`.
  How sure are you?                              ← fieldset legend
  ( ) Guessing  ( ) Unsure  ( ) Even odds  ( ) Fairly sure  ( ) Certain
      ≈10%          ≈30%        ≈50%            ≈70%           ≈90%   ← --fs-meta --ink-3
- [Submit]   I don't know — show me              ← primary + text button; status text after
+ [Submit]   I don't know                        ← primary + text button; status text after
 ```
 
 - **Kicker labels** (sentence case rendered as small caps; never uppercase transforms or accent color): `probe` → "Quick question", `predict` → "Predict first", `check` → "Check your understanding".
@@ -669,7 +669,7 @@ padding `--s5`; `--s4` on phone). It is a `<section aria-labelledby>`.
   - On desktop the five options sit in one row, each option an equal-width segment with `--line` borders and the checked one filled `--select`. On phone they stack vertically in five 44 px rows.
   - Choosing one is **required** unless "I don't know" is used. A missing value shows the status "How sure are you? Pick one." and focuses the first radio.
   - Confidence is now required where today it defaulted to 50 (P5).
-- **"I don't know — show me"** is a text button that **submits immediately** with `{ answer: <typed text or "">, thinking, dontKnow: true }` and no `confidence`. Today it is a toggle plus Submit; one action is fewer steps, and the copy above the field invites a guess first.
+- **"I don't know"** is a text button that **submits immediately** with `{ answer: <typed text or "">, thinking, dontKnow: true }` and no `confidence`. Today it is a toggle plus Submit; one action is fewer steps, and the copy above the field invites a guess first.
 - **Submit:** Ctrl/Cmd+Enter from any field in the block also submits.
   - While sending: controls disabled, status "Sending…".
   - On success: status "Sent".
@@ -1005,7 +1005,7 @@ A pen-first drawing surface for working a question on paper-like space: 2-in-1 l
 - **Toggle.** A pencil icon button in the session head (`#pad-toggle`, `aria-expanded`, `aria-controls="pad"`), shown only for a live (not read-only) learn session with an id. Opening focuses the pad's title; closing returns focus to the toggle.
 - **Layout.** On a screen at least 900 px wide the pad opens **docked**: a fixed column on the right (`--pad-w`, `clamp(360px, 42vw, 680px)`) and the lesson column shrinks to the room left (`.conversation.pad-docked` pads its inline end), so the tutor's text stays readable while the learner draws. A dock/overlay switch (the corner-brackets icon docked, the panel icon in the overlay; `aria-label` "Show over the lesson" / "Dock beside the lesson") flips it to a **full overlay** and back. Below 900 px the pad is always the full overlay and the switch is hidden. Each opening starts docked on a wide screen; the switch is for that visit only. In the overlay Escape closes the pad; docked, it does not.
 - **Drawing.** Strokes are vectors in world units on a board with no edges; the canvas fills the panel and is redrawn from the vectors at the screen's resolution at every zoom, so undo, the eraser, zooming, resizing and the dock/overlay switch never lose detail. The view (top-left corner and zoom, 1 %–10 000 %) is kept with the drawing; when the panel changes size (the dock/overlay switch, a window resize) the corner and zoom stay, so a bigger panel shows more of the board instead of scaling the drawing. The line-width slider and the eraser's reach are sizes on screen: a stroke drawn zoomed in is as fine on the board as it looked. Pen pressure sets the width (`Line width follows pen pressure`, on by default). The eraser removes whole strokes it sweeps over; Clear is undoable (Ctrl/⌘+Z also undoes). The canvas has `touch-action: none` and `role="img"`.
-- **Zoom and pan.** Toolbar `−` / `+` zoom by √2 about the centre; the middle button shows the zoom ("100%") and fits the drawing and its figure into view (an empty pad goes back to 100 %). Ctrl/⌘+wheel and a trackpad pinch (Ctrl+wheel in Chromium/WebKitGTK, `gesture*` events in WKWebView) zoom at the pointer; the wheel alone pans (Shift for sideways). Two fingers pinch and pan about their midpoint; one finger pans when fingers don't draw (*Draw with* not "Pen, mouse and finger"), and a second finger turns a finger's stroke into a pinch. The middle mouse button drags the board, as does the left button when the mouse doesn't draw (*Pen only*). Keys while the pad has focus: Ctrl/⌘ + `=` / `-` / `0`. A pad saved before zooming opens fitted to its drawing, its figure where the old 1200-unit board had it.
+- **Zoom and pan.** Toolbar `−` / `+` zoom by √2 about the centre; the middle button shows the zoom ("100%") and fits the drawing and its figure into view (an empty pad goes back to 100 %). Ctrl/⌘+wheel and a trackpad pinch zoom at the pointer (the pinch is Ctrl+wheel in Chromium, `gesture*` events in WKWebView, and `app-pinch` from the app shell on Linux, where the board also follows the fingers; before 2026-11-16 the pad did not listen for the last and a touchpad pinch did nothing there); the wheel alone pans (Shift for sideways). Two fingers pinch and pan about their midpoint; one finger pans when fingers don't draw (*Draw with* not "Pen, mouse and finger"), and a second finger turns a finger's stroke into a pinch. Every touch on the board is cancelled for the engine (`ownTouches`, §7.6), a palm the pad ignores included. The middle mouse button drags the board, as does the left button when the mouse doesn't draw (*Pen only*). Keys while the pad has focus: Ctrl/⌘ + `=` / `-` / `0`. A pad saved before zooming opens fitted to its drawing, its figure where the old 1200-unit board had it.
 - **Kept per session** in `localStorage["lh.pad.<sessionId>"]` on this device, until Clear: it is not synced and never enters the op log. Closing the pad, leaving the session and reopening it keep the drawing.
 - **Background.** When the tutor made a figure in the session (an artifact with an SVG, e.g. from the circuit plugin) a "Draw on" list offers each figure; picking one puts its sanitised fallback SVG under the strokes, fitted into 90 % of what the learner is looking at and fixed to the board there (it pans and zooms with the strokes), and it is part of the picture that is sent. Plain paper is the default.
 - **Sending.** "Send to tutor" attaches a PNG of the drawing (dark ink on white paper whatever the theme, figure underneath). The picture is the bounding box of the strokes and the figure, whatever is on screen, with a 32 px white margin, scaled so its long side is 1600 px whatever zoom it was drawn at. It goes **with the reasoning** or **with the answer** of the open question (a menu offers only what the open question has: a choice question has no answer field to draw in), otherwise **with the next message** as an attachment chip in the composer. A drawing sent to a question waits in the answer form as a small picture with "Remove sketch" and goes with the answer on Submit (`payload.sketches`); a drawing in the answer field may stand in for typed text. A model that can't see images is refused with a message. The answered card shows the sent drawings under "You" ("Sketch · with your reasoning"). The backend commits the staged picture to `attachments/<yyyy>/` only when the answer is accepted, records `sketches: [{ in, path }]` in the stored answer, and the tutor sees each picture as an image right after the answer, labelled with where it belongs (`crates/harness/prompts/shared/learner-signals.md`; `replay.rs` `Builder::defer`).
@@ -1039,11 +1039,11 @@ Page blocks, in order of the feed:
 
 #### 7.3.3 Stream: answering, hints, giving up
 
-While a problem is open the answer card (`.exercise.pending`) sits after the flow: the heading "Your answer", one line of help, **the five-button confidence scale** (the check question's control, `confidenceField` in `cards.js`, "Pick one when you give an answer."), the shared composer (images and files as in Learn; label "Your working or answer", Enter sends), and a row "Hint (n used)" and "I give up — show me".
+While a problem is open the answer card (`.exercise.pending`) sits after the flow: the heading "Your answer", one line of help, **the five-button confidence scale** (the check question's control, `confidenceField` in `cards.js`, "Pick one when you give an answer."), the shared composer (images and files as in Learn; label "Your working or answer", Enter sends), and a row "Hint (n used)" and "I give up".
 
 - Send → `practice_submit({ text, confidence?, attachments })`. The confidence is whatever is picked and is cleared on send; a working trace or a question may go without one. A refused send (turn running, not ready) gives the text, the attachments and the confidence back with the reason.
 - Hint → `practice_hint`. **The UI shows how many hints were used, never which rung** (the coach picks R0–R5; `hintRung` is not shown). The count reads on the button and in the desk note ("Problem 2 · 1 hint used").
-- "I give up — show me" asks once ("Sure? It counts as missed", reverting after 4 s) and then calls `practice_dismiss`: it concludes as `dismissed` and is retested.
+- "I give up" asks once ("Sure? It counts as missed", reverting after 4 s) and then calls `practice_dismiss`: it concludes as `dismissed` and is retested.
 - After the verdict the same card becomes "Ask about this problem" (composer only; no scale): questions go through `practice_submit` with no confidence.
 
 The **desk** shows one note and at most one primary:
@@ -1489,19 +1489,39 @@ browser. Now:
   `preventDefault`ed and turned into a map zoom about the pointer, with pinch-sized deltas scaled
   up. A plain wheel over the card still scrolls its long statement.
 - **Touch pinch** (two pointers; the stage is `touch-action: none`) zooms about the fingers'
-  midpoint and pans with it. Safari/WKWebView `gesturestart/change/end` are cancelled and zoom
-  the map about the pointer.
+  midpoint and pans with it. A third finger changes nothing; when one of the two lifts, the pinch
+  goes on from the two still down, and a single finger left behind pans from where it is.
+  Safari/WebKit `gesturestart/change/end` are cancelled and zoom the map about the pointer.
+- **The fingers are the surface's, not the engine's (2026-11-16).** WebKitGTK does not read
+  `touch-action`. Every touch the page has not cancelled also feeds WebKit's own GTK gestures,
+  and the page hears those as well as the pointer events: a one-finger drag is `wheel` events
+  (its scroll), lifting the finger one more wheel whose delta is the fling's speed in px/s, a
+  tap a mouse click, and two fingers magnify the window (WebKitWebViewBase.cpp, 2.54.1:
+  `webkitWebViewBaseTouchDragUpdate`, `…TouchSwipe`, `…TouchRelease`, `…ZoomChanged`, all
+  skipped once `pageGrabbedTouch` is set by a cancelled touch event). On the Map a wheel is a
+  zoom, so a one-finger pan zoomed while it panned and jumped when the finger lifted, and a tap
+  on an idea arrived twice; a palm the scratch pad ignored scrolled the board anyway.
+  `ownTouches(el, wants)` in `ui/zoomguard.js` cancels `touchstart` and `touchmove` on the
+  surface: always on the Map's canvas and the pad's board, and on the plan diagram, which holds
+  things to tap and needs the engine's click, only once the finger drags or a second one lands
+  (a wheel while fingers move that stage is ignored, for the frame the engine wins). A cancelled
+  touch makes no `dblclick`, so the Map reads a finger's two taps (400 ms, 30 px) as one.
+  Read from WebKit's source and checked in headless Chromium, which has none of these
+  gestures; not yet tried on a touch screen.
 - **WebKitGTK (Linux).** A touchpad pinch never reaches the page there: WebKit's own
   `GtkGestureZoom` magnifies the page first, and no setting turns it off. The app shell
   (`crates/app/src/pinch.rs`) connects to the webview widget's GTK `event` signal, which GTK 3 runs
   before bubble-phase gestures, stops every `GDK_TOUCHPAD_PINCH`, and forwards it as an
-  `app-pinch` window event `{ phase, scale, x, y }`. The Map zooms when such a pinch begins over
-  the stage; elsewhere a pinch does nothing. **Decision:** this disables WebKit's whole-app pinch
+  `app-pinch` window event `{ phase, scale, x, y, dx, dy }`. The Map, the plan diagram and the
+  scratch pad take such a pinch when it begins over them: the point under the pointer stays
+  under the fingers' centre, which moves by `dx`, `dy` (libinput keeps the gesture a pinch
+  until the fingers lift, so a scroll that follows a pinch without lifting arrives as these and
+  not as a wheel; before 2026-11-16 they were dropped and that scroll did nothing). Elsewhere a
+  pinch does nothing. **Decision:** this disables WebKit's whole-app pinch
   magnification on every page, not only the Map — it was the cause of the bug, the app's text
   scales with the system font size (rem units, WCAG 1.4.4), and a magnified webview has no way
   back but pinching out again. Tauri's `zoomHotkeysEnabled` is left off (its default), so the
-  zoom keys never zoomed the app either. Touch-screen pinches are touches, not touchpad events,
-  and are unaffected.
+  zoom keys never zoomed the app either.
 - **Buttons and keys.** A bottom-right group holds `−` / `+` (a smooth 1.4× step about the
   centre) and, when the newest Learn session's plan has claims on the map, **"Last session"**,
   which frames the clusters holding them. With focus in the stage (the idea list, the buttons),
@@ -1526,7 +1546,7 @@ the dropped titles return. Only open topics have titles; a block wholly beside t
   pulled home. **Drag the background** (or a folded disc) to pan; **wheel or pinch** to zoom
   (see "Zoom belongs to the map"); press "Fit" to frame the whole graph.
 - **Math on the Map (2026-11-15).** Everything on the Map's HTML is typeset with KaTeX: the description card's title and statement, the origin quote, and the "Depends on" / "Leads to" lists (`renderInline` in `ui/markdown.js`: formulas typeset, nothing else interpreted; a `$` stranded by a title that was cut short is dropped). An idea's **label on the canvas** can't be HTML, so a title with a formula is typeset as an HTML label in a layer over the canvas (`.map-math-layer`, `aria-hidden`, `pointer-events: none`): measured once (two lines at most, 150 px wide), placed and decluttered by the same box test as canvas labels, scaled by the zoom, faded with the idea. KaTeX loads when the map first opens; until its fonts are there (and for topic and cluster titles, and the plan diagram's SVG, which stay canvas or SVG text) a formula is drawn as Unicode by `ui/mathtext.js` (`$x^2 + \alpha$` → "x² + α": Greek letters, operators, arrows, super- and subscripts, `\frac` as "a/b", `\sqrt` as "√"; a dollar amount like "$5 and $6" is left alone). The first version used the Unicode text everywhere, including the card, which was wrong for the card.
-- **The plan diagram zooms like the map.** Its stage handles ctrl/⌘+wheel and a Safari gesture, two fingers (zooming about their midpoint, which also pans), and `app-pinch` from the app shell, and cancels each for the page; before this, a pinch over it magnified the whole window. `ui/zoomguard.js` also cancels any pinch, ctrl+wheel or multi-finger touch move anywhere else in the app, and `html, body` carry `touch-action: pan-x pan-y`. WebKitGTK's own touch-screen pinch is the one path that can't be tested here: if it still magnifies the page on a touch screen, the app shell (`crates/app/src/pinch.rs`, which only takes touchpad pinches) is where the fix goes.
+- **The plan diagram zooms like the map.** Its stage handles ctrl/⌘+wheel and a Safari gesture, two fingers (zooming about their midpoint, which also pans), and `app-pinch` from the app shell, and cancels each for the page; before this, a pinch over it magnified the whole window. `ui/zoomguard.js` also cancels any pinch, ctrl+wheel or multi-finger touch move anywhere else in the app, and `html, body` carry `touch-action: pan-x pan-y`. Away from those three surfaces a touch-screen pinch is stopped only by that cancelled touch move, which WebKitGTK hears a moment after its own gesture has begun: if the window still magnifies there, the app shell (`crates/app/src/pinch.rs`, which only takes touchpad pinches) is where the fix goes.
 - **Hover or keyboard focus** lifts the claim, dims everything that is not it or a direct
   neighbour, and shows a **description card**: the claim's title; kind and topic path; the
   proposition's own `statement` as the description; then two hoverable labels, `Depends on (n)` and
@@ -2506,7 +2526,7 @@ Use the mocked backend: serve `ui/` with `index.html` patched to load a `window.
 - [ ] E1 For a pending `question_ask`, the desk shows "Question waiting." and the composer is `hidden`. The block is open even for `role: "check"`.
 - [ ] E2 For a pending question, `document.body.innerText` does not contain the mock `args.answer` (use a distinctive answer string).
 - [ ] E3 No confidence radio is checked initially. Submitting with an answer but no confidence shows "How sure are you? Pick one." and does not call `answer`.
-- [ ] E4 Choosing "Fairly sure" and submitting calls `answer` with `confidence: 70`. "I don't know — show me" calls `answer` with `dontKnow: true` and no `confidence`. Check via `__mock.calls`.
+- [ ] E4 Choosing "Fairly sure" and submitting calls `answer` with `confidence: 70`. "I don't know" calls `answer` with `dontKnow: true` and no `confidence`. Check via `__mock.calls`.
 - [ ] E5 After a `verdict_record`, the block shows "✓ Correct." (no confidence echo, no `note`) and the explanation, in ink color, with no pill.
 - [ ] E6 A choice card with `recommended` shows "(suggested)", and no option is preselected.
 - [ ] E7 Focus lands in the answer field when the question arrives while focus was in the composer, and `scrollTop` did not change.

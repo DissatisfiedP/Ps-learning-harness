@@ -24,6 +24,7 @@
 // laid out with the same layered pass on its own sections.
 
 import { mathText } from './mathtext.js';
+import { ownTouches } from './zoomguard.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -751,6 +752,8 @@ export function attachPanZoom(stage, view, { minScale = null, maxScale = 2.6, pa
     'wheel',
     (e) => {
       e.preventDefault();
+      // Fingers already move the stage: a wheel now is the engine's echo of them.
+      if (pinch || dragging?.moved) return;
       const box = stage.getBoundingClientRect();
       const pinchy = e.ctrlKey || e.metaKey;
       const dy = e.deltaY * (e.deltaMode === 1 ? 16 : 1);
@@ -771,14 +774,18 @@ export function attachPanZoom(stage, view, { minScale = null, maxScale = 2.6, pa
     const [a, b] = [...pointers.values()];
     return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
   };
+  /** Starts the pinch, or starts it again, from where the first two fingers are now. */
+  const anchorPinch = () => {
+    const m = midpoint();
+    pinch = { d: m.d, scale, at: { x: (m.x - x) / scale, y: (m.y - y) / scale } };
+  };
 
   stage.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     pointers.set(e.pointerId, local(e));
     stage.setPointerCapture(e.pointerId);
     if (pointers.size === 2) {
-      const m = midpoint();
-      pinch = { d: m.d, scale, at: { x: (m.x - x) / scale, y: (m.y - y) / scale } };
+      anchorPinch();
       if (dragging) delete stage.dataset.dragging;
       dragging = null;
       return;
@@ -789,7 +796,7 @@ export function attachPanZoom(stage, view, { minScale = null, maxScale = 2.6, pa
   });
   stage.addEventListener('pointermove', (e) => {
     if (pointers.has(e.pointerId)) pointers.set(e.pointerId, local(e));
-    if (pinch && pointers.size === 2) {
+    if (pinch && pointers.size >= 2) {
       // Zoom about the midpoint, which also pans with the fingers.
       const m = midpoint();
       scale = clampScale((pinch.scale * m.d) / pinch.d);
@@ -808,7 +815,12 @@ export function attachPanZoom(stage, view, { minScale = null, maxScale = 2.6, pa
   });
   const endDrag = (e) => {
     pointers.delete(e.pointerId);
-    if (pinch && pointers.size < 2) {
+    if (pinch && pointers.size >= 2) {
+      // The fingers still down may be another pair.
+      anchorPinch();
+      return;
+    }
+    if (pinch) {
       pinch = null;
       // The finger left behind pans from where it is, not from where the drag began.
       const [id, p] = [...pointers].at(0) ?? [];
@@ -826,6 +838,9 @@ export function attachPanZoom(stage, view, { minScale = null, maxScale = 2.6, pa
   };
   stage.addEventListener('pointerup', endDrag);
   stage.addEventListener('pointercancel', endDrag);
+  // The stage holds things to tap, so a finger's touch stays the engine's
+  // (which turns a tap into the click) until it drags or a second one lands.
+  ownTouches(stage, (e) => e.touches.length > 1 || Boolean(dragging?.moved));
 
   let gesture = null;
   stage.addEventListener(
@@ -858,14 +873,25 @@ export function attachPanZoom(stage, view, { minScale = null, maxScale = 2.6, pa
       window.removeEventListener('app-pinch', onNativePinch);
       return;
     }
-    const { phase, scale: s, x: px, y: py } = e.detail ?? {};
+    const { phase, scale: s, x: px, y: py, dx, dy } = e.detail ?? {};
     if (phase === 'begin') {
       native = null;
       if (pointers.size >= 2 || !stage.getClientRects().length || !stage.contains(document.elementFromPoint(px, py))) return;
       const box = stage.getBoundingClientRect();
-      native = { scale, at: { x: px - box.left, y: py - box.top } };
+      const p = { x: px - box.left, y: py - box.top };
+      native = { scale, p, at: { x: (p.x - x) / scale, y: (p.y - y) / scale } };
     } else if (phase === 'update' && native && Number.isFinite(s) && s > 0) {
-      zoomAt((native.scale * s) / scale, native.at.x, native.at.y);
+      // Like two fingers on the screen: the point the pinch began on stays
+      // under the fingers' centre, which moves by `dx`, `dy`.
+      const { p, at } = native;
+      if (Number.isFinite(dx) && Number.isFinite(dy)) {
+        p.x += dx;
+        p.y += dy;
+      }
+      scale = clampScale(native.scale * s);
+      x = p.x - at.x * scale;
+      y = p.y - at.y * scale;
+      apply();
     } else if (phase === 'end') native = null;
   };
   window.addEventListener('app-pinch', onNativePinch);

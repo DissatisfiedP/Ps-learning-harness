@@ -25,6 +25,7 @@ import { calibrationSummary, venueGroups } from './fieldguide.js';
 import { active, createWorld, hit, reheat, settle, tick } from './map-physics.js';
 import { ensureKatex, hasMath, renderInline } from './markdown.js';
 import { mathText } from './mathtext.js';
+import { ownTouches } from './zoomguard.js';
 
 const EMPTY = 'Nothing in the knowledge map yet.';
 
@@ -1809,16 +1810,28 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
+  /** The two fingers a pinch follows: the point between them and how far apart they are. */
+  function fingers() {
+    const [a, b] = [...pointers.values()];
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+  }
+
+  /** Starts the pinch, or starts it again, from where those two fingers are now. */
+  function anchorPinch() {
+    const m = fingers();
+    pinch = { d: m.d, k: cam.k, at: toWorld(m.x, m.y) };
+  }
+
   canvas.addEventListener('pointerdown', (e) => {
     if (!world) return;
     canvas.setPointerCapture(e.pointerId);
     const s = local(e);
     pointers.set(e.pointerId, s);
+    // A third finger changes nothing: the first two keep the pinch.
+    if (pointers.size > 2) return;
     if (pointers.size === 2) {
       // Two fingers: zoom about their midpoint, which also pans with them.
-      const [a, b] = [...pointers.values()];
-      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, k: cam.k, at: toWorld(mid.x, mid.y) };
+      anchorPinch();
       if (drag?.node) drag.node.fx = drag.node.fy = null;
       drag = null;
       camTarget = null;
@@ -1844,10 +1857,9 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     if (!world) return;
     const s = local(e);
     if (pointers.has(e.pointerId)) pointers.set(e.pointerId, s);
-    if (pinch && pointers.size === 2) {
-      const [a, b] = [...pointers.values()];
-      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      cam.k = clamp((pinch.k * Math.hypot(a.x - b.x, a.y - b.y)) / pinch.d, kMin, K_MAX);
+    if (pinch && pointers.size >= 2) {
+      const mid = fingers();
+      cam.k = clamp((pinch.k * mid.d) / pinch.d, kMin, K_MAX);
       // Keep the world point that was under the midpoint under it.
       cam.x = pinch.at.x - (mid.x - W / 2) / cam.k;
       cam.y = pinch.at.y - (mid.y - H / 2) / cam.k;
@@ -1906,9 +1918,17 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   const inBox = (s, b) => b && s.x >= b.x0 && s.x <= b.x1 && s.y >= b.y0 && s.y <= b.y1;
 
   function endPointer(e) {
-    pointers.delete(e.pointerId);
+    // Only for a pointer that went down here and has not ended yet: losing
+    // the capture follows every lift, and must not end another finger's drag.
+    if (!pointers.delete(e.pointerId)) return;
     if (pinch) {
-      if (pointers.size < 2) pinch = null;
+      // The fingers still down may be another pair; one left behind pans from where it is.
+      if (pointers.size >= 2) anchorPinch();
+      else {
+        pinch = null;
+        const [p] = pointers.values();
+        if (p) drag = { pan: true, topic: null, sx: p.x, sy: p.y, cx: cam.x, cy: cam.y, moved: true };
+      }
       return;
     }
     if (!drag) return;
@@ -1947,10 +1967,15 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
         else if (t) jumpTo(t);
       }
     }
+    if (!d.moved && e.type === 'pointerup' && e.pointerType === 'touch') tapped(e, local(e));
     request();
   }
   canvas.addEventListener('pointerup', endPointer);
   canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('lostpointercapture', endPointer);
+  // The fingers on the canvas are the map's: the engine's own scroll for them
+  // would arrive as wheel events and zoom the map under a one-finger pan.
+  ownTouches(canvas);
   canvas.addEventListener('pointerleave', () => {
     if (!drag && hover) hideSoon();
     if (hoverTopic) {
@@ -2010,15 +2035,28 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
   // the map's when it begins over the stage, with nothing on top of it.
   let nativePinch = null;
   window.addEventListener('app-pinch', (e) => {
-    const { phase, scale, x, y } = e.detail ?? {};
+    const { phase, scale, x, y, dx, dy } = e.detail ?? {};
     if (phase === 'begin') {
       nativePinch = null;
       if (!world || !visible() || pointers.size >= 2) return;
       if (!root.contains(document.elementFromPoint(x, y))) return;
       const r = canvas.getBoundingClientRect();
-      nativePinch = { k: cam.k, s: { x: x - r.left, y: y - r.top } };
+      const s = { x: x - r.left, y: y - r.top };
+      camTarget = null;
+      nativePinch = { k: cam.k, s, at: toWorld(s.x, s.y) };
     } else if (phase === 'update' && nativePinch && Number.isFinite(scale) && scale > 0) {
-      zoomAt((nativePinch.k * scale) / cam.k, nativePinch.s.x, nativePinch.s.y);
+      // Like two fingers on the screen: the point the pinch began on stays
+      // under the fingers' centre, which moves by `dx`, `dy`.
+      const { s, at } = nativePinch;
+      if (Number.isFinite(dx) && Number.isFinite(dy)) {
+        s.x += dx;
+        s.y += dy;
+      }
+      cam.k = clamp(nativePinch.k * scale, kMin, K_MAX);
+      cam.x = at.x - (s.x - W / 2) / cam.k;
+      cam.y = at.y - (s.y - H / 2) / cam.k;
+      camTarget = null;
+      request();
     } else if (phase === 'end') nativePinch = null;
   });
 
@@ -2042,9 +2080,8 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
 
   // Double-click a topic (open or folded) to frame it; again to step out to
   // its parent; on open water, or from a root, to frame the whole map.
-  canvas.addEventListener('dblclick', (e) => {
+  function frameAt(s) {
     if (!world) return;
-    const s = local(e);
     const w = toWorld(s.x, s.y);
     if (hit(world, w.x, w.y, 6, live)) return;
     // A title or heading click already acted (select / open); don't also fit.
@@ -2053,7 +2090,19 @@ export function createMap(root, { onChange, onReviewDecided = null, onStartFront
     while (t && framing(t)) t = t.parent;
     if (t) jumpTo(t);
     else fit(false);
-  });
+  }
+  canvas.addEventListener('dblclick', (e) => frameAt(local(e)));
+
+  // A finger's taps make no `dblclick` (its touches are the map's, see
+  // `ownTouches`): two close together in place and time are one.
+  let lastTap = null;
+  function tapped(e, s) {
+    const prev = lastTap;
+    lastTap = { t: e.timeStamp, s };
+    if (!prev || e.timeStamp - prev.t > 400 || Math.hypot(s.x - prev.s.x, s.y - prev.s.y) > 30) return;
+    lastTap = null;
+    frameAt(s);
+  }
   fitButton.addEventListener('click', () => fit(false));
   zoomInButton.addEventListener('click', () => zoomStep(1.4));
   zoomOutButton.addEventListener('click', () => zoomStep(1 / 1.4));
