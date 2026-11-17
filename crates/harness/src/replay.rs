@@ -1303,7 +1303,10 @@ mod tests {
             all.contains("[sketch drawn with the learner's answer] (from a finished section, not sent again)"),
             "{all}"
         );
-        assert!(!all.contains("goal.png (") && !all.contains("s2.png ("), "{all}");
+        assert!(
+            !all.contains("goal.png (") && !all.contains("s2.png ("),
+            "{all}"
+        );
         // Notes that replace the start of the session, the phase op that
         // opened s1 included, don't lose which section the rest was in.
         let covered = &ops[1];

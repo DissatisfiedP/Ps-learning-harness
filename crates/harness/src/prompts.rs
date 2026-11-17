@@ -999,7 +999,8 @@ mod tests {
     #[test]
     fn writing_instructions_compose_for_the_planner_and_the_coach() {
         let c = Composer::new(Path::new("/nonexistent"));
-        let style = Composer::writing_style_value(" Write in French. Never print {{{x}}. ").unwrap();
+        let style =
+            Composer::writing_style_value(" Write in French. Never print {{{x}}. ").unwrap();
         assert_eq!(style, "Write in French. Never print { { {x}}.");
         assert_eq!(Composer::writing_style_value("  \n "), None);
         let mut f = learning_flags();
@@ -1016,7 +1017,9 @@ mod tests {
         pv.set("section.learnerNote", "");
         pv.set("writing_style", style.clone());
         let planner = c.compose_planner(&pv, None, &f).unwrap();
-        let at = planner.find(&style).expect("the planner gets the instructions");
+        let at = planner
+            .find(&style)
+            .expect("the planner gets the instructions");
         assert!(at < planner.find("# Planner").unwrap());
 
         let mut cv = TemplateValues::new();

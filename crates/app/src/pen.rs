@@ -67,9 +67,9 @@ fn install<V: IsA<gtk::Widget>, R: Runtime>(view: &V, window: WebviewWindow<R>) 
     view.connect_event(move |_, event| {
         let pressed = match event.event_type() {
             EventType::MotionNotify => None,
-            EventType::ButtonPress | EventType::DoubleButtonPress | EventType::TripleButtonPress => {
-                Some(true)
-            }
+            EventType::ButtonPress
+            | EventType::DoubleButtonPress
+            | EventType::TripleButtonPress => Some(true),
             EventType::ButtonRelease => Some(false),
             _ => return Propagation::Proceed,
         };
@@ -143,7 +143,13 @@ impl Tracker {
 
 fn send<R: Runtime>(window: &WebviewWindow<R>, pen: Option<Pen>) {
     let detail = match pen {
-        Some(Pen { eraser, eraser_button, barrel, barrel2, pressure }) => {
+        Some(Pen {
+            eraser,
+            eraser_button,
+            barrel,
+            barrel2,
+            pressure,
+        }) => {
             let eraser_button = eraser_button.map_or_else(|| "null".to_owned(), |b| b.to_string());
             let pressure = pressure.map_or_else(|| "null".to_owned(), |p| p.to_string());
             format!(
