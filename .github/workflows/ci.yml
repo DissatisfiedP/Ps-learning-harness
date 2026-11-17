@@ -414,6 +414,11 @@ jobs:
       # lacks it (Windows 11 and current Windows 10 ship it). No code-signing
       # certificate: SmartScreen warns on the first run ("More info" → "Run
       # anyway").
+      # The product name must not contain an apostrophe on Windows: Tauri's
+      # NSIS template embeds it in single-quoted strings (IsShortcutTarget in
+      # utils.nsh), so "P's" aborts makensis with 'macro "NSISCOMCALL" requires
+      # 4 parameter(s), passed 8'. crates/app/tauri.windows.conf.json
+      # overrides productName to "Ps Learning Harness" for this build.
       - name: Build the installer
         run: cargo tauri build --bundles nsis
       - name: Check the installer
